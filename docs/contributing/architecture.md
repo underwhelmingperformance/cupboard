@@ -1322,6 +1322,17 @@ show that the NAR has gone, so the commit checks availability and watches the
 path for demotion until its gate decides. When the check fails, the commit
 fails, the charged row stays, and the client negotiates the path again.
 
+A verification pass can find an upload's generation already charged, for example
+when an earlier pass charged it and stopped before it cleared the upload's row.
+The pass makes the same availability check and watches the path for demotion
+until its gate decides. When the cache serves the generation, the pass applies
+the upload's grace and root decisions to it, queues attestation inheritance for
+it, and the upload that made the charge receives `servable`. When the check
+fails or demotion removes the path, the pass applies no grace, attaches no root
+target, queues no inheritance and, for an exhausted upload, queues no reconcile
+of the path. The upload receives `absent`. That answer keeps a publication
+operation accepted and makes the client negotiate the path again.
+
 Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
 cancel accepted work, but prevents new operations and new transfers. Claims,
 verification requests and the D1 publication fence enforce the recovery

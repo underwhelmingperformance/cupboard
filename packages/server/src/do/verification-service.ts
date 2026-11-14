@@ -16,6 +16,7 @@ import {
 } from '@cupboard/protocol/scalars';
 import {
 	type CommitBlobDeclaration,
+	narInfoAvailabilitySubrequests,
 	type SessionId,
 	type UploadId,
 	uploadIdSchema,
@@ -205,6 +206,12 @@ const settleOverQuotaSubrequests =
 	settleChargeSubrequests +
 	settleReclaimSubrequests;
 
+// If charging reports that the tenant is inactive, or the upload's object is
+// missing, the service reads whether the generation was charged. For a charged
+// generation it then checks that Nix can fetch the path, which can repair the
+// path's narinfo object, and reads the generation's publisher.
+const settleChargedReleaseSubrequests = 1 + narInfoAvailabilitySubrequests + 1;
+
 /**
 The maximum number of D1 and R2 calls needed to process one pending row without
 decoding its NAR.
@@ -216,7 +223,11 @@ export const subrequestsPerPendingSettleRow =
 	settleClassifySubrequests +
 	settlePrepareSubrequests +
 	settleChargeSubrequests +
-	Math.max(settlePublishSubrequests, settleOverQuotaSubrequests);
+	Math.max(
+		settlePublishSubrequests,
+		settleOverQuotaSubrequests,
+		settleChargedReleaseSubrequests
+	);
 
 // Promotion reserves and activates an incarnation through D1, copies the
 // staging bytes through R2, writes the blob row, and confirms the incarnation.
@@ -232,8 +243,8 @@ skips the classification read, because the queue consumer has already
 classified the row. A page of verdicts also requires the same prefetch as a
 page of pending rows.
 
-The maximum includes the case in which charging reports that the tenant
-is over quota.
+The maximum includes the cases in which charging reports that the tenant
+is over quota or inactive.
 */
 export const subrequestsPerRecordedVerdict =
 	subrequestsPerPendingSettleRow -
@@ -490,6 +501,18 @@ type ExpiryOutcome =
 type ExpiryCommit =
 	| { readonly kind: 'uncharged'; readonly read?: ReservationRead }
 	| { readonly kind: 'servable' | 'unservable' };
+
+// What a pass reads about an upload's charged generation before its gate:
+// whether Nix can fetch the generation, and the upload's verdict when it can.
+interface ChargedGeneration {
+	readonly isServed: boolean;
+	readonly verdict: 'servable' | 'absent';
+}
+
+const unservedGeneration: ChargedGeneration = {
+	isServed: false,
+	verdict: 'absent'
+};
 
 function expiryStateKey(state: ExpiryState): string {
 	return JSON.stringify({
@@ -1111,78 +1134,94 @@ export class VerificationService {
 						reserved.generation
 					)
 				: undefined;
-		// The verdict of a charged generation applies while the path's row keeps
-		// the generation, which the gate checks.
-		const chargedVerdict =
-			read?.isCharged === true
-				? await this.publicationVerdict(pending, metadata, read.generation)
-				: 'absent';
 		const failed = {
 			verdict: 'absent' as const,
 			absentPublication: 'fail-publication' as const
 		};
-		const resolution = await this.context.criticalSection(async () => {
-			if (!this.ownsActiveClaim(owner, pending, signal)) {
-				return;
+		const resolution = await this.watchingDemotion(
+			pending,
+			metadata,
+			async (isDemoted) => {
+				// The verdict of a charged generation applies while the path's row
+				// keeps the generation, which the gate checks.
+				const charged =
+					read?.isCharged === true
+						? await this.chargedGeneration(pending, metadata, read.generation)
+						: unservedGeneration;
+				return this.context.criticalSection(async () => {
+					if (!this.ownsActiveClaim(owner, pending, signal)) {
+						return;
+					}
+					const row = this.narInfoRow(pending.cacheId, metadata.storePathHash);
+					if (row?.narHash !== metadata.narHash) {
+						return failed;
+					}
+					// The row changed after the read, so a later pass decides.
+					if (read?.generation !== row.generation) {
+						return;
+					}
+					const result = await this.commitPipeline.releaseReservation({
+						uploadId: pending.id,
+						cache: this.cache(pending.cacheId),
+						path: metadata,
+						generation: row.generation,
+						reason: 'failed-upload',
+						read,
+						isStillSettleable: () =>
+							this.ownsActiveClaim(owner, pending, signal)
+					});
+					if (
+						result === 'stale-read' ||
+						!this.ownsActiveClaim(owner, pending, signal)
+					) {
+						return;
+					}
+					if (result !== 'committed-current') {
+						return failed;
+					}
+					// Nix cannot fetch the charged path. The upload gives up its share
+					// of the reservation, and its retention decisions do not apply.
+					if (!charged.isServed || isDemoted()) {
+						this.uploadState.releaseStartedCommit(pending.id);
+						return {
+							verdict: 'absent' as const,
+							absentPublication: 'keep-publication-accepted' as const
+						};
+					}
+					const grace = parseStoredGraceDecision(pending.graceDecisionJson);
+					const confirmed = confirmGrace(
+						this.context,
+						this.retention,
+						this.cache(pending.cacheId),
+						metadata.storePathHash,
+						row.generation,
+						metadata.narHash,
+						grace
+					);
+					if (!confirmed.matched) {
+						return;
+					}
+					this.commitPipeline.attachRootTarget(
+						this.cache(pending.cacheId),
+						pending.attachRootName,
+						metadata.storePathHash,
+						metadata.storePath,
+						pending.retentionEpoch
+					);
+					await this.inheritAfterCommit(pending, metadata, row.generation);
+					await new ReconcileQueueService(this.context).enqueue(undefined, [
+						{ cacheId: pending.cacheId, storePathHash: metadata.storePathHash }
+					]);
+					// The path is published with this upload's NAR. When another upload
+					// made the charge, the verdict is `absent`, and the operation stays
+					// accepted so that a resend is answered from the published path.
+					return {
+						verdict: charged.verdict,
+						absentPublication: 'keep-publication-accepted' as const
+					};
+				});
 			}
-			const row = this.narInfoRow(pending.cacheId, metadata.storePathHash);
-			if (row?.narHash !== metadata.narHash) {
-				return failed;
-			}
-			// The row changed after the read, so a later pass decides.
-			if (read?.generation !== row.generation) {
-				return;
-			}
-			const result = await this.commitPipeline.releaseReservation({
-				uploadId: pending.id,
-				cache: this.cache(pending.cacheId),
-				path: metadata,
-				generation: row.generation,
-				reason: 'failed-upload',
-				read,
-				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
-			});
-			if (
-				result === 'stale-read' ||
-				!this.ownsActiveClaim(owner, pending, signal)
-			) {
-				return;
-			}
-			if (result !== 'committed-current') {
-				return failed;
-			}
-			const grace = parseStoredGraceDecision(pending.graceDecisionJson);
-			const confirmed = confirmGrace(
-				this.context,
-				this.retention,
-				this.cache(pending.cacheId),
-				metadata.storePathHash,
-				row.generation,
-				metadata.narHash,
-				grace
-			);
-			if (!confirmed.matched) {
-				return;
-			}
-			this.commitPipeline.attachRootTarget(
-				this.cache(pending.cacheId),
-				pending.attachRootName,
-				metadata.storePathHash,
-				metadata.storePath,
-				pending.retentionEpoch
-			);
-			await this.inheritAfterCommit(pending, metadata, row.generation);
-			await new ReconcileQueueService(this.context).enqueue(undefined, [
-				{ cacheId: pending.cacheId, storePathHash: metadata.storePathHash }
-			]);
-			// The path is published with this upload's NAR. When another upload
-			// made the charge, the verdict is `absent`, and the operation stays
-			// accepted so that a resend is answered from the published path.
-			return {
-				verdict: chargedVerdict,
-				absentPublication: 'keep-publication-accepted' as const
-			};
-		});
+		);
 		if (
 			resolution === undefined ||
 			!this.ownsActiveClaim(owner, pending, signal)
@@ -1328,6 +1367,45 @@ export class VerificationService {
 			generation
 		);
 		return status === 'committed' ? 'servable' : 'absent';
+	}
+
+	// Whether Nix can fetch an upload's charged generation, and the verdict for
+	// the upload when it can. Only the upload that made the charge receives
+	// `servable`. Call it inside `watchingDemotion`, and treat the path as not
+	// served when demotion removes it before the gate decides.
+	private async chargedGeneration(
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<ChargedGeneration> {
+		const isServed = await this.commitPipeline.servesGeneration(
+			this.cache(pending.cacheId),
+			metadata,
+			generation
+		);
+		if (!isServed) {
+			return unservedGeneration;
+		}
+
+		return {
+			isServed,
+			verdict: await this.publicationVerdict(pending, metadata, generation)
+		};
+	}
+
+	// Demotion deletes a narinfo object without changing the path's row, so a
+	// gate that compares the row cannot detect it. Watch the path from the check
+	// that the gate relies on until the gate decides.
+	private async watchingDemotion<T>(
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		run: (isDemoted: () => boolean) => Promise<T>
+	): Promise<T> {
+		return this.context.narInfoDemotions.watching(
+			pending.cacheId,
+			[metadata.storePathHash],
+			(demotions) => run(() => demotions.wasDemoted(metadata.storePathHash))
+		);
 	}
 
 	private notifyWaiters(
@@ -2153,48 +2231,71 @@ export class VerificationService {
 				metadata,
 				generation
 			);
-			const reclaim = await this.context.criticalSection(async () => {
-				if (!this.ownsActiveClaim(owner, pending, signal)) {
-					return 'superseded' as const;
+			const { reclaim, served } = await this.watchingDemotion(
+				pending,
+				metadata,
+				async (isDemoted) => {
+					const charged = read.isCharged
+						? await this.chargedGeneration(pending, metadata, generation)
+						: unservedGeneration;
+					return this.context.criticalSection(async () => {
+						if (!this.ownsActiveClaim(owner, pending, signal)) {
+							return {
+								reclaim: 'superseded' as const,
+								served: unservedGeneration
+							};
+						}
+
+						const result = await this.commitPipeline.releaseReservation({
+							uploadId: pending.id,
+							cache: this.cache(pending.cacheId),
+							path: metadata,
+							generation: generation,
+							reason: 'failed-upload',
+							read,
+							isStillSettleable: () =>
+								this.ownsActiveClaim(owner, pending, signal)
+						});
+
+						if (!this.ownsActiveClaim(owner, pending, signal)) {
+							return {
+								reclaim: 'superseded' as const,
+								served: unservedGeneration
+							};
+						}
+						if (result !== 'committed-current') {
+							return { reclaim: result, served: unservedGeneration };
+						}
+						// Nix cannot fetch the charged path. The upload gives up its share
+						// of the reservation, and its retention decisions do not apply.
+						if (!charged.isServed || isDemoted()) {
+							this.uploadState.releaseStartedCommit(pending.id);
+							return { reclaim: result, served: unservedGeneration };
+						}
+
+						// The winning generation must receive this upload's retention
+						// decision and run-root attachment before the waiter is notified.
+						this.commitPipeline.attachRootTarget(
+							this.cache(pending.cacheId),
+							pending.attachRootName,
+							metadata.storePathHash,
+							metadata.storePath,
+							pending.retentionEpoch
+						);
+						confirmGrace(
+							this.context,
+							this.retention,
+							this.cache(pending.cacheId),
+							metadata.storePathHash,
+							generation,
+							metadata.narHash,
+							graceDecision
+						);
+
+						return { reclaim: result, served: charged };
+					});
 				}
-
-				const result = await this.commitPipeline.releaseReservation({
-					uploadId: pending.id,
-					cache: this.cache(pending.cacheId),
-					path: metadata,
-					generation: generation,
-					reason: 'failed-upload',
-					read,
-					isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
-				});
-
-				if (!this.ownsActiveClaim(owner, pending, signal)) {
-					return 'superseded' as const;
-				}
-
-				// The winning generation must receive this upload's retention decision and
-				// run-root attachment before the waiter is notified.
-				if (result === 'committed-current') {
-					this.commitPipeline.attachRootTarget(
-						this.cache(pending.cacheId),
-						pending.attachRootName,
-						metadata.storePathHash,
-						metadata.storePath,
-						pending.retentionEpoch
-					);
-					confirmGrace(
-						this.context,
-						this.retention,
-						this.cache(pending.cacheId),
-						metadata.storePathHash,
-						generation,
-						metadata.narHash,
-						graceDecision
-					);
-				}
-
-				return result;
-			});
+			);
 
 			// A later pass decides with a new read.
 			if (reclaim === 'stale-read') {
@@ -2203,18 +2304,15 @@ export class VerificationService {
 
 			if (reclaim === 'committed-current') {
 				signal?.throwIfAborted();
-				await this.inheritAfterCommit(pending, metadata, generation);
-				const verdict = await this.publicationVerdict(
-					pending,
-					metadata,
-					generation
-				);
+				if (served.isServed) {
+					await this.inheritAfterCommit(pending, metadata, generation);
+				}
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'ignored';
 				}
 				const cleared = await this.uploadState.clearPendingUpload(
 					pending.id,
-					{ logger, outcome: verdict },
+					{ logger, outcome: served.verdict },
 					owner
 				);
 
@@ -2222,7 +2320,7 @@ export class VerificationService {
 					return 'ignored';
 				}
 
-				this.notifyWaiters(cleared, verdict);
+				this.notifyWaiters(cleared, served.verdict);
 
 				return 'applied';
 			}
@@ -2682,13 +2780,8 @@ export class VerificationService {
 		if (!read.isCharged) {
 			return { kind: 'uncharged', read };
 		}
-		const versions = await this.narInfoObjects.servableNarInfoVersions(cache, [
-			metadata.storePathHash
-		]);
-		const served = versions.get(metadata.storePathHash);
 		if (
-			served?.generation === row.generation &&
-			served.narHash === row.narHash
+			await this.commitPipeline.servesGeneration(cache, row, row.generation)
 		) {
 			return { kind: 'servable' };
 		}
@@ -5373,51 +5466,78 @@ export class VerificationService {
 			// the identity proof: the input gate reopens the moment that
 			// callback completes, so a confirmation outside it could race a
 			// delete or recommit queued behind the gate.
-			const reclaim = await this.context.criticalSection(async () => {
-				if (!this.ownsActiveClaim(owner, pending, signal)) {
-					return 'superseded' as const;
+			const { reclaim, served } = await this.watchingDemotion(
+				pending,
+				metadata,
+				async (isDemoted) => {
+					const charged = read.isCharged
+						? await this.chargedGeneration(
+								pending,
+								metadata,
+								reserved.generation
+							)
+						: unservedGeneration;
+					return this.context.criticalSection(async () => {
+						if (!this.ownsActiveClaim(owner, pending, signal)) {
+							return {
+								reclaim: 'superseded' as const,
+								served: unservedGeneration
+							};
+						}
+
+						const result = await this.commitPipeline.releaseReservation({
+							uploadId: pending.id,
+							cache: this.cache(pending.cacheId),
+							path: metadata,
+							generation: reserved.generation,
+							reason: 'failed-upload',
+							read,
+							isStillSettleable: () =>
+								this.ownsActiveClaim(owner, pending, signal)
+						});
+
+						if (!this.ownsActiveClaim(owner, pending, signal)) {
+							return {
+								reclaim: 'superseded' as const,
+								served: unservedGeneration
+							};
+						}
+						if (result !== 'committed-current') {
+							return { reclaim: result, served: unservedGeneration };
+						}
+						// Nix cannot fetch the charged path. The upload gives up its share
+						// of the reservation, and its retention decisions do not apply.
+						if (!charged.isServed || isDemoted()) {
+							this.uploadState.releaseStartedCommit(pending.id);
+							return { reclaim: result, served: unservedGeneration };
+						}
+
+						// This upload lost the race, so its own captured decision
+						// never ran; apply it against the winning generation before
+						// notifying, or a positive policy would grant nothing. The
+						// push's run root retains the path for the same reason,
+						// under the same proof.
+						this.commitPipeline.attachRootTarget(
+							this.cache(pending.cacheId),
+							pending.attachRootName,
+							metadata.storePathHash,
+							metadata.storePath,
+							pending.retentionEpoch
+						);
+						confirmGrace(
+							this.context,
+							this.retention,
+							this.cache(pending.cacheId),
+							metadata.storePathHash,
+							reserved.generation,
+							metadata.narHash,
+							parseStoredGraceDecision(pending.graceDecisionJson)
+						);
+
+						return { reclaim: result, served: charged };
+					});
 				}
-
-				const result = await this.commitPipeline.releaseReservation({
-					uploadId: pending.id,
-					cache: this.cache(pending.cacheId),
-					path: metadata,
-					generation: reserved.generation,
-					reason: 'failed-upload',
-					read,
-					isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
-				});
-
-				if (!this.ownsActiveClaim(owner, pending, signal)) {
-					return 'superseded' as const;
-				}
-
-				// This upload lost the race, so its own captured decision
-				// never ran; apply it against the winning generation before
-				// notifying, or a positive policy would grant nothing. The
-				// push's run root retains the path for the same reason,
-				// under the same proof.
-				if (result === 'committed-current') {
-					this.commitPipeline.attachRootTarget(
-						this.cache(pending.cacheId),
-						pending.attachRootName,
-						metadata.storePathHash,
-						metadata.storePath,
-						pending.retentionEpoch
-					);
-					confirmGrace(
-						this.context,
-						this.retention,
-						this.cache(pending.cacheId),
-						metadata.storePathHash,
-						reserved.generation,
-						metadata.narHash,
-						parseStoredGraceDecision(pending.graceDecisionJson)
-					);
-				}
-
-				return result;
-			});
+			);
 
 			// After `stale-read`, a later pass decides with a new read.
 			if (
@@ -5432,18 +5552,15 @@ export class VerificationService {
 			// path's root, and report whether this upload published the generation.
 			if (reclaim === 'committed-current') {
 				signal?.throwIfAborted();
-				await this.inheritAfterCommit(pending, metadata, reserved.generation);
-				const verdict = await this.publicationVerdict(
-					pending,
-					metadata,
-					reserved.generation
-				);
+				if (served.isServed) {
+					await this.inheritAfterCommit(pending, metadata, reserved.generation);
+				}
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return false;
 				}
 				const cleared = await this.uploadState.clearPendingUpload(
 					pending.id,
-					{ logger, outcome: verdict },
+					{ logger, outcome: served.verdict },
 					owner
 				);
 
@@ -5451,7 +5568,7 @@ export class VerificationService {
 					return false;
 				}
 
-				this.notifyWaiters(cleared, verdict);
+				this.notifyWaiters(cleared, served.verdict);
 
 				return true;
 			}

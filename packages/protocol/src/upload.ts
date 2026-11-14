@@ -277,6 +277,13 @@ const narInfoProbeSubrequests = 2;
 // committed edges and one for the NAR incarnations.
 const narInfoProbeD1Subrequests = 2;
 
+// The most binding calls that checking one path's servability on its own can
+// make: the group's D1 calls, the path's two heads and a narinfo repair.
+export const narInfoAvailabilitySubrequests =
+	narInfoProbeD1Subrequests +
+	narInfoProbeSubrequests +
+	narInfoRepairSubrequests;
+
 // The calls that the server sets aside after a mutation for its maintenance
 // reconcile. Reconciliation can make one D1 call before an error, and the
 // fallback invalidation makes another.

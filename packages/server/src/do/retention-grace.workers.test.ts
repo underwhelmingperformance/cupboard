@@ -14,6 +14,7 @@ import {
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
+import { publicationStagingKey } from '@cupboard/protocol/publication';
 import { rootRetentionRequestSchema } from '@cupboard/protocol/retention';
 import {
 	type IsoTimestamp,
@@ -23,6 +24,8 @@ import {
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import {
 	acceptCapabilitiesHeader,
+	publicationCapability,
+	publicationRefusalReasonsCapability,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
 	uploadConfirmMaxPaths,
@@ -31,6 +34,7 @@ import {
 	uploadGraceFactsCapability,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadata,
+	uploadPlanResponseSchema,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -38,7 +42,14 @@ import { env } from 'cloudflare:workers';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type MockInstance,
+	vi
+} from 'vitest';
 import { z } from 'zod';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
@@ -64,12 +75,14 @@ import {
 	bootstrap,
 	cacheWriteGrants,
 	clearBlobStorage,
+	closeSessionAndWait,
 	commitUpload,
 	currentNarObjectKey,
 	currentOrigin,
 	currentServer,
 	currentServerTenant,
 	defaultCache,
+	deferFreshUpload,
 	deletePath,
 	drivenDirectly,
 	expectSingleCommitDecision,
@@ -100,8 +113,10 @@ import {
 	uploadPathNegotiation,
 	useTestServer,
 	verifiableNar,
+	verificationOf,
 	verifyCurrentTenant,
-	withDeployedSubrequestAllowance
+	withDeployedSubrequestAllowance,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
@@ -125,6 +140,7 @@ import {
 	type OperationCostRecord,
 	withOperationCost
 } from './operation-cost.ts';
+import { PublicationStore } from './publication-store.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { ReuseAuthority } from './reuse-authority.ts';
@@ -134,7 +150,10 @@ import { SigningKeysService } from './signing-keys-service.ts';
 import { withSubrequestSlice } from './subrequest-slice.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
-import { VerificationService } from './verification-service.ts';
+import {
+	VerificationService,
+	type VerificationVerdict
+} from './verification-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 const tenantWideContinuation = { scope: 'tenant' };
@@ -2441,6 +2460,330 @@ async function retainedPaths(): Promise<{
 		rootTargets
 	};
 }
+
+// An upload that a verification pass charged, either through the legacy
+// negotiation or as a publication operation.
+interface ChargedUpload {
+	readonly uploadId: UploadId;
+	readonly r2Key: string;
+	readonly metadata: UploadPathMetadata;
+	readonly nar: Awaited<ReturnType<typeof verifiableNar>>;
+	readonly pending: typeof schema.pendingUploads.$inferSelect;
+}
+
+type UploadKind = 'legacy' | 'publication';
+
+const publicationSession = `${publicationCapability},${publicationRefusalReasonsCapability}`;
+
+/**
+Stages a fresh upload of a new path, verifies it so that its own commit is
+charged and published, and returns the upload's row as it was before the
+pass cleared it.
+*/
+async function chargedUpload(
+	token: string,
+	seed: string,
+	kind: UploadKind
+): Promise<ChargedUpload> {
+	if (kind === 'legacy') {
+		const upload = await deferFreshUpload(token, seed, repeated('9'));
+		const pending = await pendingRowSnapshot(upload.uploadId);
+		await verifyCurrentTenant();
+		return { ...upload, pending };
+	}
+
+	const nar = await verifiableNar(seed);
+	const metadata = uploadMetadata({
+		storePathHash: repeated('9'),
+		name: seed,
+		narHash: nar.narHash,
+		narSize: nar.narSize,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength
+	});
+	const path = uploadPathNegotiation(metadata);
+	const planned = await authorisedFetch('/uploads/plan', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ pushId: testPushId, paths: [path] })
+	});
+	const plan = uploadPlanResponseSchema.parse(await planned.json());
+	const [entry] = plan.uploads;
+	if (entry === undefined) {
+		throw new Error('Expected a planned entry');
+	}
+	const uploadId = uploadIdSchema.parse(entry.operationId);
+	const r2Key = publicationStagingKey(fixtureTenant, testPushId, uploadId);
+	await putNarBytes(r2Key, nar);
+	const session = await openCommitSession(token, undefined, publicationSession);
+	try {
+		session.send({
+			op: 'publish-batch',
+			pushId: testPushId,
+			entries: [
+				{
+					operationId: uploadId,
+					cacheGeneration: plan.cacheGeneration,
+					metadata: path,
+					blob: { fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
+				}
+			]
+		});
+		await session.nextFrame();
+		await session.nextFrame();
+	} finally {
+		await closeSessionAndWait(session.socket);
+	}
+	const pending = await pendingRowSnapshot(uploadId);
+	await commitUpload(token, uploadId);
+	return { uploadId, r2Key, metadata, nar, pending };
+}
+
+// What a verification pass left after it decided an upload's verdict.
+async function verdictState(upload: ChargedUpload): Promise<unknown> {
+	return {
+		pending: await pendingUploadVerdict(upload.uploadId),
+		publication: await runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve(
+				new PublicationStore(instance.context).get(upload.uploadId)?.state
+			)
+		),
+		isStagedObjectPresent: (await env.BLOBS.head(upload.r2Key)) !== null,
+		isNarInfoObjectPresent: await isNarInfoObjectPresent(
+			upload.metadata.storePathHash
+		),
+		...(await retainedPaths()),
+		inheritances: await runInDurableObject(currentServer(), (instance) =>
+			Promise.resolve(
+				instance.context.db
+					.select({
+						storePathHash: schema.attestationInheritances.storePathHash
+					})
+					.from(schema.attestationInheritances)
+					.all()
+					.map((row) => row.storePathHash)
+			)
+		)
+	};
+}
+
+// Puts back the upload's row as the pass left it, with the run root `run`,
+// and reopens its publication operation. Removes the path's grace deadline and
+// queued inheritance, so that the test can see whether the next pass applies
+// the upload's grace decision, run root and inheritance.
+function restoreUploadRow(
+	context: ServerContext,
+	upload: ChargedUpload,
+	row: Partial<typeof schema.pendingUploads.$inferInsert> = {}
+): void {
+	context.db
+		.insert(schema.pendingUploads)
+		.values({
+			...upload.pending,
+			verdict: 'pending',
+			attachRootName: rootNameSchema.parse('run'),
+			...row
+		})
+		.run();
+	context.db.delete(schema.attestationInheritances).run();
+	context.db
+		.update(schema.publicationOperations)
+		.set({ state: 'accepted' })
+		.where(eq(schema.publicationOperations.id, upload.uploadId))
+		.run();
+	context.db.delete(schema.retentionGrace).run();
+}
+
+// The outcome of every call that cleared an upload's row.
+function clearedOutcomes(
+	clears: MockInstance<UploadStateService['clearPendingUploadRow']>
+): string[] {
+	return clears.mock.calls
+		.filter((_, index) => clears.mock.results[index]?.value)
+		.map(([, conclusion]) => conclusion.outcome);
+}
+
+// Claims the upload and records `verdict` for it, as the verifier does.
+async function claimAndRecord(
+	upload: ChargedUpload,
+	verdict: VerificationVerdict
+): Promise<void> {
+	const claim = await currentServer().claimVerificationBatch(
+		10,
+		Number.MAX_SAFE_INTEGER
+	);
+	await currentServer().recordVerifications(claim.owner, [
+		{ uploadId: upload.uploadId, verdict }
+	]);
+}
+
+// A verification pass charged an upload's own generation and stopped before it
+// cleared the upload's row. The pass also removed the narinfo object, as when
+// it stops before publishing, so the next claim cannot finish the upload from
+// its committed state. A later pass decides the upload's verdict from the D1
+// edge. Demotion removes the path before that pass reads the reservation, or
+// between the read and the gate that decides the verdict, or not at all.
+describe('the verdict for a charged upload whose path demotion removes', () => {
+	beforeEach(resetTestServer);
+
+	interface VerdictPath {
+		readonly name: string;
+		readonly row: Partial<typeof schema.pendingUploads.$inferInsert>;
+		readonly isTenantInactive: boolean;
+		readonly isStagedObjectKept: boolean;
+		readonly decide: (upload: ChargedUpload) => Promise<void>;
+	}
+
+	const paths: readonly VerdictPath[] = [
+		{
+			name: 'exhausted upload cleanup',
+			row: { settleFailures: 12, settleExhaustion: 'attempt-limit' },
+			isTenantInactive: false,
+			isStagedObjectKept: false,
+			decide: async () => {
+				await runInDurableObject(currentServer(), (instance) =>
+					asOneInvocation(() =>
+						verificationOf(instance).processExhaustedUploads(rootLogger())
+					)
+				);
+			}
+		},
+		{
+			name: 'missing object verdict',
+			row: {},
+			isTenantInactive: false,
+			isStagedObjectKept: true,
+			decide: (upload) => claimAndRecord(upload, { kind: 'missing' })
+		},
+		{
+			name: 'tenant-inactive materialisation',
+			row: {},
+			isTenantInactive: true,
+			isStagedObjectKept: true,
+			decide: (upload) =>
+				claimAndRecord(upload, {
+					kind: 'verified',
+					verification: {
+						ok: true,
+						fileHash: upload.nar.fileHash,
+						fileSize: upload.nar.narBytes.byteLength
+					}
+				})
+		}
+	];
+
+	it.each(
+		paths.flatMap((path) =>
+			(['legacy', 'publication'] as const).flatMap((kind) =>
+				(['none', 'before', 'after'] as const).map((moment) => ({
+					path,
+					kind,
+					moment
+				}))
+			)
+		)
+	)(
+		'answers a $kind upload from $path.name with demotion $moment its reservation read',
+		async ({ path, kind, moment }) => {
+			const seed = `charged-${String(paths.indexOf(path))}-${kind}-${moment}`;
+			// D1 compares a publication's recovery deadline with its own clock.
+			if (kind === 'publication') {
+				vi.setSystemTime(vi.getRealSystemTime());
+			}
+			await useTestServer(seed);
+			const { token } = await bootstrap();
+			await setDefaultCacheGrace(3600);
+			const upload = await chargedUpload(token, seed, kind);
+			await setRoot(token, { name: 'run', targets: [] });
+			await runInDurableObject(currentServer(), (instance) =>
+				env.BLOBS.delete(
+					new NarInfoObjectsService(instance.context).objectKey(
+						resolvedCache(instance.context),
+						storePathHashSchema.parse(upload.metadata.storePathHash)
+					)
+				)
+			);
+			await putNarBytes(upload.r2Key, upload.nar);
+
+			const verdicts: string[] = [];
+			await withoutAlarmArming(async () => {
+				const restore = await runInDurableObject(
+					currentServer(),
+					async (instance, state) => {
+						await state.storage.deleteAlarm();
+						const { context } = instance;
+						restoreUploadRow(context, upload, path.row);
+						const narInfoObjects = new NarInfoObjectsService(context);
+						const gate = demotionAtNextGate(
+							context,
+							narInfoObjects,
+							upload.metadata
+						);
+						const reservation = vi
+							.spyOn(CommitPipelineService.prototype, 'readReservation')
+							.mockImplementationOnce(async function (
+								this: CommitPipelineService,
+								...parameters
+							) {
+								if (moment === 'before') {
+									await demote(context, narInfoObjects, upload.metadata);
+								}
+								// Vitest removes a once implementation before calling it, so
+								// this call runs the real read.
+								const result = await this.readReservation(...parameters);
+								if (moment === 'after') {
+									gate.arm();
+								}
+								return result;
+							});
+						const clears = vi.spyOn(
+							UploadStateService.prototype,
+							'clearPendingUploadRow'
+						);
+						const materialise = path.isTenantInactive
+							? vi
+									.spyOn(CommitPipelineService.prototype, 'materialiseBatched')
+									.mockResolvedValueOnce({
+										kind: 'tenant-inactive',
+										tenantStatus: 'suspended'
+									})
+							: undefined;
+						return () => {
+							verdicts.push(...clearedOutcomes(clears));
+							materialise?.mockRestore();
+							clears.mockRestore();
+							reservation.mockRestore();
+							gate.restore();
+						};
+					}
+				);
+				try {
+					await path.decide(upload);
+				} finally {
+					await runInDurableObject(currentServer(), () => {
+						restore();
+						return Promise.resolve();
+					});
+				}
+			});
+
+			const isServed = moment === 'none';
+			expect({ verdicts, state: await verdictState(upload) }).toStrictEqual({
+				verdicts: [isServed ? 'servable' : 'absent'],
+				state: {
+					pending: undefined,
+					publication:
+						kind === 'legacy' ? undefined : isServed ? 'servable' : 'accepted',
+					isStagedObjectPresent: path.isStagedObjectKept,
+					isNarInfoObjectPresent: isServed,
+					deadlines: isServed ? [upload.metadata.storePathHash] : [],
+					rootTargets: isServed ? [upload.metadata.storePathHash] : [],
+					inheritances: isServed ? [upload.metadata.storePathHash] : []
+				}
+			});
+		}
+	);
+});
 
 // Delete the path's NAR and demote its narinfo object after the first
 // servability probe returns, as the `blob-demote` scan does when it finds the
