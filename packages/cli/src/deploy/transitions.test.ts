@@ -537,7 +537,8 @@ describe('v0.0.35 path authority rollout', () => {
 							['tenant-schema-progress', 'complete'],
 							['control-refresh-sessions', 'complete'],
 							['control-subject-nonces', 'complete'],
-							['attestation-digest-index', 'expanded']
+							['attestation-digest-index', 'expanded'],
+							['backfill-purge-pace', 'complete']
 						],
 						applied: actualMigrations
 							.filter(
@@ -560,7 +561,8 @@ describe('v0.0.35 path authority rollout', () => {
 						'tenant-schema-progress': 'complete',
 						'control-refresh-sessions': 'complete',
 						'control-subject-nonces': 'complete',
-						'attestation-digest-index': 'complete'
+						'attestation-digest-index': 'complete',
+						'backfill-purge-pace': 'complete'
 					},
 					applied: actualMigrations.map((migration) => migration.name),
 					journal: [

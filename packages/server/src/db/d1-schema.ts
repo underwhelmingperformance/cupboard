@@ -776,6 +776,16 @@ export const tenantUsage = sqliteTable(
 	]
 );
 
+// One row for the whole deployment. `next_at` is the earliest time, in
+// milliseconds since the epoch, at which any tenant's signing-key backfill may
+// send its next cache purge request. The backfills of all tenants in the
+// deployment share this row. The purge rate limit applies to the whole
+// account, and each deployment in the account has its own row.
+export const backfillPurgePace = sqliteTable('backfill_purge_pace', {
+	id: text('id').primaryKey(),
+	nextAt: integer('next_at').notNull()
+});
+
 export const localStepWakeCursor = sqliteTable('local_step_wake_cursor', {
 	id: integer('id').primaryKey(),
 	afterTenant: text('after_tenant').$type<TenantId>().notNull()

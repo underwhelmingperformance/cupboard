@@ -68,7 +68,8 @@ export const transitionIdSchema = z.enum([
 	'control-subject-nonces',
 	'control-database-split',
 	'control-database-initial',
-	'attestation-digest-index'
+	'attestation-digest-index',
+	'backfill-purge-pace'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -371,6 +372,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		id: 'attestation-digest-index',
 		expand: [],
 		contract: ['0043_attestation_ref_digest_index.sql'],
+		independent: true
+	},
+	{
+		id: 'backfill-purge-pace',
+		expand: ['0044_backfill_purge_pace.sql'],
+		contract: [],
 		independent: true
 	}
 ];

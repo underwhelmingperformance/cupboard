@@ -73,9 +73,14 @@ async function checkLocalState(
 		({ name }) =>
 			!name.startsWith('sqlite_') &&
 			!name.startsWith('_cf_') &&
-			!['d1_migrations', 'deployment_transition', 'deployment_phase'].includes(
-				name
-			)
+			// Migration 0044 inserts a row into `backfill_purge_pace`. The row is
+			// not application data.
+			![
+				'd1_migrations',
+				'deployment_transition',
+				'deployment_phase',
+				'backfill_purge_pace'
+			].includes(name)
 	);
 	if (persistedTables.length === 0) {
 		return;

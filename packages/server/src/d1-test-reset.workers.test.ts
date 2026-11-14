@@ -72,6 +72,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 	);
 	expect(Object.fromEntries(counts)).toStrictEqual({
 		instance_config: 1,
+		backfill_purge_pace: 0,
 		object_incarnation: 0,
 		object_deletion: 0,
 		blob_state: 0,

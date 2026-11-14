@@ -1,6 +1,8 @@
 import {
 	signingKeyGenerationSchema,
-	signingKeyIdSchema
+	signingKeyIdSchema,
+	storePathHashSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type {
@@ -30,6 +32,7 @@ import {
 } from 'vitest';
 import { z } from 'zod';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError, WorkersCachePurgeError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
@@ -48,19 +51,25 @@ import {
 	isNarInfoSignatureValid,
 	issueServerSignedToken,
 	narBytes,
+	provisionNamedTenant,
 	pushPath,
 	resetTestServer,
 	resolvedCache,
 	syntheticStorePathHash,
+	testServerFor,
 	uploadMetadata,
 	withoutAlarmArming
 } from '../test-support.ts';
 import { CachedTenantReads } from '../test-worker.ts';
 
 import { maintenanceRetryKey, noProgressRetryMs } from './alarm.ts';
+import {
+	BackfillPurgePace,
+	defaultBackfillPurgeIntervalMs
+} from './backfill-purge-pace.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { CachePurgeRetryPolicy } from './cache-purge-retry.ts';
-import { ServerContext } from './context.ts';
+import { ServerContext, tagsPerPurgeRequest } from './context.ts';
 import { withDeadlineBudget } from './deadline.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import type { CupboardServer } from './server.ts';
@@ -68,18 +77,57 @@ import {
 	backfillEntriesPerPass,
 	SigningKeysService
 } from './signing-keys-service.ts';
+import { withSubrequestSlice } from './subrequest-slice.ts';
 
 // The jitter source returns the midpoint, so each purge retry waits three
 // quarters of its exponential delay.
 const retryPolicy = new CachePurgeRetryPolicy(() => 0.5);
 
-// Store-path hashes are nix-base32, which omits `e`, `o`, `t` and `u`.
-function nixBase32Pair(index: number): string {
+// Store-path hashes are nix-base32, which omits `e`, `o`, `t` and `u`. Returns
+// the 32-character hash whose last digits are `index` in base 32.
+function nixBase32Hash(index: number): string {
 	const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+	let digits = '';
 
-	return (
-		alphabet.charAt(Math.floor(index / alphabet.length)) +
-		alphabet.charAt(index % alphabet.length)
+	for (let rest = index; rest > 0; rest = Math.floor(rest / alphabet.length)) {
+		digits = alphabet.charAt(rest % alphabet.length) + digits;
+	}
+
+	return digits.padStart(32, '0');
+}
+
+// The time between two backfill purge requests in these tests. It differs from
+// the production default, so a test that passes only if the default were used
+// fails.
+const paceIntervalMs = 7000;
+
+// A clock that a test moves. It starts at the frozen test time.
+interface TestClock {
+	readonly now: () => number;
+	set(at: number): void;
+}
+
+function testClock(): TestClock {
+	let at = Date.now();
+
+	return {
+		now: () => at,
+		set: (next) => {
+			at = next;
+		}
+	};
+}
+
+function pacedService(
+	context: ServerContext,
+	clock: TestClock
+): SigningKeysService {
+	return new SigningKeysService(
+		context,
+		new NarInfoObjectsService(context),
+		retryPolicy,
+		clock.now,
+		new BackfillPurgePace(context, paceIntervalMs)
 	);
 }
 
@@ -95,6 +143,7 @@ interface StagedBackfill {
 	readonly context: ServerContext;
 	readonly signingKeys: SigningKeysService;
 	readonly alarm: FakeAlarm;
+	readonly clock: TestClock;
 	readonly purge: MockInstance<ServerContext['purgeCacheTags']>;
 	readonly publish: MockInstance<NarInfoObjectsService['publishNarInfoObject']>;
 }
@@ -105,7 +154,8 @@ interface StagedBackfill {
 // faked.
 async function withStagedBackfill<T>(
 	hashCharacter: string,
-	body: (staged: StagedBackfill) => Promise<T>
+	body: (staged: StagedBackfill) => Promise<T>,
+	intervalMs = paceIntervalMs
 ): Promise<T> {
 	const init = await bootstrap();
 	const path = uploadMetadata({
@@ -117,10 +167,13 @@ async function withStagedBackfill<T>(
 
 	return runInDurableObject(currentServer(), async (instance, state) => {
 		const narInfoObjects = new NarInfoObjectsService(instance.context);
+		const clock = testClock();
 		const signingKeys = new SigningKeysService(
 			instance.context,
 			narInfoObjects,
-			retryPolicy
+			retryPolicy,
+			clock.now,
+			new BackfillPurgePace(instance.context, intervalMs)
 		);
 		const alarm = fakeAlarm(state.storage);
 
@@ -138,6 +191,7 @@ async function withStagedBackfill<T>(
 					context: instance.context,
 					signingKeys,
 					alarm,
+					clock,
 					purge,
 					publish
 				});
@@ -151,57 +205,84 @@ async function withStagedBackfill<T>(
 	});
 }
 
-// The tags of the page that `pagedBackfill` queues.
-const pagedTags = Array.from(
-	{ length: 150 },
-	(_, index) => `narinfo-${String(index)}`
-);
+function tagsOf(count: number): string[] {
+	return Array.from(
+		{ length: count },
+		(_, index) => `narinfo-${String(index)}`
+	);
+}
 
-// Queues a backfill continuation of 150 entries, more than one purge request
-// can list, and returns a backfill service on the Paid plan's allowance, so
-// one pass publishes the whole page. The entries have no narinfo rows, so the
+// The tags of the page that `pagedBackfill` queues by default.
+const pagedTags = tagsOf(150);
+
+// The entries of a backfill continuation row. They have no narinfo rows, so a
 // pass publishes nothing and purges every tag.
-function pagedEntries(cacheId: number) {
-	return pagedTags.map((tag, index) => ({
+function pagedEntries(cacheId: number, count = pagedTags.length) {
+	return tagsOf(count).map((tag, index) => ({
 		cacheId,
-		storePathHash: `${'0'.repeat(30)}${nixBase32Pair(index)}`,
+		storePathHash: nixBase32Hash(index),
 		narInfoGeneration: 1,
 		targetGeneration: 2,
 		tag
 	}));
 }
 
-function pagedBackfill(
+// A tenant context on the Paid plan's allowance, so one pass can afford a page
+// of more than 100 entries.
+function paidContext(
 	instance: CupboardServer,
-	state: DurableObjectState,
-	now: number
-): { readonly context: ServerContext; readonly service: SigningKeysService } {
-	const context = new ServerContext(state, {
+	state: DurableObjectState
+): ServerContext {
+	return new ServerContext(state, {
 		...instance.context.env,
 		CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(
 			workersInvocationAllowances.paid.subrequests
 		)
 	});
-	const entries = pagedEntries(resolvedCache(context).id);
+}
+
+function insertBackfillRow(
+	context: ServerContext,
+	clock: TestClock,
+	id: string,
+	entries: readonly object[],
+	createdAfterMs = 0,
+	failedAttempts = 0
+): void {
+	const createdAt = new Date(clock.now() + createdAfterMs);
+	const expiresAt = new Date(clock.now() + 3_600_000);
+
 	context.db
 		.insert(schema.cachePurgeContinuations)
 		.values({
-			id: 'paged',
+			id,
 			kind: 'backfill',
 			entriesJson: JSON.stringify(entries),
-			createdAt: isoTimestamp(new Date(now)),
-			expiresAt: isoTimestamp(new Date(now + 3_600_000))
+			createdAt: isoTimestamp(createdAt),
+			expiresAt: isoTimestamp(expiresAt),
+			failedAttempts
 		})
 		.run();
+}
 
-	return {
+// Queues one backfill continuation row of `count` entries, 150 by default, more
+// than one purge request can list, and returns a backfill service with the
+// test clock and the injected interval.
+function pagedBackfill(
+	instance: CupboardServer,
+	state: DurableObjectState,
+	clock: TestClock,
+	count = pagedTags.length
+): { readonly context: ServerContext; readonly service: SigningKeysService } {
+	const context = paidContext(instance, state);
+	insertBackfillRow(
 		context,
-		service: new SigningKeysService(
-			context,
-			new NarInfoObjectsService(context),
-			retryPolicy
-		)
-	};
+		clock,
+		'paged',
+		pagedEntries(resolvedCache(context).id, count)
+	);
+
+	return { context, service: pacedService(context, clock) };
 }
 
 function continuationIds(context: ServerContext): { id: string }[] {
@@ -463,9 +544,13 @@ describe('signing key rotation', () => {
 				}
 			);
 
+			// The first backfill claimed a purge request, so the next claim is one
+			// interval later.
 			const service = new SigningKeysService(
 				instance.context,
-				new NarInfoObjectsService(instance.context)
+				new NarInfoObjectsService(instance.context),
+				undefined,
+				() => Date.now() + defaultBackfillPurgeIntervalMs
 			);
 			await service.keyList();
 			await asOneInvocation(() => service.runBackfillOnce());
@@ -843,7 +928,7 @@ describe('signing key rotation', () => {
 
 		const result = await withStagedBackfill(
 			'n',
-			async ({ context, signingKeys, alarm, purge, publish }) => {
+			async ({ context, signingKeys, alarm, clock, purge, publish }) => {
 				const queue = new CachePurgeQueueService(context, retryPolicy);
 				await queue.enqueueNarInfos(resolvedCache(context), [
 					syntheticStorePathHash(1)
@@ -861,7 +946,7 @@ describe('signing key rotation', () => {
 					workAt: await signingKeys.backfillWorkAt(Date.now()),
 					alarm: alarm.scheduled()
 				};
-				vi.setSystemTime(retryAt);
+				clock.set(retryAt);
 				purge.mockResolvedValue(undefined);
 				const due = await asOneInvocation(() => signingKeys.runBackfillOnce());
 
@@ -954,7 +1039,8 @@ describe('signing key rotation', () => {
 					});
 				const service = new SigningKeysService(
 					instance.context,
-					new NarInfoObjectsService(instance.context)
+					new NarInfoObjectsService(instance.context),
+					retryPolicy
 				);
 
 				try {
@@ -995,6 +1081,7 @@ describe('signing key rotation', () => {
 							keys,
 							didTimeout,
 							existingAlarmAt,
+							failedAt: Date.now(),
 							publicationStarted: put.mock.calls.length > 0,
 							retryAlarmAt
 						};
@@ -1045,7 +1132,9 @@ describe('signing key rotation', () => {
 			},
 			didTimeout: true,
 			publicationStarted: true,
-			retryAlarmAt: result.existingAlarmAt
+			// The failed publication arms the alarm for the row's retry time, which is
+			// earlier than the alarm that was already armed.
+			retryAlarmAt: result.failedAt + 9000
 		});
 	});
 
@@ -1103,7 +1192,7 @@ describe('signing key rotation', () => {
 				const cacheId = resolvedCache(instance.context).id;
 				const entries = Array.from({ length: queued }, (_, index) => ({
 					cacheId,
-					storePathHash: `${'0'.repeat(30)}${nixBase32Pair(index)}`,
+					storePathHash: nixBase32Hash(index),
 					narInfoGeneration: 1,
 					targetGeneration: 2,
 					tag: `narinfo-${String(index)}`
@@ -1138,22 +1227,22 @@ describe('signing key rotation', () => {
 		);
 
 		expect({ remaining }).toStrictEqual({
-			remaining:
-				queued - backfillEntriesPerPass(await deployedSubrequestAllowance())
+			remaining: queued - tagsPerPurgeRequest
 		});
 	});
 
-	// On the Paid plan's allowance, a page of 150 entries needs two purge
-	// requests. The first request succeeds and the second is refused, so the
-	// retry sends only the second request's tags again.
+	// A row of 150 entries needs two purge requests, one in each of two passes.
+	// The first request succeeds. The second is refused, and the retry sends
+	// only the second request's tags again.
 	it('resends only the refused purge request of a backfill page', async () => {
 		await bootstrap();
-		const now = Date.now();
+		const clock = testClock();
+		const start = clock.now();
 
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const { service } = pagedBackfill(instance, state, now);
+				const { service } = pagedBackfill(instance, state, clock);
 				const alarm = fakeAlarm(state.storage);
 				const purge = vi
 					.spyOn(CachedTenantReads.prototype, 'purgeTags')
@@ -1168,7 +1257,9 @@ describe('signing key rotation', () => {
 
 				try {
 					await service.runBackfillOnce();
-					vi.setSystemTime(now + 45_000);
+					clock.set(start + paceIntervalMs);
+					await service.runBackfillOnce();
+					clock.set(start + paceIntervalMs + 45_000);
 					await service.runBackfillOnce();
 
 					return {
@@ -1192,12 +1283,586 @@ describe('signing key rotation', () => {
 		});
 	});
 
-	// `abortKeyRotation` runs during the first purge request of a page. It
-	// deletes the rotation's continuation rows, so the pass sends no request
-	// for the rest of the page. It also clears the narinfo's pending
-	// generation and deletes the backfill row, so recording the request
-	// changes neither row.
-	it('stops purging a backfill page when the rotation is aborted', async () => {
+	// With the Paid plan's allowance, a pass can afford 1,979 entries, which is
+	// 20 purge requests and nearly the account's whole burst of 25. A pass
+	// sends one request of 100 tags, and the next request waits for the
+	// interval, in this tenant and in every other tenant.
+	it('sends one purge request of at most 100 tags in a backfill pass', async () => {
+		await bootstrap();
+		const clock = testClock();
+		const start = clock.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const { context, service } = pagedBackfill(
+					instance,
+					state,
+					clock,
+					2000
+				);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(CachedTenantReads.prototype, 'purgeTags')
+					.mockResolvedValue({ success: true, errors: [] });
+
+				try {
+					const first = await service.runBackfillOnce();
+					const second = await service.runBackfillOnce();
+					const whileWaiting = {
+						purgeCalls: purge.mock.calls.length,
+						workAt: await service.backfillWorkAt(start),
+						alarm: alarm.scheduled()
+					};
+					clock.set(start + paceIntervalMs);
+					const third = await service.runBackfillOnce();
+					const row = context.db
+						.select({ entriesJson: schema.cachePurgeContinuations.entriesJson })
+						.from(schema.cachePurgeContinuations)
+						.get();
+
+					return {
+						outcomes: [first, second, third],
+						whileWaiting,
+						purgeCalls: purge.mock.calls.map(([tags]) => tags),
+						remaining: z
+							.array(z.object({ tag: z.string() }))
+							.parse(JSON.parse(row?.entriesJson ?? '[]'))
+							.map((entry) => entry.tag)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcomes: ['progressed', 'progressed', 'progressed'],
+			whileWaiting: {
+				purgeCalls: 1,
+				workAt: start + paceIntervalMs,
+				alarm: start + paceIntervalMs
+			},
+			purgeCalls: [tagsOf(2000).slice(0, 100), tagsOf(2000).slice(100, 200)],
+			remaining: tagsOf(2000).slice(200)
+		});
+	});
+
+	// The purge request is a subrequest too. The page leaves one subrequest of the
+	// invocation's slice for it, so the request does not depend on the slice's
+	// safety reserve. The slice below has 21 subrequests: one for the claim, one
+	// for the request and 19 for publication, which is three entries at five
+	// subrequests each.
+	it('leaves a subrequest for the purge request when it sizes the page', async () => {
+		await bootstrap();
+		const clock = testClock();
+
+		const purgeCalls = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const { service } = pagedBackfill(instance, state, clock);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(CachedTenantReads.prototype, 'purgeTags')
+					.mockResolvedValue({ success: true, errors: [] });
+
+				try {
+					await withSubrequestSlice(() => service.runBackfillOnce(), {
+						subrequests: 21,
+						reserve: 0
+					});
+
+					return purge.mock.calls.map(([tags]) => tags);
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(purgeCalls).toStrictEqual([pagedTags.slice(0, 3)]);
+	});
+
+	// Staging writes rows of at most 32 entries. A request takes the entries of
+	// several rows up to its limit of 100 tags, and the pass records each row's
+	// entries separately.
+	it('fills a purge request with the entries of several backfill rows', async () => {
+		await bootstrap();
+		const clock = testClock();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const context = paidContext(instance, state);
+				const cacheId = resolvedCache(context).id;
+				const entries = pagedEntries(cacheId, 114);
+				insertBackfillRow(context, clock, 'a', entries.slice(0, 32));
+				insertBackfillRow(context, clock, 'b', entries.slice(32, 64), 1);
+				insertBackfillRow(context, clock, 'c', entries.slice(64), 2);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(CachedTenantReads.prototype, 'purgeTags')
+					.mockResolvedValue({ success: true, errors: [] });
+
+				try {
+					const outcome = await pacedService(context, clock).runBackfillOnce();
+
+					return {
+						outcome,
+						purgeCalls: purge.mock.calls.map(([tags]) => tags),
+						rows: context.db
+							.select({
+								id: schema.cachePurgeContinuations.id,
+								entriesJson: schema.cachePurgeContinuations.entriesJson
+							})
+							.from(schema.cachePurgeContinuations)
+							.all()
+							.map((row) => ({
+								id: row.id,
+								tags: z
+									.array(z.object({ tag: z.string() }))
+									.parse(JSON.parse(row.entriesJson))
+									.map((entry) => entry.tag)
+							}))
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcome: 'progressed',
+			purgeCalls: [tagsOf(114).slice(0, 100)],
+			rows: [{ id: 'c', tags: tagsOf(114).slice(100) }]
+		});
+	});
+
+	// The purge bucket belongs to the whole account, so the pace belongs to the
+	// deployment. Two tenants run their passes at the same instants. At each
+	// instant, one claim succeeds and the other tenant waits, so the two
+	// together send one request for each interval.
+	it('lets one backfill purge request through in each interval across tenants', async () => {
+		await bootstrap();
+		await provisionNamedTenant('pace-second');
+		const clock = testClock();
+		const start = clock.now();
+		const tenants = [currentServer(), testServerFor('pace-second')];
+
+		for (const tenant of tenants) {
+			await runInDurableObject(tenant, (instance, state) => {
+				const context = paidContext(instance, state);
+				insertBackfillRow(
+					context,
+					clock,
+					'paged',
+					pagedEntries(resolvedCache(context).id, 250)
+				);
+			});
+		}
+
+		const purge = vi
+			.spyOn(CachedTenantReads.prototype, 'purgeTags')
+			.mockResolvedValue({ success: true, errors: [] });
+
+		try {
+			const perInterval: number[] = [];
+
+			for (const interval of [0, 1, 2]) {
+				clock.set(start + interval * paceIntervalMs);
+				const before = purge.mock.calls.length;
+
+				for (const tenant of tenants) {
+					await runInDurableObject(tenant, async (instance, state) => {
+						const alarm = fakeAlarm(state.storage);
+
+						try {
+							await pacedService(
+								paidContext(instance, state),
+								clock
+							).runBackfillOnce();
+						} finally {
+							alarm.restore();
+						}
+					});
+				}
+
+				perInterval.push(purge.mock.calls.length - before);
+			}
+
+			expect(perInterval).toStrictEqual([1, 1, 1]);
+		} finally {
+			purge.mockRestore();
+		}
+	});
+
+	// The pace belongs to the backfill only. An explicit deletion queues urgent
+	// purges, and the queue sends them while the backfill waits.
+	it('sends an urgent purge while the backfill waits', async () => {
+		await bootstrap();
+		const clock = testClock();
+		const start = clock.now();
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const { context, service } = pagedBackfill(instance, state, clock, 250);
+				const alarm = fakeAlarm(state.storage);
+				const purge = vi
+					.spyOn(CachedTenantReads.prototype, 'purgeTags')
+					.mockResolvedValue({ success: true, errors: [] });
+
+				try {
+					await service.runBackfillOnce();
+					const queue = new CachePurgeQueueService(context, retryPolicy);
+					await queue.enqueueNarInfos(
+						resolvedCache(context),
+						[syntheticStorePathHash(3)],
+						'urgent'
+					);
+					await queue.runOnce();
+
+					return {
+						purgeCalls: purge.mock.calls.length,
+						backfillWorkAt: await service.backfillWorkAt(start)
+					};
+				} finally {
+					purge.mockRestore();
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			purgeCalls: 2,
+			backfillWorkAt: start + paceIntervalMs
+		});
+	});
+
+	// The claim is the first D1 call of a pass. A D1 failure there is a failed
+	// attempt of the backfill, like a failed publication: the row records the
+	// error, the key's backfill reports a retry, and the alarm is armed.
+	it('records a failed claim as a retry of the backfill', async () => {
+		const start = Date.now();
+
+		const result = await withStagedBackfill(
+			'p',
+			async ({ context, signingKeys, alarm, purge, publish }) => {
+				const claim = vi
+					.spyOn(BackfillPurgePace.prototype, 'claim')
+					.mockRejectedValue(new Error('D1 overloaded'));
+
+				try {
+					const outcome = await asOneInvocation(() =>
+						signingKeys.runBackfillOnce()
+					);
+
+					return {
+						outcome,
+						purgeCalls: purge.mock.calls.length,
+						publications: publish.mock.calls.length,
+						continuations: context.db
+							.select()
+							.from(schema.cachePurgeContinuations)
+							.all()
+							.map((row) => ({
+								kind: row.kind,
+								lastError: row.lastError,
+								failedAttempts: row.failedAttempts
+							})),
+						backfills: context.db
+							.select()
+							.from(schema.signingKeyBackfills)
+							.all()
+							.map((row) => ({
+								state: row.state,
+								failureOperation: row.failureOperation,
+								failureMessage: row.failureMessage
+							})),
+						alarm: alarm.scheduled()
+					};
+				} finally {
+					claim.mockRestore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcome: 'stalled',
+			purgeCalls: 0,
+			publications: 0,
+			continuations: [
+				{ kind: 'backfill', lastError: 'D1 overloaded', failedAttempts: 0 }
+			],
+			backfills: [
+				{
+					state: 'retrying',
+					failureOperation: 'cache-purge',
+					failureMessage: 'D1 overloaded'
+				}
+			],
+			alarm: start + noProgressRetryMs
+		});
+	});
+
+	// A pass claims its slot before it publishes, so a publication that fails on
+	// every attempt would use a slot of the whole deployment each time. After a
+	// failed publication, the row waits for its own retry time, which grows with
+	// each failure, and the tenant claims nothing until then.
+	it('backs off a backfill whose publication keeps failing', async () => {
+		const start = Date.now();
+
+		const result = await withStagedBackfill(
+			'r',
+			async ({ context, signingKeys, publish, clock }) => {
+				publish.mockRejectedValue(new Error('R2 unavailable'));
+				const steps: unknown[] = [];
+
+				for (const offset of [0, 8000, 9000]) {
+					clock.set(start + offset);
+					const outcome = await asOneInvocation(() =>
+						signingKeys.runBackfillOnce()
+					);
+					const paceRows = await context.d1
+						.select({ nextAt: d1Schema.backfillPurgePace.nextAt })
+						.from(d1Schema.backfillPurgePace);
+					steps.push({
+						offset,
+						outcome,
+						publications: publish.mock.calls.length,
+						rows: context.db
+							.select()
+							.from(schema.cachePurgeContinuations)
+							.all()
+							.map((row) => ({
+								failedAttempts: row.failedAttempts,
+								nextAttemptAt: row.nextAttemptAt
+							})),
+						claimedUntil: paceRows.map((row) => row.nextAt)
+					});
+				}
+
+				return steps;
+			}
+		);
+
+		expect(result).toStrictEqual([
+			{
+				offset: 0,
+				outcome: 'stalled',
+				publications: 1,
+				rows: [
+					{
+						failedAttempts: 1,
+						nextAttemptAt: isoTimestamp(new Date(start + 9000))
+					}
+				],
+				claimedUntil: [start + paceIntervalMs]
+			},
+			{
+				offset: 8000,
+				outcome: 'stalled',
+				publications: 1,
+				rows: [
+					{
+						failedAttempts: 1,
+						nextAttemptAt: isoTimestamp(new Date(start + 9000))
+					}
+				],
+				claimedUntil: [start + paceIntervalMs]
+			},
+			{
+				offset: 9000,
+				outcome: 'stalled',
+				publications: 2,
+				rows: [
+					{
+						failedAttempts: 2,
+						nextAttemptAt: isoTimestamp(new Date(start + 9000 + 18_000))
+					}
+				],
+				claimedUntil: [start + 9000 + paceIntervalMs]
+			}
+		]);
+	});
+
+	// After a failed purge, the backfill waits for the later of its retry time
+	// and the end of the pace interval. A timeout retries after 9 seconds.
+	it.each([
+		{ intervalMs: 3000, waitMs: 9000 },
+		{ intervalMs: 20_000, waitMs: 20_000 }
+	])(
+		'waits for the later of the retry time and a $intervalMs ms interval',
+		async ({ intervalMs, waitMs }) => {
+			const start = Date.now();
+
+			const workAt = await withStagedBackfill(
+				'v',
+				async ({ signingKeys, purge }) => {
+					purge.mockRejectedValue(new SubrequestTimeoutError('cache.purge'));
+					await asOneInvocation(() => signingKeys.runBackfillOnce());
+
+					return signingKeys.backfillWorkAt(start);
+				},
+				intervalMs
+			);
+
+			expect(workAt).toBe(start + waitMs);
+		}
+	);
+
+	// A row with a recorded failure count joins no other row's request. A head
+	// with a failure count is purged alone, and a failed row behind a healthy
+	// head stays out of the head's request.
+	it.each([
+		{
+			failed: 'the head row',
+			purged: [0, 1, 2],
+			remaining: ['b', 'c']
+		},
+		{
+			failed: 'the second row',
+			purged: [0, 1, 2, 6, 7, 8],
+			remaining: ['b']
+		}
+	])(
+		'keeps $failed out of a merged purge request',
+		async ({ failed, purged, remaining }) => {
+			await bootstrap();
+			const clock = testClock();
+
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const context = paidContext(instance, state);
+					const entries = pagedEntries(resolvedCache(context).id, 9);
+					const failures = failed === 'the head row' ? [1, 0, 0] : [0, 1, 0];
+
+					for (const [index, id] of ['a', 'b', 'c'].entries()) {
+						insertBackfillRow(
+							context,
+							clock,
+							id,
+							entries.slice(index * 3, index * 3 + 3),
+							index,
+							failures.at(index)
+						);
+					}
+
+					const alarm = fakeAlarm(state.storage);
+					const purge = vi
+						.spyOn(CachedTenantReads.prototype, 'purgeTags')
+						.mockResolvedValue({ success: true, errors: [] });
+
+					try {
+						await pacedService(context, clock).runBackfillOnce();
+
+						return {
+							purgeCalls: purge.mock.calls.map(([tags]) => tags),
+							remaining: continuationIds(context).map((row) => row.id)
+						};
+					} finally {
+						purge.mockRestore();
+						alarm.restore();
+					}
+				}
+			);
+
+			expect(result).toStrictEqual({
+				purgeCalls: [purged.map((index) => `narinfo-${String(index)}`)],
+				remaining
+			});
+		}
+	);
+
+	// Staging adds rows until four are queued, which is enough to fill the next
+	// request of 100 tags, and no more. It stamps the rows with the injected
+	// clock.
+	it('stages four rows of 32 entries for the next request and no more', async () => {
+		const init = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'a'.repeat(32),
+			name: 'staging-limit'
+		});
+		await withoutAlarmArming(() => pushPath(init.token, path));
+		const clock = testClock();
+		const stagedAt = clock.now() + 5000;
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const alarm = fakeAlarm(state.storage);
+				const service = pacedService(instance.context, clock);
+				await service.rotateKey();
+				const base = instance.context.db.select().from(schema.narInfos).get();
+
+				if (base === undefined) {
+					throw new Error('The pushed narinfo row is missing');
+				}
+
+				for (let index = 1; index < 200; index += 1) {
+					const storePathHash = storePathHashSchema.parse(nixBase32Hash(index));
+					instance.context.db
+						.insert(schema.narInfos)
+						.values({
+							...base,
+							storePathHash,
+							storePath: storePathSchema.parse(
+								`/nix/store/${storePathHash}-staging-limit`
+							)
+						})
+						.run();
+				}
+
+				clock.set(stagedAt);
+
+				try {
+					const outcome = await service.runBackfillOnce();
+
+					return {
+						outcome,
+						rows: instance.context.db
+							.select()
+							.from(schema.cachePurgeContinuations)
+							.all()
+							.map((row) => ({
+								kind: row.kind,
+								entries: z.array(z.unknown()).parse(JSON.parse(row.entriesJson))
+									.length,
+								createdAt: row.createdAt
+							})),
+						pending: instance.context.db
+							.select({ hash: schema.narInfos.storePathHash })
+							.from(schema.narInfos)
+							.where(sql`pending_signature_generation IS NOT NULL`)
+							.all().length
+					};
+				} finally {
+					alarm.restore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcome: 'progressed',
+			rows: Array.from({ length: 4 }, () => ({
+				kind: 'backfill',
+				entries: 32,
+				createdAt: isoTimestamp(new Date(stagedAt))
+			})),
+			pending: 128
+		});
+	});
+
+	// `abortKeyRotation` runs during the purge request of the first 100 entries
+	// of a row of 150. It deletes the rotation's continuation rows, clears the
+	// narinfo's pending generation and deletes the backfill row, so recording the
+	// request changes neither row. A later pass, after the pace interval, must
+	// send no request for the other 50 entries.
+	it('purges nothing more for a rotation that is aborted', async () => {
 		const init = await bootstrap();
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -1205,13 +1870,13 @@ describe('signing key rotation', () => {
 			name: 'aborted-backfill'
 		});
 		await withoutAlarmArming(() => pushPath(init.token, path));
-		const now = Date.now();
+		const clock = testClock();
 
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
 				const alarm = fakeAlarm(state.storage);
-				const { context, service } = pagedBackfill(instance, state, now);
+				const { context, service } = pagedBackfill(instance, state, clock);
 				const rotation = await service.rotateKey();
 				const keyId = signingKeyIdSchema.parse(rotation.rotated.key.id);
 				const { generation } = z
@@ -1258,9 +1923,12 @@ describe('signing key rotation', () => {
 
 				try {
 					const outcome = await service.runBackfillOnce();
+					clock.set(clock.now() + paceIntervalMs);
+					const later = await service.runBackfillOnce();
 
 					return {
 						outcome,
+						later,
 						purgeCalls: purge.mock.calls.map(([tags]) => tags),
 						continuations: continuationIds(instance.context),
 						narInfo: context.db
@@ -1291,6 +1959,7 @@ describe('signing key rotation', () => {
 
 		expect(result).toStrictEqual({
 			outcome: 'progressed',
+			later: 'progressed',
 			purgeCalls: [pagedTags.slice(0, 100)],
 			continuations: [],
 			narInfo: [

@@ -57,7 +57,10 @@ import {
 	type MaintenanceProgress,
 	noProgressRetryMs
 } from './alarm.ts';
-import { chunk } from './bulk.ts';
+import {
+	type BackfillPurgeClaim,
+	BackfillPurgePace
+} from './backfill-purge-pace.ts';
 import {
 	CachePurgeBackoff,
 	type CachePurgeRowRetry
@@ -85,6 +88,12 @@ const sequenceId = 'singleton';
 // database. Its size is independent of the subrequest calculation below.
 const backfillBatchSize = 32;
 
+// A pass sends one purge request of up to `tagsPerPurgeRequest` tags. Staging
+// keeps this many rows queued, so the request is full when the pace allows it.
+const backfillRowsPerRequest = Math.ceil(
+	tagsPerPurgeRequest / backfillBatchSize
+);
+
 // Publishing one continuation entry reads the shared blob row from which its
 // narinfo is rendered. The publish then re-renders the entry if the row changed
 // while that read was in flight, reads the shared blob row again to confirm the
@@ -92,15 +101,14 @@ const backfillBatchSize = 32;
 // narinfo once more.
 const subrequestsPerBackfillEntry = 5;
 
+// The purge request is one subrequest. The page leaves it unspent, so the
+// request does not depend on the slice's safety reserve.
+const subrequestsPerBackfillPurge = 1;
+
 /**
-How many entries of a continuation one backfill pass publishes.
-
-The alarm runs one D1-issuing maintenance pass per invocation, so the pass may
-spend the whole per-invocation allowance on publication. A pass that reaches
-this many entries settles them, keeps the rest in the continuation, and wakes
-the alarm for another pass.
-
-This value is a page limit. Each entry uses the five D1 and R2 calls in the calculation above.
+How many entries one pass can publish within the per-invocation subrequest
+allowance, when each entry uses the five D1 and R2 calls of the calculation
+above.
 */
 export function backfillEntriesPerPass(subrequestAllowance: number): number {
 	return Math.floor(
@@ -125,6 +133,16 @@ const purgeEntriesSchema = z.array(purgeEntrySchema).min(1);
 
 type BackfillRow = typeof schema.signingKeyBackfills.$inferSelect;
 
+type ContinuationRow = typeof schema.cachePurgeContinuations.$inferSelect;
+
+// The entries of one continuation row in a page: those that the pass publishes
+// and purges, and those that stay in the row.
+interface BackfillPagePart {
+	readonly row: ContinuationRow;
+	readonly entries: readonly PurgeEntry[];
+	readonly remaining: readonly PurgeEntry[];
+}
+
 // What recording a purged request did to its continuation row: kept it with
 // the remaining entries, deleted it after the last entry, or found it already
 // deleted by an aborted rotation.
@@ -145,7 +163,11 @@ export class SigningKeysService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly narInfoObjects: NarInfoObjectsService,
-		purgeRetryPolicy: CachePurgeRetryPolicy = new CachePurgeRetryPolicy()
+		purgeRetryPolicy: CachePurgeRetryPolicy = new CachePurgeRetryPolicy(),
+		private readonly now: () => number = () => Date.now(),
+		private readonly purgePace: BackfillPurgePace = new BackfillPurgePace(
+			context
+		)
 	) {
 		this.purgeBackoff = new CachePurgeBackoff(
 			context.ctx.storage,
@@ -425,6 +447,15 @@ export class SigningKeysService {
 		}
 	}
 
+	private async armBackfillAlarm(): Promise<void> {
+		const now = this.now();
+
+		await armAlarmNoLaterThan(
+			this.context.ctx.storage,
+			(await this.backfillWorkAt(now)) ?? now
+		);
+	}
+
 	private backfillStatus(row: BackfillRow): BackfillStatusInput {
 		if (row.state === 'complete' && row.completedAt !== null) {
 			return {
@@ -507,6 +538,28 @@ export class SigningKeysService {
 			.map(([, value]) => value);
 	}
 
+	// Stages batches until enough rows are queued to fill one purge request.
+	// Staging more than that would grow the backlog faster than the requests
+	// can drain it.
+	private async stageBackfills(row: BackfillRow): Promise<void> {
+		while (this.backfillRowCount() < backfillRowsPerRequest) {
+			if ((await this.stageBackfill(row)) === 0) {
+				return;
+			}
+		}
+	}
+
+	private backfillRowCount(): number {
+		return (
+			this.context.db
+				.select({ rows: count() })
+				.from(schema.cachePurgeContinuations)
+				.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
+				.all()
+				.at(0)?.rows ?? 0
+		);
+	}
+
 	private async stageBackfill(row: BackfillRow): Promise<number> {
 		return this.context.criticalSection(async () => {
 			const rows = this.context.db
@@ -551,9 +604,9 @@ export class SigningKeysService {
 				rendered.push({ row: narInfoRow, sigs });
 			}
 
-			const createdAt = isoTimestamp(new Date());
+			const createdAt = isoTimestamp(new Date(this.now()));
 			const expiresAt = isoTimestamp(
-				new Date(Date.now() + narInfoCacheTtlSeconds * 1000)
+				new Date(this.now() + narInfoCacheTtlSeconds * 1000)
 			);
 			const continuationId = crypto.randomUUID();
 			const entries: PurgeEntry[] = [];
@@ -774,26 +827,115 @@ export class SigningKeysService {
 		});
 	}
 
-	/**
-	Publishes as many entries of the oldest backfill continuation as one
-	invocation's subrequest allowance covers, purges their cache tags, and records them.
+	// The entries of one continuation row that a pass publishes and purges, and
+	// the entries that stay in the row for a later pass.
+	private backfillPagePart(
+		row: ContinuationRow,
+		room: number
+	): BackfillPagePart {
+		const queued = purgeEntriesSchema.parse(
+			JSON.parse(row.entriesJson) as unknown
+		);
 
-	Reports `partial` when entries remain, so the caller wakes the alarm for
-	another pass rather than staging more work on top of them.
+		return {
+			row,
+			entries: queued.slice(0, room),
+			remaining: queued.slice(room)
+		};
+	}
+
+	// Fills one purge request. The page starts with the head row and continues
+	// with the rows after it in sending order. A head with a recorded failure
+	// count is purged alone, so a row that joined it cannot keep its retries
+	// failing. A row with a recorded failure count joins no head's page, because
+	// it might fail a request that would succeed without it. The rows behind a
+	// failing head wait until the head's purge succeeds.
+	private backfillPage(head: ContinuationRow): BackfillPagePart[] {
+		// A publication that fails removes no entry from the continuation, so the
+		// page must be one that the invocation's allowance covers in full.
+		// Otherwise the entry that the binding refused would fail the same page on
+		// every pass.
+		const limit = Math.min(
+			backfillEntriesPerPass(this.context.subrequestsPerInvocation),
+			affordableSubrequestOperations(
+				subrequestsPerBackfillEntry,
+				subrequestsPerBackfillPurge
+			),
+			tagsPerPurgeRequest
+		);
+		const first = this.backfillPagePart(head, limit);
+		const page = [first];
+
+		if (head.failedAttempts > 0 || first.entries.length >= limit) {
+			return page;
+		}
+
+		const table = schema.cachePurgeContinuations;
+		let room = limit - first.entries.length;
+		const rows = this.context.db
+			.select()
+			.from(table)
+			.where(
+				and(
+					eq(table.kind, 'backfill'),
+					ne(table.id, head.id),
+					eq(table.failedAttempts, 0)
+				)
+			)
+			.orderBy(table.priority, table.createdAt)
+			.limit(room)
+			.all();
+
+		for (const row of rows) {
+			if (room === 0) {
+				break;
+			}
+
+			const part = this.backfillPagePart(row, room);
+			page.push(part);
+			room -= part.entries.length;
+		}
+
+		return page;
+	}
+
+	private hasBackfillContinuation(): boolean {
+		return (
+			this.context.db
+				.select({ id: schema.cachePurgeContinuations.id })
+				.from(schema.cachePurgeContinuations)
+				.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	Sends one purge request for the oldest backfill continuation rows, and
+	records the entries that it purged.
+
+	The pass first claims the deployment's next backfill purge request from
+	{@link BackfillPurgePace}. It reports `paced` when the deployment's last
+	claim is less than one interval old, and it neither publishes nor purges
+	until a claim succeeds. A D1 error in the claim is a failed attempt, and the
+	pass reports `retrying`.
+
+	With the claim, the pass publishes the entries of one page and purges their
+	tags in one request. The page is the head row and, up to the request's limit
+	of 100 tags, the rows after it. The pass records the entries of each row as
+	signed and removes them from the row. It reports `partial` while a backfill
+	row remains, and `runBackfillOnce` then arms the alarm for that row's next
+	request.
 
 	If publication fails, the pass removes none of the selected entries from
-	the continuation. A later pass retries the same leading page and may
-	publish the same objects again.
-
-	The page's tags can need several purge requests. The pass records the
-	entries of each request as soon as the request succeeds and removes them
-	from the continuation, so a retry after a refused request sends only the
-	tags that no request has purged. After a purge failure,
-	{@link CachePurgeBackoff} decides the earliest time for the next attempt,
-	and the pass reports `waiting` until then without publishing.
+	their rows. A later pass retries the same leading page and may publish the
+	same objects again. After a purge failure, {@link CachePurgeBackoff}
+	decides the earliest time for the next attempt, and the pass reports
+	`waiting` until then without publishing. The claim stays used, so the next
+	request still waits for its interval.
 	*/
 	private async processContinuation(): Promise<
-		'none' | 'settled' | 'partial' | 'retrying' | 'waiting'
+		'none' | 'settled' | 'partial' | 'retrying' | 'waiting' | 'paced'
 	> {
 		const continuation = this.headBackfillContinuation();
 
@@ -801,96 +943,107 @@ export class SigningKeysService {
 			return 'none';
 		}
 
-		const dueAt = await this.purgeBackoff.dueAt(continuation, Date.now());
+		const dueAt = await this.purgeBackoff.dueAt(continuation, this.now());
 
-		if (dueAt > Date.now()) {
+		if (dueAt > this.now()) {
 			await armAlarmNoLaterThan(this.context.ctx.storage, dueAt);
 
 			return 'waiting';
 		}
 
-		const queued = purgeEntriesSchema.parse(
-			JSON.parse(continuation.entriesJson) as unknown
-		);
-		// A publication that fails removes no entry from the continuation, so the
-		// page must be one the invocation's allowance covers in full. Otherwise
-		// the entry the binding refused would fail the same page on every pass.
-		const affordable = Math.min(
-			backfillEntriesPerPass(this.context.subrequestsPerInvocation),
-			affordableSubrequestOperations(subrequestsPerBackfillEntry)
-		);
-		const entries = queued.slice(0, affordable);
-		const remaining = queued.slice(affordable);
-		const now = isoTimestamp(new Date());
+		const knownNextAt = await this.purgePace.knownNextAt();
+
+		if (knownNextAt !== undefined && knownNextAt > this.now()) {
+			return 'paced';
+		}
+
+		const now = isoTimestamp(new Date(this.now()));
+		let claim: BackfillPurgeClaim;
+
+		try {
+			claim = await this.purgePace.claim(this.now());
+		} catch (error) {
+			await this.recordClaimFailure(continuation, error, now);
+
+			return 'retrying';
+		}
+
+		if (claim.kind === 'waiting') {
+			return 'paced';
+		}
+
+		const page = this.backfillPage(continuation);
+		const entries = page.flatMap((part) => part.entries);
 
 		try {
 			await withDeadlineBudget(criticalSectionBudgetMs, () =>
 				this.publishContinuationEntries(entries)
 			);
 		} catch (error) {
-			const message = errorMessage(error);
-			this.context.db
-				.update(schema.cachePurgeContinuations)
-				.set({ lastAttemptAt: now, lastError: message })
-				.where(eq(schema.cachePurgeContinuations.id, continuation.id))
-				.run();
+			await this.recordFailure(continuation, error, 'resigning', now);
 
-			if (continuation.signingKeyId !== null) {
-				this.markRetrying(continuation.signingKeyId, 'resigning', now, message);
-			}
-
-			await armAlarmNoLaterThan(
-				this.context.ctx.storage,
-				Date.now() + noProgressRetryMs
-			);
 			return 'retrying';
 		}
 
-		let unsettled = queued;
-		let retryState: CachePurgeRowRetry = continuation;
+		try {
+			await this.context.purgeCacheTags(entries.map((entry) => entry.tag));
+		} catch (error) {
+			await this.recordFailure(continuation, error, 'cache-purge', now);
 
-		for (const accepted of chunk(entries, tagsPerPurgeRequest)) {
-			try {
-				await this.context.purgeCacheTags(accepted.map((entry) => entry.tag));
-			} catch (error) {
-				await this.recordPurgeFailure(continuation, retryState, error, now);
-
-				return 'retrying';
-			}
-
-			await this.purgeBackoff.recordSuccess();
-			unsettled = unsettled.slice(accepted.length);
-			const settlement = this.settleContinuation(
-				continuation,
-				accepted,
-				unsettled,
-				now
-			);
-
-			// The rotation was aborted during the request, so the rest of the page
-			// needs no purge.
-			if (settlement.kind === 'missing') {
-				return 'settled';
-			}
-
-			if (settlement.kind === 'kept') {
-				retryState = settlement.retry;
-			}
+			return 'retrying';
 		}
 
-		return remaining.length > 0 ? 'partial' : 'settled';
+		await this.purgeBackoff.recordSuccess();
+
+		// `abortKeyRotation` can delete a row while the request is in flight. The
+		// settlement of that row matches nothing, and the other rows still need
+		// theirs.
+		for (const part of page) {
+			this.settleContinuation(part.row, part.entries, part.remaining, now);
+		}
+
+		return this.hasBackfillContinuation() ? 'partial' : 'settled';
 	}
 
-	private async recordPurgeFailure(
-		continuation: typeof schema.cachePurgeContinuations.$inferSelect,
-		retryState: CachePurgeRowRetry,
+	// A D1 error in the claim is a failed attempt that has used no slot of the
+	// pace. The row records the error, the backfill reports a retry, and the
+	// alarm is armed for the usual delay after a failed pass.
+	private async recordClaimFailure(
+		continuation: ContinuationRow,
 		error: unknown,
 		now: IsoTimestamp
 	): Promise<void> {
-		const failedAt = Date.now();
+		const message = errorMessage(error);
+		this.context.db
+			.update(schema.cachePurgeContinuations)
+			.set({ lastAttemptAt: now, lastError: message })
+			.where(eq(schema.cachePurgeContinuations.id, continuation.id))
+			.run();
+
+		if (continuation.signingKeyId !== null) {
+			this.markRetrying(continuation.signingKeyId, 'cache-purge', now, message);
+		}
+
+		await armAlarmNoLaterThan(
+			this.context.ctx.storage,
+			this.now() + noProgressRetryMs
+		);
+	}
+
+	// A publication or a purge that fails has used its claim. The head row backs
+	// off with the retry state of the purge queue, which grows with each failure.
+	// A row that fails on every attempt therefore uses one slot of the pace for
+	// each retry, not one for each pass.
+	private async recordFailure(
+		continuation: ContinuationRow,
+		error: unknown,
+		operation: 'resigning' | 'cache-purge',
+		now: IsoTimestamp
+	): Promise<void> {
+		const failedAt = this.now();
 		const retry = await this.purgeBackoff.recordFailure(
 			error,
-			retryState,
+			continuation,
 			failedAt
 		);
 		const message = errorMessage(error);
@@ -905,7 +1058,7 @@ export class SigningKeysService {
 			.run();
 
 		if (continuation.signingKeyId !== null) {
-			this.markRetrying(continuation.signingKeyId, 'cache-purge', now, message);
+			this.markRetrying(continuation.signingKeyId, operation, now, message);
 		}
 
 		await armAlarmNoLaterThan(
@@ -1219,11 +1372,13 @@ export class SigningKeysService {
 
 	/**
 	Returns when the re-signing backfill next has work: `now` while a backfill
-	or one of its queued cache-tag purges is outstanding, the purge's retry time
-	until that time passes, or `undefined` when nothing remains.
+	needs staging, the time of the next purge request while a queued cache-tag
+	purge waits, or `undefined` when nothing remains. A purge waits for its
+	retry time and for the deployment's backfill pace, as far as this object has
+	learned it.
 
-	The alarm calls this before running the backfill. Both queries use the
-	Durable Object's local SQLite database.
+	The alarm calls this before running the backfill. It reads only this
+	object's local storage, so it makes no D1 call.
 	*/
 	async backfillWorkAt(now: number): Promise<number | undefined> {
 		const continuation = this.context.db
@@ -1240,7 +1395,10 @@ export class SigningKeysService {
 			.get();
 
 		if (continuation !== undefined) {
-			return this.purgeBackoff.dueAt(continuation, now);
+			return Math.max(
+				await this.purgeBackoff.dueAt(continuation, now),
+				(await this.purgePace.knownNextAt()) ?? now
+			);
 		}
 
 		const backfill = this.context.db
@@ -1260,10 +1418,10 @@ export class SigningKeysService {
 			return 'stalled';
 		}
 
-		// Staging another batch while entries are still queued would grow the
-		// backlog faster than the passes drain it.
-		if (purge === 'partial') {
-			await this.context.ctx.storage.setAlarm(Date.now());
+		// Waiting for the pace is the scheduled rhythm of the backfill. The alarm
+		// is armed for the end of the wait, and the pass reports no stall.
+		if (purge === 'paced') {
+			await this.armBackfillAlarm();
 
 			return 'progressed';
 		}
@@ -1276,22 +1434,27 @@ export class SigningKeysService {
 			.get();
 
 		if (row === undefined || this.completeIfDrained(row)) {
+			// Rows that remain wait for the next request.
+			if (purge === 'partial') {
+				await this.armBackfillAlarm();
+			}
+
 			return 'progressed';
 		}
 
 		try {
-			await this.stageBackfill(row);
+			await this.stageBackfills(row);
 		} catch (error) {
-			const failedAt = isoTimestamp(new Date());
+			const failedAt = isoTimestamp(new Date(this.now()));
 			this.markRetrying(row.keyId, 'resigning', failedAt, errorMessage(error));
 			await armAlarmNoLaterThan(
 				this.context.ctx.storage,
-				Date.now() + noProgressRetryMs
+				this.now() + noProgressRetryMs
 			);
 			return 'stalled';
 		}
 
-		await this.context.ctx.storage.setAlarm(Date.now());
+		await this.armBackfillAlarm();
 
 		return 'progressed';
 	}

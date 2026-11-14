@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as controlSchema from './db/control-d1-schema.ts';
 import {
 	attestationReference,
+	backfillPurgePace,
 	blobReference,
 	blobState,
 	cacheLifecycle,
@@ -37,6 +38,7 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 	const now = isoTimestamp(new Date());
 	await database.batch([
 		database.delete(controlDatabaseSplit),
+		database.delete(backfillPurgePace),
 		database.delete(attestationReference),
 		database.delete(blobReference),
 		database.delete(pathReadRevocation),

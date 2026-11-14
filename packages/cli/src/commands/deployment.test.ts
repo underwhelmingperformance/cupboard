@@ -66,7 +66,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			id: 'attestation-digest-index',
 			state: 'complete',
 			updatedAt: recorded
-		}
+		},
+		{ id: 'backfill-purge-pace', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -577,6 +578,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition attestation-digest-index',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition backfill-purge-pace',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },
