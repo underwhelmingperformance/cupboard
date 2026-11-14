@@ -20,7 +20,7 @@ This page is for maintainers who publish cupboard releases.
 
    The draft job downloads only the archive artifacts. Before it creates or
    updates the draft, it checks that its asset directory contains exactly the
-   four archives and `checksums.txt`, and fails otherwise. When it updates an
+   three archives and `checksums.txt`, and fails otherwise. When it updates an
    existing draft, it deletes every other asset attached to that draft.
 
    The release notes include the `nix.conf` lines for using the release cache.
@@ -33,7 +33,7 @@ This page is for maintainers who publish cupboard releases.
    tagged source and resolve when the release is published.
 
    Each platform job first checks the flake's reproducibility as described
-   below. All four checks must pass before the workflow can assemble the draft.
+   below. All three checks must pass before the workflow can assemble the draft.
 
 3. Review the draft and publish it. Publishing creates the tag. That starts the
    `release cache` workflow, which builds the tagged flake on every supported
@@ -73,7 +73,6 @@ a tag doesn't have to be a valid file name. The archives are:
 
 - `cupboard-linux-x64.tar.gz`
 - `cupboard-linux-arm64.tar.gz`
-- `cupboard-macos-x64.tar.gz`
 - `cupboard-macos-arm64.tar.gz`
 
 Older releases used names such as `cupboard-vX.Y.Z-<platform>-<arch>.tar.gz`,
@@ -92,12 +91,11 @@ builds it in three steps:
    and `cupboard config`.
 
 Before building release archives, the `release` workflow verifies the unchanged
-`.#cupboard` flake output on `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`
-and `aarch64-darwin`. Each runner obtains a candidate output with `nix build`,
-then uses [`nix build --rebuild`][nix-rebuild] to build the same derivation
-locally and compare the result with the candidate. The candidate and
-dependencies may come from trusted substituters. The verification rebuild always
-runs locally.
+`.#cupboard` flake output on `x86_64-linux`, `aarch64-linux` and
+`aarch64-darwin`. Each runner obtains a candidate output with `nix build`, then
+uses [`nix build --rebuild`][nix-rebuild] to build the same derivation locally
+and compare the result with the candidate. The candidate and dependencies may
+come from trusted substituters. The verification rebuild always runs locally.
 
 The comparison covers the installed CLI and `cupboard-hook-relay` helper in the
 Nix store output. It does not compare the bytes of the release archives, which

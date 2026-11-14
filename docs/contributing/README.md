@@ -227,7 +227,10 @@ the server and end-to-end suites first and runs at most two checks at a time,
 with explicit CPU budgets for test workers. Each check reports its duration;
 failures do not prevent the remaining checks from running. The scripts suite
 uses one worker because its tests create additional build and database
-subprocesses. You need Nix and Docker to run the full gate.
+subprocesses. You need Nix and Docker to run the full gate. Run it on x86-64
+Linux, arm64 Linux or macOS on Apple silicon. The flake has no outputs for
+x86-64 macOS, so the conformance suite fails there. The binary build script
+refuses that host, so the suites that build a release archive fail too.
 
 When adding a `check:*` script, register it in
 [`scripts/check-runner.ts`][check-runner] too. The scheduler rejects scripts
@@ -306,7 +309,7 @@ and `zizmor`.
 Run the full `pnpm check` before you push. CI runs each required source suite
 once and also checks:
 
-- the conformance suite on four systems;
+- the conformance suite on three systems;
 - a build of the flake;
 - a smoke test of the release binary;
 - the publication pipeline tier.

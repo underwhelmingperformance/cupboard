@@ -536,6 +536,14 @@ Pinning the action to a commit doesn't pin the version of the CLI that it
 installs. Pass the matching `cupboard-version` as well, as the example does. The
 actions can install releases from `v0.0.19` onwards.
 
+The actions refuse an x86-64 macOS runner whichever `cupboard-version` you pin,
+and also when you supply your own binary through `cupboard-path`. To keep such a
+runner working, pin the action to a ref from the last release before [x86-64
+macOS support ended][x86-64-macos], and set `cupboard-version` to that release
+or an earlier one. A later release has no x86-64 macOS archive.
+
+[x86-64-macos]: ../operator/upgrade-notes/x86-64-macos-removed.md
+
 Before installing a release, the action checks the downloaded archive against
 the release's `checksums.txt`. It then verifies the release's GitHub artifact
 attestation, which must meet three conditions:

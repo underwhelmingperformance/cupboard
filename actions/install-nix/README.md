@@ -1,9 +1,9 @@
 # Nix installation
 
-This internal action installs single-user Nix on GitHub-hosted Linux and macOS
-runners. Workflows reference it as `$/actions/install-nix`, so the installer
-comes from the same Cupboard revision as the workflow, including when another
-repository calls a reusable workflow.
+This internal action installs single-user Nix on GitHub-hosted Linux and arm64
+macOS runners. Workflows reference it as `$/actions/install-nix`, so the
+installer comes from the same Cupboard revision as the workflow, including when
+another repository calls a reusable workflow.
 
 The installer is adapted from [nix-quick-install-action v35][upstream], revision
 `9f63be77f412a248c9d9a65a4c82cf066cdf8f0c`, under the [Apache 2.0
