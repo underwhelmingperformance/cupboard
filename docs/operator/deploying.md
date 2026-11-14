@@ -517,6 +517,12 @@ Workers are serving, it:
 2. removes the secret from the Worker, whether or not the claim succeeded;
 3. caches the admin session, as `cupboard login` does.
 
+The admin must be a person. `/signup` refuses an ID token from the GitHub
+Actions issuer, `https://token.actions.githubusercontent.com`, with status 400
+and the problem `signup-issuer-unsupported`, because the `signup` rule could
+require only the token's `sub` claim. See
+[GitHub rules must pin the repository](../ci/trust-rules.md#github-rules-must-pin-the-repository).
+
 The ID token presented at the claim must belong to the identity that you
 confirmed. `init` reuses the token from the sign-in before the upload only if it
 is less than four minutes old. Otherwise `init` signs you in before the claim,

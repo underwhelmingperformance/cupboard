@@ -386,7 +386,14 @@ can extend its grants atomically. It preserves the ID, issuer, audience, claims,
 display and existing grants. The preview distinguishes retained grants from
 additions. A conditional write refuses an existing rule whose state changed
 after the preview. The repair does not disable the rule or create an ambiguous
-duplicate. Other jobs retain their existing authority.
+duplicate. Other jobs retain their existing authority. The repair extends only a
+rule whose claims are the same as the claims of the rule that it would add.
+Those claims always include the repository's exact `repository_id` and
+`repository_owner_id`. For a rule without them, the repair adds a new rule, and
+the old rule stays enabled. Remove such a rule yourself; see [GitHub rules must
+pin the repository][github-repository-pin].
+
+[github-repository-pin]: ./trust-rules.md#github-rules-must-pin-the-repository
 
 The repair still refuses selectors that it cannot safely model, protected owner
 rules and disabled rules. A narrower new rule can be added where the existing

@@ -603,6 +603,36 @@ Explicit attachment remains available for the exhausted generation.
 
 [cupboard attest attach]: ../reference/cli.md#cupboard-attest-attach
 
+### Trust rules without a repository pin
+
+The deployment refuses to add a trust rule for the GitHub Actions issuer,
+`https://token.actions.githubusercontent.com`, unless the rule requires an exact
+`repository_id` or `repository_owner_id`. It still matches stored rules without
+either claim. Each time a token exchange or a read acquisition through such a
+rule succeeds, the Worker logs the warning
+`OIDC trust rule without a repository pin matched`. The tenant Worker logs it
+for tenant trust rules, and the control Worker for control trust rules. The
+record has these fields:
+
+- `plane`: `tenant` or `control`.
+- `tenant`: the tenant's slug, for a tenant trust rule.
+- `rule`: the rule's ID.
+- `issuer`: the rule's issuer.
+- `repositoryId` and `repositoryOwnerId`: the token's `repository_id` and
+  `repository_owner_id` claims, which identify the repository that used the
+  rule.
+
+The record doesn't include the token. The Worker logs it only after an exchange
+or acquisition through the rule succeeds, so the records show the rules in use
+and the repositories that use them. An unused rule never appears, and neither
+does a rule whose exchanges are all refused, for example because they request
+grants that the rule doesn't give. To find every such rule, run
+`cupboard oidc-trust list` in each tenant and `cupboard control-oidc-trust list`
+for the control plane. Both mark the rules with `Repository pin: None`. Ask each
+tenant's administrators to replace their rules, and replace the control trust
+rules yourself. See
+[GitHub rules must pin the repository](../ci/trust-rules.md#github-rules-must-pin-the-repository).
+
 ### Upgrade progress
 
 `cupboard deployment status https://cupboard.example.workers.dev` shows the

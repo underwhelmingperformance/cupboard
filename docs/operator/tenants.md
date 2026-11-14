@@ -45,6 +45,14 @@ is removed.
 `--access` sets whether the tenant's default cache is public or private. It is
 required, as are the three `--owner-` options.
 
+The owner must be a person who signs in with `cupboard login`. The deployment
+refuses `https://token.actions.githubusercontent.com` as the owner's issuer,
+with status 400 and the code `TENANT_OWNER_ISSUER_UNSUPPORTED`. Every repository
+on GitHub can request a token from that issuer, and the owner's rule can require
+only the `sub` claim, which contains at most the repository's name. To let a
+GitHub Actions workflow publish, the owner adds a trust rule for it with
+`cupboard github setup`; see [Trust rules](../ci/trust-rules.md).
+
 The owner's issuer URL must match exactly on later attempts to create the same
 tenant, including any trailing slash. A different spelling returns a conflict.
 
