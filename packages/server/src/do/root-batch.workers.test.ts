@@ -553,7 +553,7 @@ describe('batched root requests', () => {
 					cost: {
 						...noCost,
 						rowsRead: 162,
-						rowsWritten: 33,
+						rowsWritten: 36,
 						d1Calls: 9,
 						d1RowsRead: 23,
 						r2Head: 6
@@ -564,7 +564,7 @@ describe('batched root requests', () => {
 					cost: {
 						...noCost,
 						rowsRead: 90,
-						rowsWritten: 33,
+						rowsWritten: 36,
 						d1Calls: 3,
 						d1RowsRead: 15,
 						r2Head: 4
@@ -645,7 +645,7 @@ describe('batched root requests', () => {
 		expect(cost).toStrictEqual({
 			...noCost,
 			rowsRead: 95,
-			rowsWritten: 30,
+			rowsWritten: 33,
 			d1Calls: 3,
 			d1RowsRead: 15,
 			r2Head: 4

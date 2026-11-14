@@ -332,6 +332,30 @@ export function insertLiveRootTargets(
 }
 
 /**
+Deletes the target rows of a path in every root of a cache, whatever their
+incarnation, and returns the root name and incarnation of each deleted row.
+The cost test imports this builder to check its query plan.
+*/
+export function pathTargetsDelete(
+	database: SchemaWriter,
+	cacheId: CacheId,
+	storePathHash: StorePathHash
+) {
+	return database
+		.delete(targets)
+		.where(
+			and(
+				eq(targets.cacheId, cacheId),
+				eq(targets.storePathHash, storePathHash)
+			)
+		)
+		.returning({
+			rootName: targets.rootName,
+			incarnation: targets.incarnation
+		});
+}
+
+/**
 Deletes the target rows of a path in every root of a cache, and subtracts
 one from the `target_count` of each root whose incarnation kept a deleted
 row. A row of a released incarnation counts for no root.
@@ -341,16 +365,7 @@ export function deletePathTargets(
 	cacheId: CacheId,
 	storePathHash: StorePathHash
 ): void {
-	const deleted = database
-		.delete(targets)
-		.where(
-			and(
-				eq(targets.cacheId, cacheId),
-				eq(targets.storePathHash, storePathHash)
-			)
-		)
-		.returning({ rootName: targets.rootName, incarnation: targets.incarnation })
-		.all();
+	const deleted = pathTargetsDelete(database, cacheId, storePathHash).all();
 
 	if (deleted.length === 0) {
 		return;

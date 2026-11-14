@@ -603,6 +603,13 @@
 			"when": 1794599767924,
 			"tag": "0085_root_target_counts",
 			"breakpoints": true
+		},
+		{
+			"idx": 86,
+			"version": "6",
+			"when": 1794659147996,
+			"tag": "0086_root_target_path_index",
+			"breakpoints": true
 		}
 	]
 }
