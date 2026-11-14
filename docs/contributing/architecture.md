@@ -311,6 +311,13 @@ one from the count of each root whose incarnation had one of those rows. The
 drain of a root release deletes only rows of a released incarnation, so it
 changes no count.
 
+The deletion finds the path's rows through `retention_root_target_path_idx`, an
+index on `(cache_id, store_path_hash)`. The `roots` phase of a collection scan
+reads the same index in path order, one page at a time. Neither statement reads
+the target rows of other paths. Both must read rows of every incarnation, so the
+index is not partial. Each target row costs one more index entry when it is
+inserted.
+
 A root that existed before migration 0085 has no count, and the listing counts
 its target rows instead. The `root-target-count-backfill` maintenance pass
 counts these roots in rowid order, up to the highest rowid at the time of the

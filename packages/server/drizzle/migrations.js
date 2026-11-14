@@ -85,6 +85,7 @@ import m0082 from './0082_cache_purge_retry.sql';
 import m0083 from './0083_cache_purge_priority.sql';
 import m0084 from './0084_root_incarnations.sql';
 import m0085 from './0085_root_target_counts.sql';
+import m0086 from './0086_root_target_path_index.sql';
 
 export default {
 	journal,
@@ -174,6 +175,7 @@ export default {
 		m0082,
 		m0083,
 		m0084,
-		m0085
+		m0085,
+		m0086
 	}
 };

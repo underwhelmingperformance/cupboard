@@ -1066,7 +1066,15 @@ export const retentionRootTargets = sqliteTable(
 		// them removes them.
 		index('retention_root_target_legacy_idx')
 			.on(table.cacheId, table.rootName)
-			.where(sql`${table.incarnation} IS NULL`)
+			.where(sql`${table.incarnation} IS NULL`),
+		// A commit that reclaims a path deletes the path's rows in every root,
+		// and the collection scan seeds from every row of the cache in path
+		// order. Both read rows of every incarnation, including released ones,
+		// so this index must not be partial.
+		index('retention_root_target_path_idx').on(
+			table.cacheId,
+			table.storePathHash
+		)
 	]
 );
 

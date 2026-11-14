@@ -371,11 +371,11 @@ describe('root target counts', () => {
 
 		expect({ small, large }).toStrictEqual({
 			small: {
-				cost: { rowsRead: 28, rowsWritten: 6 },
+				cost: { rowsRead: 28, rowsWritten: 7 },
 				counts: { expired: smallRoot + 1, live: smallRoot + 3 }
 			},
 			large: {
-				cost: { rowsRead: 28, rowsWritten: 6 },
+				cost: { rowsRead: 28, rowsWritten: 7 },
 				counts: { expired: largeRoot + 1, live: largeRoot + 3 }
 			}
 		});

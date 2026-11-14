@@ -33,7 +33,7 @@ import {
 
 import { type PushCredentialIssuer } from '../blob/push-credential.ts';
 import { wellFormedPushId } from '../blob/push-id.ts';
-import { type ResolvedCache } from '../db/cache.ts';
+import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	GarbageCollectionBarrierMissingError,
@@ -61,6 +61,7 @@ import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
+	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
@@ -127,9 +128,32 @@ type SeedSource = Extract<
 >;
 
 // The seed phases of the scan, in the order the scan runs them.
-const seedSources: readonly SeedSource[] = reachabilitySources.filter(
+export const seedSources: readonly SeedSource[] = reachabilitySources.filter(
 	(source): source is SeedSource => source.role === 'seed'
 );
+
+/**
+Selects the distinct paths of a seed source in one cache that sort after
+`cursor`, one page and one more path at a time, so the caller can tell
+whether the phase has more. Several roots can retain the same path, so each
+path takes only one place in the page. The cost test imports this builder
+to check its query plan.
+*/
+export function seedPageSelect(
+	database: SchemaWriter,
+	source: SeedSource,
+	cacheId: CacheId,
+	cursor: string
+) {
+	return database
+		.selectDistinct({ storePathHash: source.storePathHash })
+		.from(source.table)
+		.where(
+			and(eq(source.cacheId, cacheId), sql`${source.storePathHash} > ${cursor}`)
+		)
+		.orderBy(asc(source.storePathHash))
+		.limit(phaseStepSize + 1);
+}
 
 const barrierTriggerPrefix = 'garbage_collection_barrier_';
 
@@ -601,27 +625,18 @@ export class GarbageCollectionService {
 		}
 	}
 
-	// Several roots can retain the same path. Select distinct hashes so each
-	// path consumes only one place in the frontier page.
 	private advanceSeed(
 		cache: ResolvedCache,
 		source: SeedSource,
 		cursor: string
 	): void {
-		const page = phaseStepSize;
-		const rows = this.context.db
-			.selectDistinct({ storePathHash: source.storePathHash })
-			.from(source.table)
-			.where(
-				and(
-					eq(source.cacheId, cache.id),
-					sql`${source.storePathHash} > ${cursor}`
-				)
-			)
-			.orderBy(asc(source.storePathHash))
-			.limit(page + 1)
-			.all();
-		const batch = rows.slice(0, page);
+		const rows = seedPageSelect(
+			this.context.db,
+			source,
+			cache.id,
+			cursor
+		).all();
+		const batch = rows.slice(0, phaseStepSize);
 
 		this.insertFrontier(
 			cache,
