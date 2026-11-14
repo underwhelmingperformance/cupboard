@@ -210,6 +210,7 @@ import {
 	verifyTenant
 } from './routing/scheduled.ts';
 import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
+import { isDurableObjectReset } from './runtime-fault.ts';
 import worker from './worker.ts';
 
 export { testControlDatabase } from './control-database.test-support.ts';
@@ -355,10 +356,7 @@ async function abortFixtureWorkerServer(): Promise<void> {
 			state.abort('test server reset');
 		});
 	} catch (error) {
-		if (
-			!(error instanceof Error) ||
-			Reflect.get(error, 'durableObjectReset') !== true
-		) {
+		if (!isDurableObjectReset(error)) {
 			throw error;
 		}
 	}
