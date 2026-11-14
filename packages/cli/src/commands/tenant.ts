@@ -28,6 +28,9 @@ import {
 } from '@cupboard/reporter';
 import { collectProgressively } from '@cupboard/shared/collections';
 import type { ReadUser } from '@cupboard/shared/http';
+import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
+import { abortableSleep } from '@cupboard/shared/retry';
+import { ORPCError } from '@orpc/client';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -36,8 +39,14 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
 import { listingLimits, tenantPages } from '../client/listings.ts';
 import { type CallOptions, controlRpc } from '../client/orpc.ts';
+import { tenantMembershipUnpublishedErrorOf } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { CliUsageError } from '../errors.ts';
+import {
+	CliUsageError,
+	CupboardHttpError,
+	TenantCreateIncompleteError,
+	type TenantMembershipUnpublishedError
+} from '../errors.ts';
 import { generateReadPassword, parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
@@ -218,9 +227,17 @@ export function registerTenantCommands(
 		)
 		.action(async (url: URL, id: string, options: CreateOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
+			// The client obtains the owner's token before its first fetch, so a
+			// failed sign-in throws before any request reaches the deployment.
+			let wasRequestSent = false;
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
+				signal: programOptions.signal,
+				fetcher: (input, init) => {
+					wasRequestSent = true;
+
+					return keepAliveFetch(input, init);
+				}
 			});
 			const readSelection = readCredentialFromOptions(options);
 			const body = tenantCreateBodySchema.parse({
@@ -235,12 +252,13 @@ export function registerTenantCommands(
 				})
 			});
 
-			await runTenantCreate(
-				body,
-				reporter,
-				rpc.tenants,
-				readSelection.generatedPassword
-			);
+			await runTenantCreate(body, reporter, rpc.tenants, {
+				...(readSelection.generatedPassword !== undefined && {
+					generatedReadPassword: readSelection.generatedPassword
+				}),
+				sleep: (ms) => abortableSleep(ms, programOptions.signal),
+				wasRequestSent: () => wasRequestSent
+			});
 		});
 
 	tenant
@@ -473,15 +491,84 @@ function tenantClient(url: URL, options: ProgramOptions): TenantClient {
 	}).tenants;
 }
 
+// The most create requests, and the longest wait between two of them, when the
+// deployment creates the tenant but cannot publish its membership.
+const maxCreateAttempts = 3;
+const maxCreateRetryWaitSeconds = 10;
+
+const serverErrorStatus = 500;
+const requestTimeoutStatus = 408;
+
+export interface TenantCreateOptions {
+	/**
+	The read password that the command generated and put in the request body.
+	*/
+	readonly generatedReadPassword?: string;
+	readonly sleep?: (ms: number) => Promise<void>;
+	/**
+	Whether the client has sent a request to the deployment. A failure before
+	the first request, such as a missing sign-in, cannot have created the
+	tenant. The default treats every failure as one after a request.
+	*/
+	readonly wasRequestSent?: () => boolean;
+}
+
+/**
+Creates the tenant and reports it. When the deployment answers that it created
+the tenant but could not publish its membership, the function repeats the
+identical request, with the same generated read password, after the delay
+that the deployment asks for, up to `maxCreateAttempts` requests. The create
+is idempotent for an identical request. When every request gets that answer,
+or a later request fails in another way, the function throws
+`TenantCreateIncompleteError`. Its cause is the last failure.
+
+A new run generates a different password, which the deployment refuses for an
+existing tenant. So whenever the tenant may exist and the function fails, it
+prints the generated credential through the reporter before it throws: after
+any failure that follows a `TENANT_MEMBERSHIP_UNPUBLISHED` answer, including an
+abort, and after a failure of a sent request whose outcome is unknown, such as
+a 5xx, a timeout or a lost connection.
+*/
 export async function runTenantCreate(
 	body: TenantCreateBody,
 	reporter: Reporter,
 	client: Pick<TenantClient, 'create'>,
-	generatedReadPassword?: string
+	options: TenantCreateOptions = {}
 ): Promise<void> {
-	const summary = await reporter.phase('Creating tenant', () =>
-		client.create(body)
-	);
+	const {
+		generatedReadPassword,
+		sleep = (ms) => abortableSleep(ms),
+		wasRequestSent = () => true
+	} = options;
+	const generated =
+		generatedReadPassword === undefined || body.read === undefined
+			? undefined
+			: { user: body.read.user, password: generatedReadPassword };
+	const progress: CreateProgress = { wasUnpublished: false };
+	let summary: TenantSummary;
+
+	try {
+		summary = await reporter.phase('Creating tenant', () =>
+			createRepeatingUnpublished(
+				body,
+				client,
+				generated !== undefined,
+				sleep,
+				progress
+			)
+		);
+	} catch (error) {
+		if (
+			generated !== undefined &&
+			(progress.wasUnpublished ||
+				(wasRequestSent() && hasUnknownOutcome(error)))
+		) {
+			reportUnconfirmedCredential(reporter, body.id, generated);
+		}
+
+		throw error;
+	}
+
 	const rows: ResultRow[] = [
 		{ label: 'Tenant', value: summary.id },
 		{ label: 'Status', value: tenantStatusLabel(summary.status) },
@@ -508,6 +595,105 @@ export async function runTenantCreate(
 		title: 'Tenant',
 		data: { ...summary, generatedReadPassword },
 		rows
+	});
+}
+
+/**
+Whether a request of `createRepeatingUnpublished` got the answer that the
+deployment created the tenant but could not publish its membership.
+*/
+interface CreateProgress {
+	wasUnpublished: boolean;
+}
+
+async function createRepeatingUnpublished(
+	body: TenantCreateBody,
+	client: Pick<TenantClient, 'create'>,
+	hasGeneratedPassword: boolean,
+	sleep: (ms: number) => Promise<void>,
+	progress: CreateProgress
+): Promise<TenantSummary> {
+	let unpublished: TenantMembershipUnpublishedError | undefined;
+
+	for (let attempt = 1; attempt <= maxCreateAttempts; attempt += 1) {
+		if (unpublished !== undefined) {
+			const seconds = Math.min(
+				unpublished.retryAfterSeconds,
+				maxCreateRetryWaitSeconds
+			);
+			await sleep(seconds * 1000);
+		}
+
+		try {
+			return await client.create(body);
+		} catch (error) {
+			const answer = tenantMembershipUnpublishedErrorOf(error);
+
+			if (answer === undefined && progress.wasUnpublished) {
+				throw new TenantCreateIncompleteError(
+					body.id,
+					attempt,
+					hasGeneratedPassword,
+					{ cause: error }
+				);
+			}
+
+			if (answer === undefined) {
+				throw error;
+			}
+
+			unpublished = answer;
+			progress.wasUnpublished = true;
+		}
+	}
+
+	throw new TenantCreateIncompleteError(
+		body.id,
+		maxCreateAttempts,
+		hasGeneratedPassword,
+		{ cause: unpublished }
+	);
+}
+
+// Whether the deployment may have created the tenant although a sent request
+// failed. A refusal with a 4xx status other than 408 created nothing. The
+// caller checks first that a request was sent.
+function hasUnknownOutcome(error: unknown): boolean {
+	const status =
+		error instanceof ORPCError || error instanceof CupboardHttpError
+			? error.status
+			: undefined;
+
+	return (
+		status === undefined ||
+		status === requestTimeoutStatus ||
+		status >= serverErrorStatus
+	);
+}
+
+function reportUnconfirmedCredential(
+	reporter: Reporter,
+	tenant: TenantId,
+	credential: { readonly user: ReadUser; readonly password: string }
+): void {
+	reporter.result({
+		kind: 'tenant-credential',
+		title: 'Unconfirmed tenant read credential',
+		data: {
+			id: tenant,
+			readUser: credential.user,
+			generatedReadPassword: credential.password
+		},
+		rows: [
+			{ label: 'Tenant', value: tenant },
+			{ label: 'Read user', raw: true, value: credential.user },
+			{ label: 'Read password', raw: true, value: credential.password },
+			{
+				label: 'Note',
+				value:
+					'the tenant may exist with this credential; save it now, because running the command again generates a different password, which the deployment refuses for an existing tenant'
+			}
+		]
 	});
 }
 

@@ -25,6 +25,7 @@ import {
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
 	TenantAdmissionUnavailableError,
+	TenantMembershipUnpublishedError,
 	TenantOffboardingError,
 	UploadNotFoundError,
 	UploadRequestLimitExceededError
@@ -123,6 +124,35 @@ describe('bridgedError', () => {
 			data: { id: 'beta' }
 		});
 		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it('returns TENANT_MEMBERSHIP_UNPUBLISHED with the tenant and the retry delay, and sets Retry-After', () => {
+		const error = new TenantMembershipUnpublishedError(
+			tenantIdSchema.parse('beta'),
+			new Error('KV refused the filter')
+		);
+		const headers = new Headers();
+
+		const bridged = bridgedError(rootLogger(), error, headers);
+		if (!(bridged instanceof ORPCError)) {
+			throw new TypeError('Expected an oRPC error');
+		}
+
+		expect({
+			error: bridged.toJSON(),
+			retryAfter: headers.get('retry-after'),
+			logs: capture.logs
+		}).toStrictEqual({
+			error: {
+				defined: false,
+				code: 'TENANT_MEMBERSHIP_UNPUBLISHED',
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				message: error.message,
+				data: { id: 'beta', retryAfterSeconds: 5 }
+			},
+			retryAfter: '5',
+			logs: []
+		});
 	});
 
 	it('returns CACHE_ALREADY_EXISTS with the cache scope', () => {

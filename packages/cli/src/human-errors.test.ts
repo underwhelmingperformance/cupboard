@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	charactersRead,
 	unsafeRegularExpressions
@@ -17,6 +18,8 @@ import {
 	SessionRejectedError,
 	SessionRenewalExpiredError,
 	SessionRenewalUnconfirmedError,
+	TenantCreateIncompleteError,
+	TenantMembershipUnpublishedError,
 	TransitionIncompleteError,
 	UnreachableHostError
 } from './errors.ts';
@@ -344,6 +347,29 @@ describe('human error presentation', () => {
 		expect(
 			formatHumanError(new ORPCError(code, { message: 'projection SQL' }))
 		).toBe(expected);
+	});
+
+	// Both errors have their own operator text, which tells the operator that
+	// the tenant exists and how to publish its membership. The default output
+	// shows that text instead of the generic advice to run with --debug.
+	it.each([
+		{
+			error: new TenantMembershipUnpublishedError(
+				tenantIdSchema.parse('acme'),
+				5
+			)
+		},
+		{
+			error: new TenantCreateIncompleteError(
+				tenantIdSchema.parse('acme'),
+				3,
+				true
+			)
+		}
+	])('renders $error.name with its own operator text', ({ error }) => {
+		expect(formatHumanError(error, { action: 'create tenant', target })).toBe(
+			error.humanMessage
+		);
 	});
 
 	it('does not treat an unmapped CLI subclass as approved operator prose', () => {

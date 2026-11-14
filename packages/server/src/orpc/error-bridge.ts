@@ -30,6 +30,7 @@ import {
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
+	TenantMembershipUnpublishedError,
 	TenantOffboardingError,
 	TenantQuotaBelowUsageError,
 	UploadRequestLimitExceededError
@@ -60,8 +61,8 @@ function isUntypedD1Overload(error: unknown): boolean {
 }
 
 /**
-Converts cache, signing-key, tenant-removal and tenant-quota conflicts to
-the contract's typed errors.
+Converts cache, signing-key, tenant-removal and tenant-quota conflicts, and an
+unpublished membership after a tenant create, to the contract's typed errors.
 Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
 generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
 original HTTP status and message remain unchanged.
@@ -192,6 +193,14 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { id: error.tenant }
+		});
+	}
+
+	if (error instanceof TenantMembershipUnpublishedError) {
+		return new ORPCError('TENANT_MEMBERSHIP_UNPUBLISHED', {
+			status: error.status,
+			message: error.message,
+			data: { id: error.tenant, retryAfterSeconds: error.retryAfterSeconds }
 		});
 	}
 

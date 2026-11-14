@@ -93,6 +93,7 @@ import {
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
 	SubjectTokenVerificationFailedError,
+	TenantMembershipUnpublishedError,
 	UnauthenticatedError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError,
@@ -143,6 +144,7 @@ import {
 } from './instance-config.ts';
 import {
 	invalidateTenantRow,
+	MembershipFilterWriteError,
 	rebuildMembershipFilter,
 	refreshTenantMembership,
 	refreshTenantMembershipPage,
@@ -782,6 +784,7 @@ export async function controlTenantCreate(
 	env: Env,
 	body: TenantCreateBody,
 	origin: string,
+	logger: Logger,
 	rebuildFilter: (env: Env) => Promise<void> = rebuildMembershipFilter
 ): Promise<TenantSummary> {
 	if (!isAllowedIssuerTransport(body.ownerIssuer, canUseLoopbackHttp(env))) {
@@ -792,10 +795,9 @@ export async function controlTenantCreate(
 
 	// Provision in order: write the authoritative row, configure the Durable
 	// Object, write the tenant's membership marker, then publish the rebuilt
-	// filter. Admission comes from the marker and the filter, so the object is
-	// already configured by the time a request can reach it. Every step is
-	// idempotent, so the caller can retry the whole create after a failure part
-	// way through.
+	// filter. Admission needs the marker and the filter, so the object is
+	// configured before any request can reach it. Every step is idempotent, so
+	// the caller can retry the whole create after any step fails.
 	const now = new Date();
 	const summary = await ensureTenant(database, body, isoTimestamp(now));
 	const issuer = oidcIssuerSchema.parse(`${origin}/t/${summary.id}`);
@@ -812,12 +814,26 @@ export async function controlTenantCreate(
 	await writeTenantMember(env.TENANT_CACHE, summary.id);
 	await invalidateTenantRow(summary.id);
 
-	// Publish the rebuilt filter so the new tenant is admitted within the filter
-	// cache TTL. A filter negative is definitive, so the create must not report
-	// success while leaving the tenant inadmissible until the hourly cron: if the
-	// filter cannot publish, the create fails and the caller retries. The row and
-	// marker already persist, so the retry (or the cron) recovers cleanly.
-	await rebuildFilter(env);
+	// The publication deletes the filter when it cannot write a verified one,
+	// and admission then checks the marker. It throws
+	// `MembershipFilterWriteError` only when the delete fails too. The stored
+	// filter can then exclude the tenant, and a filter negative refuses every
+	// request without reading the marker, so the create must not report
+	// success.
+	try {
+		await rebuildFilter(env);
+	} catch (error) {
+		if (!(error instanceof MembershipFilterWriteError)) {
+			throw error;
+		}
+
+		logger.error('membership filter not published after tenant create', {
+			tenant: summary.id,
+			error
+		});
+
+		throw new TenantMembershipUnpublishedError(summary.id, error);
+	}
 
 	return summary;
 }

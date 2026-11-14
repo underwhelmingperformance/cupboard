@@ -1,4 +1,5 @@
 import {
+	tenantMembershipUnpublishedErrorDataSchema,
 	tenantOffboardingErrorDataSchema,
 	tenantQuotaBelowUsageErrorDataSchema
 } from '@cupboard/protocol/tenants';
@@ -20,6 +21,7 @@ import {
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
+	TenantMembershipUnpublishedError,
 	TenantOffboardingError,
 	UploadRequestLimitExceededError
 } from '../errors.ts';
@@ -103,6 +105,32 @@ export function isStaleUploadError(error: unknown): boolean {
 }
 
 /**
+The `TenantMembershipUnpublishedError` for a tenant create that the server
+refused with `TENANT_MEMBERSHIP_UNPUBLISHED`, after it had created the tenant.
+Undefined for any other error.
+*/
+export function tenantMembershipUnpublishedErrorOf(
+	error: unknown
+): TenantMembershipUnpublishedError | undefined {
+	if (
+		!(error instanceof ORPCError) ||
+		error.code !== 'TENANT_MEMBERSHIP_UNPUBLISHED'
+	) {
+		return undefined;
+	}
+
+	const data = tenantMembershipUnpublishedErrorDataSchema.safeParse(error.data);
+
+	return data.success
+		? new TenantMembershipUnpublishedError(
+				data.data.id,
+				data.data.retryAfterSeconds,
+				{ cause: error }
+			)
+		: undefined;
+}
+
+/**
 The `CacheRemovedError` for a push request that the server refused with
 `CACHE_REMOVED` because the push's cache was removed while the push ran.
 Undefined for any other error.
@@ -137,8 +165,8 @@ export interface TranslateRpcErrorOptions {
 
 /**
 Converts authentication and scope failures, `CACHE_REMOVED`,
-`TENANT_OFFBOARDING`, `TENANT_QUOTA_BELOW_USAGE`,
-`UPLOAD_REQUEST_LIMIT_EXCEEDED`, and any oRPC
+`TENANT_OFFBOARDING`, `TENANT_MEMBERSHIP_UNPUBLISHED`,
+`TENANT_QUOTA_BELOW_USAGE`, `UPLOAD_REQUEST_LIMIT_EXCEEDED`, and any oRPC
 error with status 408, 429, 503 or 507, into CLI errors. Every other oRPC
 error and every non-oRPC error passes through unchanged. A caller that
 needs the oRPC code or data of a 408, 429, 503 or 507 must inspect the error
@@ -192,6 +220,10 @@ export function translateRpcError(
 			const data = tenantOffboardingErrorDataSchema.safeParse(error.data);
 
 			return data.success ? new TenantOffboardingError(data.data.id) : error;
+		}
+
+		case 'TENANT_MEMBERSHIP_UNPUBLISHED': {
+			return tenantMembershipUnpublishedErrorOf(error) ?? error;
 		}
 
 		default: {

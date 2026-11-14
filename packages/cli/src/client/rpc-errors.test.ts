@@ -1,3 +1,4 @@
+import { transientExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
@@ -9,6 +10,7 @@ import {
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
+	TenantMembershipUnpublishedError,
 	TenantOffboardingError
 } from '../errors.ts';
 
@@ -128,6 +130,33 @@ describe('translateRpcError', () => {
 		expect(translateRpcError(error)).toStrictEqual(
 			new QuotaExceededError('', { cause: error })
 		);
+	});
+
+	it('translates TENANT_MEMBERSHIP_UNPUBLISHED into TenantMembershipUnpublishedError with the tenant and the retry delay', () => {
+		const error = new ORPCError('TENANT_MEMBERSHIP_UNPUBLISHED', {
+			status: 503,
+			message: 'raw',
+			data: { id: 'beta', retryAfterSeconds: 5 }
+		});
+		const translated = translateRpcError(error);
+
+		expect(
+			translated instanceof TenantMembershipUnpublishedError
+				? {
+						name: translated.name,
+						tenant: translated.tenant,
+						retryAfterSeconds: translated.retryAfterSeconds,
+						cause: translated.cause,
+						exitCode: translated.exitCode
+					}
+				: translated
+		).toStrictEqual({
+			name: 'TenantMembershipUnpublishedError',
+			tenant: 'beta',
+			retryAfterSeconds: 5,
+			cause: error,
+			exitCode: transientExitCode
+		});
 	});
 
 	it('translates TENANT_OFFBOARDING into TenantOffboardingError with the tenant ID', () => {
