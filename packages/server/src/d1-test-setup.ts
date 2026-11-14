@@ -3,7 +3,7 @@ import { cloudflareSink } from '@cupboard/logger/sinks';
 import { stopLogging } from '@cupboard/logger/testing';
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { afterEach, beforeEach, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, onTestFailed, vi } from 'vitest';
 
 import { resumeAlarms } from './alarm-fence.test-support.ts';
 import {
@@ -12,6 +12,7 @@ import {
 } from './control-database.test-support.ts';
 import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import {
+	drainAlarmHandlers,
 	finishTestServerLifecycle,
 	StalledMaintenancePassError
 } from './test-support.ts';
@@ -24,9 +25,15 @@ import {
 await applyD1Migrations(env.CUPBOARD_DB, env.TEST_MIGRATIONS);
 await applyControlD1TestMigrations();
 
+// The ids of the tests that failed, which the `afterAll` hook reads.
+const failedTests = new Set<string>();
+
 // Fresh Durable Objects do not isolate D1 between tests. Add new shared tables
 // to resetD1TestState as the schema grows.
-beforeEach(async () => {
+beforeEach(async ({ task }) => {
+	onTestFailed(() => {
+		failedTests.add(task.id);
+	});
 	resumeAlarms();
 	configureLogging({ sink: cloudflareSink() });
 	vi.useFakeTimers({ toFake: ['Date'] });
@@ -42,6 +49,18 @@ beforeEach(async () => {
 		const { keys } = await kv.list();
 		await Promise.all(keys.map((key) => kv.delete(key.name)));
 	}
+});
+
+// The last test's `afterEach` stops alarms, but a handler that is already
+// running continues. Wait for it so that it does not run into the teardown of
+// this file's environment. A failed test can leave a handler hung, and waiting
+// for it here would take a second time limit.
+afterAll(async () => {
+	if (failedTests.size > 0) {
+		return;
+	}
+
+	await drainAlarmHandlers();
 });
 
 afterEach(async () => {

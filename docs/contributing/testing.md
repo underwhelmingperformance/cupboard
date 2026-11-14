@@ -216,6 +216,22 @@ started keeps that test's generation, even when a call in a later test waits for
 the work. The retry alarm of a shared migration, for example, is refused in that
 case.
 
+An alarm handler that is already running when the last test of a file ends
+continues after the `afterEach` hook. A shared `afterAll` hook waits for every
+running alarm handler to finish, so that none runs into the teardown of the
+file's environment. Each file has its own workerd process, so a handler cannot
+run into another file. The hook skips the wait when a test in the file failed,
+because that test can have left a handler hung, and the wait would take a second
+time limit.
+
+A handler on an object that workerd aborted never finishes. The hook waits
+inside each object, so its call constructs a replacement instance if none
+exists. The constructor of a replacement instance stops the wait for the
+handlers of the instance that it replaces, and the hook reads the handlers after
+that. `resetTestServer` and `restartTestServers` also tell the hook to stop
+waiting for the handlers of the objects that they abort, because they know about
+those aborts at once.
+
 `completeCommitSession` predates these rules and gives each phase a deadline of
 20 seconds. When it throws `CommitFixturePhaseTimeoutError` or
 `CommitFixturePassesExhaustedError`, start with the phase and the socket state

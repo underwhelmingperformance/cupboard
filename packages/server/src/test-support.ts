@@ -113,8 +113,12 @@ import { z } from 'zod';
 import migrations from '../drizzle/migrations.js';
 
 import {
+	abandonAlarmHandlers,
+	abandonAllAlarmHandlers,
 	closeAlarmFence,
+	drainAlarms,
 	openAlarmFence,
+	runningAlarmHandlersOf,
 	stopAlarms
 } from './alarm-fence.test-support.ts';
 import { issueAccessJwt } from './auth/auth.ts';
@@ -353,6 +357,7 @@ set.
 async function abortFixtureWorkerServer(): Promise<void> {
 	try {
 		await runInDurableObject(fixtureWorkerServer(), (_instance, state) => {
+			abandonAlarmHandlers(state.id);
 			state.abort('test server reset');
 		});
 	} catch (error) {
@@ -373,6 +378,7 @@ export async function restartTestServers(): Promise<void> {
 		.map((stub) => stub.id)
 		.toArray();
 	const currentId = harness.server.id;
+	abandonAllAlarmHandlers();
 	await abortAllDurableObjects();
 
 	const namespace = env.CUPBOARD_DO as DurableObjectNamespace<CupboardServer>;
@@ -1022,6 +1028,21 @@ export async function finishTestServerLifecycle(): Promise<
 	harness.serversUsed.clear();
 
 	return stalled;
+}
+
+/**
+Waits for every alarm handler that is running, as {@link drainAlarms}
+describes. The shared `afterAll` hook calls it.
+*/
+export function drainAlarmHandlers(): Promise<void> {
+	return drainAlarms((objectId) =>
+		runInDurableObject(
+			env.CUPBOARD_DO.get(env.CUPBOARD_DO.idFromString(objectId)),
+			async () => {
+				await Promise.all(runningAlarmHandlersOf(objectId));
+			}
+		)
+	);
 }
 
 /**

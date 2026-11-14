@@ -33,6 +33,10 @@ interface AlarmControls {
 	readonly armedObjects: Map<string, DurableObjectId>;
 	readonly controlledStorage: WeakSet<DurableObjectStorage>;
 	/**
+	The alarm handlers that are running, by object ID.
+	*/
+	readonly runningAlarms: Map<string, Set<Promise<void>>>;
+	/**
 	Contains the test generation in which the running call started. The
 	generation is in the context of each call and not in the state of the
 	object, so a call that workerd aborts leaves nothing behind.
@@ -51,6 +55,7 @@ function createControls(): AlarmControls {
 		stoppedObjects: new Set(),
 		armedObjects: new Map(),
 		controlledStorage: new WeakSet(),
+		runningAlarms: new Map(),
 		callGenerations: new AsyncLocalStorage(),
 		generation: 0
 	};
@@ -72,6 +77,8 @@ function isAlarmControls(value: unknown): value is AlarmControls {
 		value.armedObjects instanceof Map &&
 		'controlledStorage' in value &&
 		value.controlledStorage instanceof WeakSet &&
+		'runningAlarms' in value &&
+		value.runningAlarms instanceof Map &&
 		'callGenerations' in value &&
 		value.callGenerations instanceof AsyncLocalStorage &&
 		'generation' in value &&
@@ -120,6 +127,9 @@ export function controlAlarms(state: DurableObjectState): void {
 
 	controls.controlledStorage.add(storage);
 	const id = state.id.toString();
+	// An object has one live instance. A handler of the instance that this one
+	// replaces never finishes, whatever caused the replacement.
+	controls.runningAlarms.delete(id);
 	const armAlarm = storage.setAlarm.bind(storage);
 
 	storage.setAlarm = (time, options) => {
@@ -205,19 +215,36 @@ export function runInTestGeneration<T>(call: () => T): T {
 /**
 Runs the object's alarm handler unless a test has ignored deliveries to the
 object or stopped its alarms. A skipped handler returns at once. The handler
-runs in the current test generation.
+runs in the current test generation, and {@link drainAlarms} waits for it
+until it finishes.
 */
-export function runAlarmHandler(
+export async function runAlarmHandler(
 	state: DurableObjectState,
 	handler: () => Promise<void>
 ): Promise<void> {
 	const id = state.id.toString();
 
 	if (controls.ignoredDeliveries.has(id) || controls.stoppedObjects.has(id)) {
-		return Promise.resolve();
+		return;
 	}
 
-	return runInTestGeneration(handler);
+	const finished = Promise.withResolvers<undefined>();
+	const handlers = controls.runningAlarms.get(id) ?? new Set();
+
+	handlers.add(finished.promise);
+	controls.runningAlarms.set(id, handlers);
+
+	try {
+		await runInTestGeneration(handler);
+	} finally {
+		handlers.delete(finished.promise);
+
+		if (handlers.size === 0 && controls.runningAlarms.get(id) === handlers) {
+			controls.runningAlarms.delete(id);
+		}
+
+		finished.resolve(undefined);
+	}
 }
 
 /**
@@ -256,6 +283,74 @@ export function stopAlarms(used: Iterable<DurableObjectId>): DurableObjectId[] {
 	controls.generation += 1;
 
 	return objects.values().toArray();
+}
+
+/**
+The alarm handlers that are running on the object with the given ID. Call it
+from inside the object, after its constructor has run: the constructor of a
+replacement instance abandons the handlers of the instance that it replaces.
+*/
+export function runningAlarmHandlersOf(objectId: string): Promise<void>[] {
+	return [...(controls.runningAlarms.get(objectId) ?? [])];
+}
+
+/**
+Waits from inside the object with the given ID, so that the object's
+constructor has run, for the handlers that {@link runningAlarmHandlersOf}
+returns.
+*/
+export type WaitInObject = (objectId: string) => Promise<unknown>;
+
+/**
+Resolves when no alarm handler is running on any object. The shared
+`afterAll` hook calls it so that no handler runs into the teardown of the
+file's environment, where a call to the Vitest process fails with
+`EnvironmentTeardownError`.
+
+A handler finishes in the context of its object. A test that awaits a promise
+that the object resolves continues in the object's context, and its next call
+to the Vitest process fails with `Cannot perform I/O on behalf of a different
+Durable Object`. `waitInObject` therefore does the wait inside the object, as
+the tests of `d1-test-reset` do. It reads the handlers there, after the call
+has constructed any replacement instance. A replacement abandons the handlers
+of the instance that it replaces, so a handler that workerd cancelled before
+the call is not awaited.
+
+A handler can start while the function waits, because workerd delivers an
+alarm that was already due when its object stopped. The function therefore
+reads the objects again after each wait, and it returns when a read finds
+none. Each wait ends when the handlers that it waits for finish.
+*/
+export async function drainAlarms(waitInObject: WaitInObject): Promise<void> {
+	let objectIds = controls.runningAlarms.keys().toArray();
+
+	while (objectIds.length > 0) {
+		await Promise.all(objectIds.map((objectId) => waitInObject(objectId)));
+		objectIds = controls.runningAlarms.keys().toArray();
+	}
+}
+
+/**
+Stops {@link drainAlarms} from waiting for the alarm handlers that were
+running on an object when workerd aborted it. The promise of an aborted
+handler neither resolves nor rejects. Call this before the harness aborts an
+object. A replacement instance abandons the handlers of the instance that it
+replaces when its constructor runs, so a reset that the runtime starts is
+covered once a call reaches the object, and {@link drainAlarms} makes that
+call. The harness still calls this function for the objects that it aborts,
+because it knows about those aborts at once.
+*/
+export function abandonAlarmHandlers(id: DurableObjectId): void {
+	controls.runningAlarms.delete(id.toString());
+}
+
+/**
+Does the same as {@link abandonAlarmHandlers} for every object, before an abort
+of all objects. A handler that a replacement instance starts after the abort
+is recorded as usual.
+*/
+export function abandonAllAlarmHandlers(): void {
+	controls.runningAlarms.clear();
 }
 
 /**
