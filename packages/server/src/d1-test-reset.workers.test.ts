@@ -9,6 +9,8 @@ import { expect, it, vi } from 'vitest';
 import { testControlDatabase } from './control-database.test-support.ts';
 import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import * as schema from './db/d1-schema.ts';
+import type { CupboardServer } from './do/server.ts';
+import { isDurableObjectReset } from './runtime-fault.ts';
 import {
 	authorisedWorkerFetch,
 	clearBlobStorage,
@@ -232,45 +234,85 @@ type WriteOutcome = 'aborted' | 'committed';
 
 interface PendingWrite {
 	/**
-	Completes the write if the object that started it is still the fixture
+	Releases the write if the object that started it is still the fixture
 	tenant's object, and returns `committed` after R2 has stored the object.
-	After a reset, the fixture tenant's object is a new instance. The reset
-	has cancelled the old instance's put, which neither succeeds nor fails,
-	so this method returns `aborted` without waiting.
+	After a reset, the abort has already rejected the call that keeps the
+	write waiting, so nothing is released and this method returns `aborted`.
 	*/
 	finish: () => Promise<WriteOutcome>;
 }
 
-// The body stream stays open until `finish` writes to it. A stream cannot be
-// used from a different Durable Object, so the object creates it and `finish`
-// writes to it from inside the same object.
-async function startPendingWrite(): Promise<PendingWrite> {
-	const { starter, writer, committed } = await runInDurableObject(
-		fixtureWorkerServer(),
-		(instance) => {
-			const body = new FixedLengthStream(5);
+interface StartedWrite {
+	readonly starter: CupboardServer;
+	readonly release: () => void;
+}
 
-			return {
-				starter: instance,
-				writer: body.writable.getWriter(),
-				committed: instance.context.env.BLOBS.put(inFlightKey, body.readable)
-			};
+// A call from the test stays open in the object until `finish` releases the
+// write. The open call keeps the object resident, because workerd evicts an
+// idle object after about ten seconds and a replaced object would look like
+// a reset. An abort rejects the call with an error that has
+// `durableObjectReset` set, which is the `aborted` outcome. The write starts
+// only after the release, because an open request to R2 loses its connection
+// at the abort, and the runtime then logs an uncaught "Network connection
+// lost" exception.
+//
+// The reset must reject this call and must not wait for it, as the comment on
+// `abortFixtureWorkerServer` in test-support.ts explains. A reset that waits
+// for in-flight requests, such as `evictDurableObject`, would wait for this
+// call, which waits for `finish`, which runs only after the reset. The test
+// would then hang until the hang limit.
+async function holdWrite(
+	started: PromiseWithResolvers<StartedWrite>
+): Promise<WriteOutcome> {
+	try {
+		return await runInDurableObject(
+			fixtureWorkerServer(),
+			async (instance): Promise<WriteOutcome> => {
+				const gate = Promise.withResolvers<undefined>();
+				started.resolve({
+					starter: instance,
+					release: () => {
+						gate.resolve(undefined);
+					}
+				});
+				await gate.promise;
+
+				return 'committed';
+			}
+		);
+	} catch (error) {
+		if (!isDurableObjectReset(error)) {
+			throw error;
 		}
+
+		return 'aborted';
+	}
+}
+
+async function startPendingWrite(): Promise<PendingWrite> {
+	const started = Promise.withResolvers<StartedWrite>();
+	const outcome = holdWrite(started);
+	// The promise is resolved and awaited inside the object. Resolving it from
+	// inside the object while the test awaits it would run the rest of the test
+	// in the object's context.
+	const { starter, release } = await runInDurableObject(
+		fixtureWorkerServer(),
+		() => started.promise
 	);
 
 	return {
-		finish: () =>
-			runInDurableObject(fixtureWorkerServer(), async (current) => {
+		finish: async () => {
+			await runInDurableObject(fixtureWorkerServer(), async (current) => {
 				if (current !== starter) {
-					return 'aborted';
+					return;
 				}
 
-				await writer.write(new Uint8Array(5));
-				await writer.close();
-				await committed;
+				release();
+				await current.context.env.BLOBS.put(inFlightKey, 'bytes');
+			});
 
-				return 'committed';
-			})
+			return outcome;
+		}
 	};
 }
 

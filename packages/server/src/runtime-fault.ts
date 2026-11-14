@@ -34,6 +34,14 @@ export function isRuntimeRetryable(error: unknown): boolean {
 }
 
 /**
+Whether the runtime marks `error` as the reset of a Durable Object, which
+discards the object's in-memory state and rejects its calls that are in flight.
+*/
+export function isDurableObjectReset(error: unknown): boolean {
+	return runtimeFaultFlags(error)?.durableObjectReset === true;
+}
+
+/**
 Whether the runtime marks `error` as an overload of the Durable Object.
 */
 export function isDurableObjectOverloaded(error: unknown): boolean {
