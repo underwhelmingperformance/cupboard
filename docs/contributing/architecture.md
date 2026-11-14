@@ -378,6 +378,7 @@ The remaining tables in `CUPBOARD_DB` include:
 | `manifest_state`                        | Kept for older databases. Nothing reads it.                                                                                  |
 | `tenant_maintenance_eligibility`        | Hints about which tenants to wake.                                                                                           |
 | `instance_config`                       | The deployment's instance name.                                                                                              |
+| `backfill_purge_pace`                   | One row with the earliest time at which any tenant's signing-key backfill may send its next cache purge request.             |
 
 Some of these tables are written by only one party. A tenant's Durable Object is
 the only thing that writes that tenant's `blob_ref` and `tenant_blob` rows.
@@ -802,10 +803,42 @@ still waits for the rate limit.
 A row is dropped when the responses that it covers have expired, one hour after
 it was queued for narinfos and one year for NARs. A signing-key rotation queues
 its own rows, and the backfill maintenance pass purges them. Those rows remain
-until their purge succeeds. A backfill page can list more than 100 tags and then
-needs several requests. The pass records the entries of each request as soon as
-that request succeeds and removes them from the row, so a retry after a refusal
-sends only the tags of the refused request and the requests after it.
+until their purge succeeds. A backfill pass sends one request of up to 100 tags.
+The request takes the entries of the oldest backfill rows in sending order, so
+the rows of 32 entries that staging writes share one request. The pass records
+the entries of each row as soon as the request succeeds and removes them from
+the row, so a retry after a refusal sends only the tags that no request has
+purged.
+
+The backfill requests of all tenants in one deployment share one pace. The
+`backfill_purge_pace` table in `CUPBOARD_DB` has one row, and its `next_at` is
+the earliest time of the next backfill request in the deployment. A tenant
+object claims a request with one conditional write that sets `next_at` to the
+current time plus 24 seconds, and it publishes and sends the request only if the
+write succeeded. A tenant that loses the claim waits until the `next_at` that it
+reads. It keeps that time under the storage key `cache-purge:backfill-pace`, so
+the alarm leaves the backfill out without a D1 call. A pass that waits for the
+pace is an ordinary scheduled wait and does not count as a stall.
+
+Claims are at least one interval apart. A pass publishes the page after it
+claims and before it sends the request, so the requests of two tenants can be
+closer than the interval when a publication is slow, although the rate over time
+stays one request for each interval. A failed publication or a failed request
+still uses its claim. The row then waits for its retry time, which grows with
+each failure, so a row that fails on every attempt uses one slot for each retry
+and not one for each pass. The next attempt waits for the later of the interval
+and the retry time. A row with a failure count is purged alone, and the rows
+behind a failing head row wait until the head's purge succeeds, as in the queue:
+a row that joined a failed head could keep the head's retries failing, and a row
+that might fail a request never joins a healthy head's request.
+
+The interval is twice the 12 seconds that the account's bucket needs to refill
+one token, so the backfills of one deployment use at most half of the refill,
+which is 2.5 requests a minute. The bucket belongs to the account, and each
+deployment in an account has its own row. Several deployments in one account
+therefore add up: two deployments use the whole refill. The queue never reads or
+writes the row, so an explicit deletion or a read revocation does not wait for
+the backfill.
 
 A change to a private cache queues no purge. The control Worker serves private
 reads itself with `Cache-Control: no-store`, so Workers Cache stores none of
@@ -2117,6 +2150,7 @@ complete as soon as its expand migrations run. In `CUPBOARD_DB` these are:
 - `control-refresh-sessions`: `0039` creates the control plane's refresh-session
   tables.
 - `control-subject-nonces`: `0040` creates `control_consumed_subject_nonce`.
+- `backfill-purge-pace`: `0044` creates `backfill_purge_pace` and its one row.
 
 `CONTROL_DB` has one transition, `control-database-initial`. Its migration,
 `0000` in `packages/server/drizzle-control-d1`, creates the control database's

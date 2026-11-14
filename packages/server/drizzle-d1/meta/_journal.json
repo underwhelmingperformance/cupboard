@@ -309,6 +309,13 @@
 			"when": 1792092804663,
 			"tag": "0043_attestation_ref_digest_index",
 			"breakpoints": true
+		},
+		{
+			"idx": 44,
+			"version": "6",
+			"when": 1794615758115,
+			"tag": "0044_backfill_purge_pace",
+			"breakpoints": true
 		}
 	]
 }

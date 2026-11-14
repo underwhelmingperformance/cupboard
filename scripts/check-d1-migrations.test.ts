@@ -118,7 +118,8 @@ describe('checkD1Migrations', () => {
 				'control-refresh-sessions',
 				'control-subject-nonces',
 				'control-database-split',
-				'attestation-digest-index'
+				'attestation-digest-index',
+				'backfill-purge-pace'
 			]
 		});
 	});
@@ -138,6 +139,7 @@ describe('checkD1Migrations', () => {
 				'0039_control_refresh_sessions.sql',
 				'0040_control_subject_nonces.sql',
 				'0041_control_database_split.sql',
+				'0044_backfill_purge_pace.sql',
 				'0032_attestation_ref_path_index.sql',
 				'0036_path_read_authority_contract.sql',
 				'0042_control_database_contract.sql',
@@ -152,7 +154,8 @@ describe('checkD1Migrations', () => {
 				'control-refresh-sessions',
 				'control-subject-nonces',
 				'control-database-split',
-				'attestation-digest-index'
+				'attestation-digest-index',
+				'backfill-purge-pace'
 			]
 		});
 	});

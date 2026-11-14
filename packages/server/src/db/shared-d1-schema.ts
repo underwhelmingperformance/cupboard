@@ -1,5 +1,6 @@
 export {
 	attestationReference,
+	backfillPurgePace,
 	blobReference,
 	blobState,
 	cacheLifecycle,
