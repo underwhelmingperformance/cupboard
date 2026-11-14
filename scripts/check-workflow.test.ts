@@ -57,12 +57,7 @@ describe('required source check', () => {
 			condition: 'always()',
 			timeoutMinutes: 1,
 			dependencies,
-			platforms: [
-				'x86_64-linux',
-				'aarch64-linux',
-				'x86_64-darwin',
-				'aarch64-darwin'
-			]
+			platforms: ['x86_64-linux', 'aarch64-linux', 'aarch64-darwin']
 		});
 		expect(jobs.check?.steps).toStrictEqual([
 			{
