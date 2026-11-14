@@ -1333,6 +1333,13 @@ target, queues no inheritance and, for an exhausted upload, queues no reconcile
 of the path. The upload receives `absent`. That answer keeps a publication
 operation accepted and makes the client negotiate the path again.
 
+A pass that finds an upload's generation committed, with its narinfo object and
+NAR present, finishes the upload without decoding its bytes. It watches the path
+for demotion from that check until its gate. When demotion removes the path, the
+pass treats the generation as not committed. An upload that still has its staged
+bytes is then verified, and promotion restores the NAR. A reuse upload, or one
+whose staged bytes are gone, receives `absent`.
+
 Unfinished recovery stops 24 hours after first acceptance. Push expiry does not
 cancel accepted work, but prevents new operations and new transfers. Claims,
 verification requests and the D1 publication fence enforce the recovery

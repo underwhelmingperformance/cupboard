@@ -2785,6 +2785,128 @@ describe('the verdict for a charged upload whose path demotion removes', () => {
 	);
 });
 
+// A verification pass charged an upload's own generation and published its
+// narinfo object, then stopped before it cleared the upload's row. The next
+// claim finds the generation committed with its NAR present and finishes the
+// upload without decoding it. Demotion removes the path before that check, or
+// between the check and the gate that clears the row, or not at all.
+describe('finishing a committed upload whose path demotion removes', () => {
+	beforeEach(resetTestServer);
+
+	it.each(
+		(['legacy', 'publication'] as const).flatMap((kind) =>
+			(['none', 'before', 'after'] as const).map((moment) => ({
+				kind,
+				moment
+			}))
+		)
+	)(
+		'finishes a $kind upload only while its path is served, with demotion $moment the committed check',
+		async ({ kind, moment }) => {
+			const seed = `finalise-${kind}-${moment}`;
+			// D1 compares a publication's recovery deadline with its own clock.
+			if (kind === 'publication') {
+				vi.setSystemTime(vi.getRealSystemTime());
+			}
+			await useTestServer(seed);
+			const { token } = await bootstrap();
+			await setDefaultCacheGrace(3600);
+			const upload = await chargedUpload(token, seed, kind);
+			await setRoot(token, { name: 'run', targets: [] });
+			await putNarBytes(upload.r2Key, upload.nar);
+
+			const verdicts: string[] = [];
+			const claimed = await withoutAlarmArming(async () => {
+				const restore = await runInDurableObject(
+					currentServer(),
+					async (instance, state) => {
+						await state.storage.deleteAlarm();
+						const { context } = instance;
+						restoreUploadRow(context, upload);
+						const narInfoObjects = new NarInfoObjectsService(context);
+						const gate = demotionAtNextGate(
+							context,
+							narInfoObjects,
+							upload.metadata
+						);
+						// The reservation is the last step before the committed check.
+						const reservation = vi
+							.spyOn(CommitPipelineService.prototype, 'reserveNarInfoRow')
+							.mockImplementationOnce(async function (
+								this: CommitPipelineService,
+								...parameters
+							) {
+								// Vitest removes a once implementation before calling it, so
+								// this call runs the real reservation.
+								const reserved = await this.reserveNarInfoRow(...parameters);
+								if (moment === 'before') {
+									await demote(context, narInfoObjects, upload.metadata);
+								}
+								return reserved;
+							});
+						// The publication status is the last read before the gate.
+						const status = vi
+							.spyOn(CommitPipelineService.prototype, 'publicationStatus')
+							.mockImplementationOnce(async function (
+								this: CommitPipelineService,
+								...parameters
+							) {
+								const published = await this.publicationStatus(...parameters);
+								if (moment === 'after') {
+									gate.arm();
+								}
+								return published;
+							});
+						const clears = vi.spyOn(
+							UploadStateService.prototype,
+							'clearPendingUploadRow'
+						);
+						return () => {
+							verdicts.push(...clearedOutcomes(clears));
+							clears.mockRestore();
+							status.mockRestore();
+							reservation.mockRestore();
+							gate.restore();
+						};
+					}
+				);
+				try {
+					const claim = await currentServer().claimVerificationBatch(
+						10,
+						Number.MAX_SAFE_INTEGER
+					);
+					return claim.claims.map((entry) => entry.uploadId);
+				} finally {
+					await runInDurableObject(currentServer(), () => {
+						restore();
+						return Promise.resolve();
+					});
+				}
+			});
+
+			const isServed = moment === 'none';
+			expect({
+				claimed,
+				verdicts,
+				state: await verdictState(upload)
+			}).toStrictEqual({
+				claimed: isServed ? [] : [upload.uploadId],
+				verdicts: isServed ? ['servable'] : [],
+				state: {
+					pending: isServed ? undefined : 'pending',
+					publication:
+						kind === 'legacy' ? undefined : isServed ? 'servable' : 'accepted',
+					isStagedObjectPresent: !isServed,
+					isNarInfoObjectPresent: isServed,
+					deadlines: isServed ? [upload.metadata.storePathHash] : [],
+					rootTargets: isServed ? [upload.metadata.storePathHash] : [],
+					inheritances: isServed ? [upload.metadata.storePathHash] : []
+				}
+			});
+		}
+	);
+});
+
 // Delete the path's NAR and demote its narinfo object after the first
 // servability probe returns, as the `blob-demote` scan does when it finds the
 // NAR missing. Demotion leaves the path's row unchanged.
