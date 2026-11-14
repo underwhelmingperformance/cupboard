@@ -40,6 +40,28 @@ export function* activityLogRecords(log: string): Generator {
 	}
 }
 
+const copyOrBuildType = z.union([z.literal(100), z.literal(105)]);
+
+const readRecordSchema = z.union([
+	z.object({ action: z.literal('start'), type: copyOrBuildType }),
+	z.object({ action: z.literal('msg'), level: z.literal(0) })
+]);
+
+/**
+Whether one line of a `json-log-path` file has a record that the readers of
+activity logs use: the `start` record of a copy (type 100) or of a build
+(type 105), or an error message. Nix also writes a progress record for every
+change in a transfer, and the readers ignore these records. A program that
+reads a large log can drop each line for which this returns false.
+*/
+export function isReadActivityLogLine(line: string): boolean {
+	for (const record of activityLogRecords(line)) {
+		return readRecordSchema.safeParse(record).success;
+	}
+
+	return false;
+}
+
 /**
 Extracts copy evidence from the supplied activity logs. Each map entry lists
 the source stores from this run's `actCopyPath` events, deduplicated in log

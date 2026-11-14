@@ -1,9 +1,9 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
+import { maxActivityLogBytes, readActivityLog } from '@cupboard/nix';
 import {
 	type ChildEnvironment,
 	removeInvocationRuntimeDirectory
@@ -264,6 +264,11 @@ export interface AttemptedBuildOptions {
 	failed attempt is repeated until the attempts are spent.
 	*/
 	readonly canRetry?: (attempt: SupervisedAttempt) => Promise<boolean>;
+	/**
+	The most bytes of activity log records to keep for one attempt. Defaults to
+	{@link maxActivityLogBytes}.
+	*/
+	readonly maxLogBytes?: number;
 	readonly environment: ChildEnvironment;
 	readonly runtimeDirectory: string;
 	readonly signalSource?: SignalSource;
@@ -315,18 +320,6 @@ export function startTimerDelay(delayMs: number): CancellableDelay {
 			completed.resolve(undefined);
 		}
 	};
-}
-
-// An attempt's activity log lives in the invocation runtime directory, which
-// is owner-only and removed with the run. The log is read back as soon as the
-// attempt's child has exited, before the next attempt can change the store
-// state it describes. A child that failed to start leaves no log to attribute.
-async function readAttemptLog(logFile: string): Promise<string> {
-	try {
-		return await readFile(logFile, 'utf8');
-	} catch {
-		return '';
-	}
 }
 
 /**
@@ -384,7 +377,12 @@ export async function superviseAttemptedBuild(
 			const supervised: SupervisedAttempt = {
 				attempt,
 				attemptId,
-				log: await readAttemptLog(logFile),
+				// The log lives in the owner-only runtime directory and is read as
+				// soon as the child exits, before the next attempt can change the
+				// store state that it describes.
+				log: await readActivityLog(logFile, {
+					maxBytes: options.maxLogBytes ?? maxActivityLogBytes
+				}),
 				exit
 			};
 			attempts.push(supervised);

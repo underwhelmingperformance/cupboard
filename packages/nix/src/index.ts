@@ -6,6 +6,13 @@ export {
 	firstBuildFailure,
 	unreachableBuilders
 } from './activity-log.ts';
+export type { ActivityLogLimits } from './activity-log-file.ts';
+export {
+	ActivityLogReadError,
+	ActivityLogTooLargeError,
+	maxActivityLogBytes,
+	readActivityLog
+} from './activity-log-file.ts';
 export type {
 	DependencyOutput,
 	DependencyOutputOptions
