@@ -5,6 +5,7 @@ import {
 	type OidcSubject,
 	oidcSubjectSchema,
 	type RefreshTokenGrantRequest,
+	refreshTokenRetryGraceMs,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import {
@@ -37,8 +38,7 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	adminJwtTtlSeconds,
 	maxRefreshTokenFamilyMembers,
-	refreshTokenFamilyTtlSeconds,
-	refreshTokenRetryGraceMs
+	refreshTokenFamilyTtlSeconds
 } from '../auth/auth.ts';
 import {
 	type AuthenticatedRefreshAuthority,

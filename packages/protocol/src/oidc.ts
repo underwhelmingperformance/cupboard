@@ -61,6 +61,13 @@ export const issuedAccessTokenType =
 // stays exchange-only.
 export const refreshTokenGrantType = 'refresh_token';
 
+// For this long after a refresh creates the successor, the server returns that
+// successor to a repeat of the spent refresh token. A later repeat revokes the
+// whole refresh family. Each CLI release compiles in this value and repeats a
+// refresh for half of it, so lowering it on the server lets released CLIs
+// send repeats after the period ends and revoke their sessions.
+export const refreshTokenRetryGraceMs = 60_000;
+
 // Cupboard's external trust model consumes OIDC ID tokens. A generic JWT type
 // does not identify an issuer-specific profile with equivalent validation
 // rules, so external callers must use the ID-token type. A self-issued

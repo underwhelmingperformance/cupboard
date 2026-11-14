@@ -1,3 +1,10 @@
+import { createServer as createHttpServer } from 'node:http';
+import {
+	createServer as createNetServer,
+	type Server as NetServer,
+	type Socket
+} from 'node:net';
+
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -24,9 +31,12 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
+import { ProbeTimeoutError } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { ManualClock } from '../../../../tests/support/manual-clock.ts';
+import { abortReason } from '../abort.ts';
 import { canonicalTarget } from '../auth/bound-sign-in.ts';
 import {
 	CupboardHttpError,
@@ -34,6 +44,8 @@ import {
 	MalformedResponseError,
 	QuotaExceededError,
 	ResponseSchemaMismatchError,
+	SessionRenewalExpiredError,
+	SessionRenewalUnconfirmedError,
 	UnreachableHostError
 } from '../errors.ts';
 import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
@@ -43,6 +55,34 @@ import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
+import { manualRefreshTiming } from './refresh-retry.test-support.ts';
+import { type RefreshWindow } from './refresh-retry.ts';
+
+// The window of a refresh token that no earlier attempt has sent.
+const firstAttempt: RefreshWindow = {
+	kind: 'new',
+	onNotProcessed: () => Promise.resolve()
+};
+
+// A new window that counts the calls of its `onNotProcessed`.
+function observedWindow(): {
+	readonly window: RefreshWindow;
+	readonly forgotten: () => number;
+} {
+	let forgotten = 0;
+
+	return {
+		window: {
+			kind: 'new',
+			onNotProcessed: () => {
+				forgotten += 1;
+
+				return Promise.resolve();
+			}
+		},
+		forgotten: () => forgotten
+	};
+}
 
 const publishedPublicKey =
 	'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
@@ -90,7 +130,11 @@ function capturingClient(
 
 			return Promise.resolve(Response.json(response));
 		},
-		cache
+		cache,
+		undefined,
+		undefined,
+		undefined,
+		manualRefreshTiming(new ManualClock())
 	);
 
 	return { client, captured: () => captured };
@@ -195,7 +239,7 @@ describe('CupboardClient.tokenExchange', () => {
 			kind: 'default'
 		});
 
-		const result = await client.tokenRefresh('refresh-1');
+		const result = await client.tokenRefresh('refresh-1', firstAttempt);
 
 		expect(result).toStrictEqual(response);
 		expect(captured()).toStrictEqual({
@@ -264,7 +308,8 @@ function scriptedClient(attempts: (() => Response | Promise<Response>)[]): {
 		{ kind: 'default' },
 		undefined,
 		undefined,
-		() => 0
+		() => 0,
+		manualRefreshTiming(new ManualClock())
 	);
 
 	return { client, attempted: () => attempted };
@@ -327,14 +372,14 @@ const readAccessResponse = {
 	]
 };
 
-// Each request shape, with whether the server records nothing when it handles
-// the request and the client may therefore repeat it.
+// Each request shape, with whether the client repeats it after a transient
+// failure.
 const requestShapes = [
 	{
 		label: 'an exchange',
 		request: exchange,
 		response: tokenResponse,
-		isReplaySafe: true
+		isRetried: true
 	},
 	{
 		label: 'an exchange with authorization details',
@@ -345,7 +390,7 @@ const requestShapes = [
 				[{ type: 'cupboard_wildcard' }]
 			),
 		response: tokenResponse,
-		isReplaySafe: true
+		isRetried: true
 	},
 	{
 		label: 'an attenuation',
@@ -354,7 +399,7 @@ const requestShapes = [
 				{ type: 'cupboard_wildcard' }
 			]),
 		response: tokenResponse,
-		isReplaySafe: true
+		isRetried: true
 	},
 	{
 		label: 'a read access request',
@@ -367,19 +412,20 @@ const requestShapes = [
 				}
 			]),
 		response: readAccessResponse,
-		isReplaySafe: true
+		isRetried: true
 	},
 	{
 		label: 'a bound exchange',
 		request: boundExchange,
 		response: tokenResponse,
-		isReplaySafe: false
+		isRetried: false
 	},
 	{
 		label: 'a refresh',
-		request: (client: CupboardClient) => client.tokenRefresh('refresh-1'),
+		request: (client: CupboardClient) =>
+			client.tokenRefresh('refresh-1', firstAttempt),
 		response: tokenResponse,
-		isReplaySafe: false
+		isRetried: true
 	}
 ];
 
@@ -387,7 +433,7 @@ describe('CupboardClient token replay', () => {
 	it.each(
 		requestShapes.map((shape) => ({
 			...shape,
-			attempts: shape.isReplaySafe ? 2 : 1
+			attempts: shape.isRetried ? 2 : 1
 		}))
 	)(
 		'makes $attempts attempts after a network fault on $label',
@@ -430,7 +476,7 @@ describe('CupboardClient token replay', () => {
 				...shape,
 				status,
 				attempts:
-					shape.isReplaySafe && status !== StatusCodes.TOO_MANY_REQUESTS ? 2 : 1
+					shape.isRetried && status !== StatusCodes.TOO_MANY_REQUESTS ? 2 : 1
 			}))
 		)
 	)(
@@ -487,6 +533,856 @@ describe('CupboardClient token replay', () => {
 			status,
 			ray: 'ray-1'
 		});
+	});
+});
+
+interface RefreshAttempt {
+	readonly startedAtMs: number;
+	readonly body: unknown;
+	readonly signal: AbortSignal | undefined;
+}
+
+type RefreshScript = (
+	signal: AbortSignal | undefined
+) => Response | Promise<Response>;
+
+// A refresh client whose nth request plays the nth script. Its retry timing
+// runs on `clock`, and it records each delay that it requests.
+function refreshClient(
+	clock: ManualClock,
+	scripts: readonly RefreshScript[],
+	signal?: AbortSignal
+): {
+	readonly client: CupboardClient;
+	readonly attempts: RefreshAttempt[];
+	readonly delays: number[];
+} {
+	const attempts: RefreshAttempt[] = [];
+	const delays: number[] = [];
+	const client = new CupboardClient(
+		new URL('https://cupboard.test'),
+		async (_input, init) => {
+			const script = scripts[attempts.length];
+			const signal = init?.signal ?? undefined;
+			attempts.push({ startedAtMs: clock.now(), body: init?.body, signal });
+
+			if (script === undefined) {
+				throw new Error('fetch script exhausted');
+			}
+
+			return script(signal);
+		},
+		{ kind: 'default' },
+		signal,
+		undefined,
+		() => 0,
+		manualRefreshTiming(clock, delays)
+	);
+
+	return { client, attempts, delays };
+}
+
+// Answers after `clock` reaches `delayMs` past the start of the attempt.
+function answeredAfter(
+	clock: ManualClock,
+	delayMs: number,
+	response: () => Response
+): RefreshScript {
+	return async (signal) => {
+		await clock.wait(delayMs, signal ?? new AbortController().signal);
+
+		return response();
+	};
+}
+
+function statusResponse(status: number, retryAfter?: string): Response {
+	return new Response('', {
+		status,
+		headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter }
+	});
+}
+
+const badGateway: RefreshScript = () => statusResponse(StatusCodes.BAD_GATEWAY);
+
+// The failure of a fetch that had no connection to send the request on.
+function connectionRefusal(): TypeError {
+	const refused = Object.assign(new Error('connect ECONNREFUSED'), {
+		code: 'ECONNREFUSED',
+		syscall: 'connect'
+	});
+
+	return new TypeError('fetch failed', { cause: refused });
+}
+
+const connectionRefused: RefreshScript = () =>
+	Promise.reject(connectionRefusal());
+
+const forbidden: RefreshScript = () => statusResponse(StatusCodes.FORBIDDEN);
+
+// Settles only when the attempt's signal aborts, as fetch does for a
+// connection that never answers.
+function unanswered(signal: AbortSignal | undefined): Promise<Response> {
+	return new Promise((_resolve, reject) => {
+		signal?.addEventListener(
+			'abort',
+			() => {
+				reject(abortReason(signal));
+			},
+			{ once: true }
+		);
+	});
+}
+
+function truncatedBody(): Response {
+	const reset = Object.assign(new Error('read ECONNRESET'), {
+		code: 'ECONNRESET'
+	});
+
+	return new Response(
+		new ReadableStream({
+			start(controller) {
+				controller.error(new TypeError('terminated', { cause: reset }));
+			}
+		}),
+		{ headers: { 'content-type': 'application/json' } }
+	);
+}
+
+const refreshResponse: TokenResponse = {
+	access_token: 'admin-jwt-2',
+	token_type: 'Bearer',
+	expires_in: 600,
+	refresh_token: 'refresh-2'
+};
+
+const refreshForm = 'grant_type=refresh_token&refresh_token=refresh-1';
+
+function expectUnconfirmed(
+	error: unknown
+): asserts error is SessionRenewalUnconfirmedError {
+	expect(error).toBeInstanceOf(SessionRenewalUnconfirmedError);
+}
+
+function expectExpired(
+	error: unknown
+): asserts error is SessionRenewalExpiredError {
+	expect(error).toBeInstanceOf(SessionRenewalExpiredError);
+}
+
+// The class and status of a failure, for a whole-object comparison.
+function failureSummary(failure: unknown) {
+	return {
+		name: failure instanceof Error ? failure.constructor.name : undefined,
+		status: failure instanceof CupboardHttpError ? failure.status : undefined
+	};
+}
+
+describe('CupboardClient.tokenRefresh retries', () => {
+	it('repeats the same refresh after its response body is cut off', async () => {
+		const clock = new ManualClock();
+		const { client, attempts, delays } = refreshClient(clock, [
+			() => truncatedBody(),
+			() => Response.json(refreshResponse)
+		]);
+
+		const result = await client.tokenRefresh('refresh-1', firstAttempt);
+
+		expect({
+			result,
+			attempts: attempts.map(({ startedAtMs, body }) => ({
+				startedAtMs,
+				body
+			})),
+			delays
+		}).toStrictEqual({
+			result: refreshResponse,
+			attempts: [
+				{ startedAtMs: 0, body: refreshForm },
+				{ startedAtMs: 0, body: refreshForm }
+			],
+			delays: [10_000, 10_000]
+		});
+	});
+
+	it('abandons an unanswered attempt at its deadline and repeats it', async () => {
+		const clock = new ManualClock();
+		const { client, attempts, delays } = refreshClient(clock, [
+			unanswered,
+			() => Response.json(refreshResponse)
+		]);
+
+		const pending = client.tokenRefresh('refresh-1', firstAttempt);
+		await clock.advanceThroughDelay(10_000);
+		const result = await pending;
+
+		expect({
+			result,
+			attempts: attempts.map(({ startedAtMs, body, signal }) => ({
+				startedAtMs,
+				body,
+				aborted: signal?.aborted
+			})),
+			delays
+		}).toStrictEqual({
+			result: refreshResponse,
+			attempts: [
+				{ startedAtMs: 0, body: refreshForm, aborted: true },
+				{ startedAtMs: 10_000, body: refreshForm, aborted: false }
+			],
+			delays: [10_000, 10_000]
+		});
+	});
+
+	it('starts no attempt 30 seconds after the first one', async () => {
+		const clock = new ManualClock();
+		const { client, attempts, delays } = refreshClient(clock, [
+			unanswered,
+			unanswered,
+			unanswered,
+			() => Response.json(refreshResponse)
+		]);
+
+		const pending = rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+		await clock.advanceThroughDelay(10_000);
+		await clock.advanceThroughDelay(10_000);
+		await clock.advanceThroughDelay(10_000);
+		const error = await pending;
+
+		expectExpired(error);
+		expect({
+			host: error.host,
+			cause: failureSummary(error.cause),
+			started: attempts.map(({ startedAtMs, signal }) => ({
+				startedAtMs,
+				aborted: signal?.aborted
+			})),
+			delays
+		}).toStrictEqual({
+			host: 'cupboard.test',
+			cause: failureSummary(new ProbeTimeoutError('')),
+			started: [
+				{ startedAtMs: 0, aborted: true },
+				{ startedAtMs: 10_000, aborted: true },
+				{ startedAtMs: 20_000, aborted: true }
+			],
+			delays: [10_000, 10_000, 10_000]
+		});
+	});
+
+	it('stops without waiting when a backoff would end after 30 seconds', async () => {
+		const clock = new ManualClock();
+		const { client, attempts, delays } = refreshClient(clock, [
+			unanswered,
+			unanswered,
+			answeredAfter(clock, 6000, () =>
+				statusResponse(StatusCodes.SERVICE_UNAVAILABLE, '5')
+			),
+			() => Response.json(refreshResponse)
+		]);
+
+		const pending = rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+		await clock.advanceThroughDelay(10_000);
+		await clock.advanceThroughDelay(10_000);
+		await clock.advanceThroughDelay(6000);
+		const error = await pending;
+
+		expectUnconfirmed(error);
+		expect({
+			attempts: error.attempts,
+			cause: failureSummary(error.cause),
+			started: attempts.map(({ startedAtMs }) => startedAtMs),
+			delays,
+			nowMs: clock.now()
+		}).toStrictEqual({
+			attempts: 3,
+			cause: {
+				name: 'CupboardHttpError',
+				status: StatusCodes.SERVICE_UNAVAILABLE
+			},
+			started: [0, 10_000, 20_000],
+			delays: [10_000, 10_000, 10_000],
+			nowMs: 26_000
+		});
+	});
+
+	it('limits a later attempt with the same refresh token to the rest of its window', async () => {
+		const clock = new ManualClock();
+		const { client, attempts, delays } = refreshClient(clock, [
+			() => Response.json(refreshResponse)
+		]);
+
+		const result = await client.tokenRefresh('refresh-1', {
+			kind: 'continued',
+			sinceFirstAttemptMs: 25_000
+		});
+
+		expect({ result, attempts: attempts.length, delays }).toStrictEqual({
+			result: refreshResponse,
+			attempts: 1,
+			delays: [5000]
+		});
+	});
+
+	it.each([
+		{ label: 'its window has passed', sinceFirstAttemptMs: 30_000 },
+		{ label: 'the clock is before its first attempt', sinceFirstAttemptMs: -1 }
+	])(
+		'does not send the refresh token when $label',
+		async ({ sinceFirstAttemptMs }) => {
+			const clock = new ManualClock();
+			const { client, attempts } = refreshClient(clock, [
+				() => Response.json(refreshResponse)
+			]);
+
+			const error = await rejectedBy(() =>
+				client.tokenRefresh('refresh-1', {
+					kind: 'continued',
+					sinceFirstAttemptMs
+				})
+			);
+
+			expectExpired(error);
+			expect({
+				host: error.host,
+				cause: error.cause,
+				attempts: attempts.length
+			}).toStrictEqual({
+				host: 'cupboard.test',
+				cause: undefined,
+				attempts: 0
+			});
+		}
+	);
+
+	it('reports an unconfirmed renewal when fast failures use up the attempts', async () => {
+		const clock = new ManualClock();
+		const { client, attempts } = refreshClient(
+			clock,
+			Array.from({ length: 5 }, () => badGateway)
+		);
+
+		const error = await rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+
+		expectUnconfirmed(error);
+		expect({
+			host: error.host,
+			attempts: error.attempts,
+			cause: failureSummary(error.cause),
+			sent: attempts.length
+		}).toStrictEqual({
+			host: 'cupboard.test',
+			attempts: 5,
+			cause: { name: 'CupboardHttpError', status: StatusCodes.BAD_GATEWAY },
+			sent: 5
+		});
+	});
+
+	it('reports an unconfirmed renewal for a 429 after an earlier attempt', async () => {
+		const clock = new ManualClock();
+		const { client, attempts } = refreshClient(clock, [
+			() => statusResponse(StatusCodes.BAD_GATEWAY),
+			() => statusResponse(StatusCodes.TOO_MANY_REQUESTS, '60'),
+			() => Response.json(refreshResponse)
+		]);
+
+		const error = await rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+
+		expectUnconfirmed(error);
+		expect({
+			attempts: error.attempts,
+			cause: failureSummary(error.cause),
+			sent: attempts.length
+		}).toStrictEqual({
+			attempts: 2,
+			cause: {
+				name: 'CupboardHttpError',
+				status: StatusCodes.TOO_MANY_REQUESTS
+			},
+			sent: 2
+		});
+	});
+
+	it.each([
+		{
+			label: 'a 403',
+			response: () => statusResponse(StatusCodes.FORBIDDEN),
+			cause: { name: 'CupboardHttpError', status: StatusCodes.FORBIDDEN }
+		},
+		{
+			label: 'a 200 that is not a token response',
+			response: () =>
+				new Response('<html>sign in to the network</html>', {
+					headers: { 'content-type': 'text/html' }
+				}),
+			cause: { name: 'MalformedResponseError', status: undefined }
+		}
+	])(
+		'reports an unconfirmed renewal for $label after an earlier attempt',
+		async ({ response, cause }) => {
+			const clock = new ManualClock();
+			const { client, attempts } = refreshClient(clock, [
+				badGateway,
+				response,
+				() => Response.json(refreshResponse)
+			]);
+
+			const error = await rejectedBy(() =>
+				client.tokenRefresh('refresh-1', firstAttempt)
+			);
+
+			expectUnconfirmed(error);
+			expect({
+				attempts: error.attempts,
+				cause: failureSummary(error.cause),
+				sent: attempts.length
+			}).toStrictEqual({ attempts: 2, cause, sent: 2 });
+		}
+	);
+
+	it('returns an invalid_grant refusal of a later attempt unchanged', async () => {
+		const clock = new ManualClock();
+		const { client, attempts } = refreshClient(clock, [
+			badGateway,
+			() =>
+				Response.json(
+					{ error: 'invalid_grant' },
+					{ status: StatusCodes.BAD_REQUEST }
+				),
+			() => Response.json(refreshResponse)
+		]);
+
+		const error = await rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+
+		expect({
+			failure: failureSummary(error),
+			sent: attempts.length
+		}).toStrictEqual({
+			failure: {
+				name: 'CupboardHttpError',
+				status: StatusCodes.BAD_REQUEST
+			},
+			sent: 2
+		});
+	});
+
+	it.each([
+		{
+			label: 'a 400',
+			response: () =>
+				Response.json(
+					{ error: 'invalid_grant' },
+					{ status: StatusCodes.BAD_REQUEST }
+				),
+			status: StatusCodes.BAD_REQUEST
+		},
+		{
+			label: 'a 429',
+			response: () => statusResponse(StatusCodes.TOO_MANY_REQUESTS, '60'),
+			status: StatusCodes.TOO_MANY_REQUESTS
+		},
+		{
+			label: 'a 500',
+			response: () => statusResponse(StatusCodes.INTERNAL_SERVER_ERROR),
+			status: StatusCodes.INTERNAL_SERVER_ERROR
+		}
+	])(
+		'returns $label to the first attempt at once',
+		async ({ response, status }) => {
+			const clock = new ManualClock();
+			const { client, attempts } = refreshClient(clock, [
+				response,
+				() => Response.json(refreshResponse)
+			]);
+
+			const error = await rejectedBy(() =>
+				client.tokenRefresh('refresh-1', firstAttempt)
+			);
+
+			expect({
+				failure: failureSummary(error),
+				sent: attempts.length
+			}).toStrictEqual({
+				failure: { name: 'CupboardHttpError', status },
+				sent: 1
+			});
+		}
+	);
+
+	it('stops after a backoff that ends past the window while the machine sleeps', async () => {
+		const clock = new ManualClock();
+		const { client, attempts } = refreshClient(clock, [
+			() => statusResponse(StatusCodes.SERVICE_UNAVAILABLE, '1'),
+			() => Response.json(refreshResponse)
+		]);
+
+		const pending = rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+		await clock.waitForDelay(1000);
+		clock.advanceTo(40_000);
+		const error = await pending;
+
+		expectExpired(error);
+		expect({
+			cause: failureSummary(error.cause),
+			sent: attempts.length
+		}).toStrictEqual({
+			cause: {
+				name: 'CupboardHttpError',
+				status: StatusCodes.SERVICE_UNAVAILABLE
+			},
+			sent: 1
+		});
+	});
+
+	it('stops when it is aborted during an attempt', async () => {
+		const clock = new ManualClock();
+		const controller = new AbortController();
+		const reason = new Error('stop renewing');
+		const sent = Promise.withResolvers<undefined>();
+		const { client, attempts } = refreshClient(
+			clock,
+			[
+				(signal) => {
+					sent.resolve(undefined);
+
+					return unanswered(signal);
+				},
+				() => Response.json(refreshResponse)
+			],
+			controller.signal
+		);
+
+		const pending = rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+		await sent.promise;
+		controller.abort(reason);
+
+		expect({ error: await pending, sent: attempts.length }).toStrictEqual({
+			error: reason,
+			sent: 1
+		});
+	});
+
+	it('stops when it is aborted during a backoff', async () => {
+		const clock = new ManualClock();
+		const controller = new AbortController();
+		const reason = new Error('stop renewing');
+		const { client, attempts } = refreshClient(
+			clock,
+			[
+				() => statusResponse(StatusCodes.SERVICE_UNAVAILABLE, '1'),
+				() => Response.json(refreshResponse)
+			],
+			controller.signal
+		);
+
+		const pending = rejectedBy(() =>
+			client.tokenRefresh('refresh-1', firstAttempt)
+		);
+		await clock.waitForDelay(1000);
+		controller.abort(reason);
+
+		expect({ error: await pending, sent: attempts.length }).toStrictEqual({
+			error: reason,
+			sent: 1
+		});
+	});
+});
+
+describe('CupboardClient.tokenRefresh window record', () => {
+	const unconfirmed = {
+		name: 'SessionRenewalUnconfirmedError',
+		status: undefined
+	};
+
+	it.each([
+		{
+			label: 'is released when every attempt fails to connect',
+			scripts: Array.from({ length: 5 }, () => connectionRefused),
+			expected: {
+				failure: { name: 'UnreachableHostError', status: undefined },
+				forgotten: 1
+			}
+		},
+		{
+			label: 'is kept after a body cut off after the headers',
+			scripts: [
+				() => truncatedBody(),
+				...Array.from({ length: 4 }, () => connectionRefused)
+			],
+			expected: { failure: unconfirmed, forgotten: 0 }
+		},
+		{
+			label: 'is kept when a later attempt is refused after an unsent one',
+			scripts: [connectionRefused, forbidden],
+			expected: { failure: unconfirmed, forgotten: 0 }
+		},
+		{
+			label: 'is kept when connection failures follow a processed attempt',
+			scripts: [
+				badGateway,
+				...Array.from({ length: 4 }, () => connectionRefused)
+			],
+			expected: { failure: unconfirmed, forgotten: 0 }
+		}
+	])('$label', async ({ scripts, expected }) => {
+		const { client } = refreshClient(new ManualClock(), scripts);
+		const { window, forgotten } = observedWindow();
+
+		const error = await rejectedBy(() =>
+			client.tokenRefresh('refresh-1', window)
+		);
+
+		expect({
+			failure: failureSummary(error),
+			forgotten: forgotten()
+		}).toStrictEqual(expected);
+	});
+
+	it('reports a rerun whose attempts all fail to connect as unconfirmed', async () => {
+		const { client, attempts } = refreshClient(
+			new ManualClock(),
+			Array.from({ length: 5 }, () => connectionRefused)
+		);
+
+		const error = await rejectedBy(() =>
+			client.tokenRefresh('refresh-1', {
+				kind: 'continued',
+				sinceFirstAttemptMs: 5000
+			})
+		);
+
+		expect({
+			failure: failureSummary(error),
+			sent: attempts.length
+		}).toStrictEqual({ failure: unconfirmed, sent: 5 });
+	});
+
+	it('is kept when it is aborted during an attempt that may have been sent', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop renewing');
+		const sent = Promise.withResolvers<undefined>();
+		const { client } = refreshClient(
+			new ManualClock(),
+			[
+				(signal) => {
+					sent.resolve(undefined);
+
+					return unanswered(signal);
+				}
+			],
+			controller.signal
+		);
+		const { window, forgotten } = observedWindow();
+
+		const pending = rejectedBy(() => client.tokenRefresh('refresh-1', window));
+		await sent.promise;
+		controller.abort(reason);
+
+		expect({ error: await pending, forgotten: forgotten() }).toStrictEqual({
+			error: reason,
+			forgotten: 0
+		});
+	});
+});
+
+// Counts events and lets a test wait until a given number has happened.
+function eventCounter(): {
+	readonly record: () => void;
+	readonly reach: (count: number) => Promise<void>;
+	readonly count: () => number;
+} {
+	let count = 0;
+	let changed = Promise.withResolvers<undefined>();
+
+	return {
+		record: () => {
+			count += 1;
+			changed.resolve(undefined);
+			changed = Promise.withResolvers<undefined>();
+		},
+		reach: async (target) => {
+			while (count < target) {
+				await changed.promise;
+			}
+		},
+		count: () => count
+	};
+}
+
+async function listenOnLoopback(server: NetServer): Promise<number> {
+	await new Promise<void>((resolve) => {
+		server.listen(0, '127.0.0.1', resolve);
+	});
+
+	const address = server.address();
+
+	if (typeof address !== 'object' || address === null) {
+		throw new Error('the server has no port');
+	}
+
+	return address.port;
+}
+
+describe('CupboardClient.tokenRefresh over loopback connections', () => {
+	it.each([
+		{
+			label: 'releases the record when no TLS handshake finishes',
+			protocol: 'https',
+			expected: { failure: 'ProbeTimeoutError', forgotten: 1 }
+		},
+		{
+			label: 'keeps the record when the server received the requests',
+			protocol: 'http',
+			expected: { failure: 'SessionRenewalExpiredError', forgotten: 0 }
+		}
+	])('$label', async ({ protocol, expected }) => {
+		const arrivals = eventCounter();
+		const sockets = new Set<Socket>();
+		const server =
+			protocol === 'https'
+				? createNetServer((socket) => {
+						sockets.add(socket);
+						arrivals.record();
+					})
+				: createHttpServer(() => {
+						arrivals.record();
+					});
+		server.on('connection', (socket: Socket) => {
+			sockets.add(socket);
+		});
+		const port = await listenOnLoopback(server);
+		const clock = new ManualClock();
+		const client = new CupboardClient(
+			new URL(`${protocol}://127.0.0.1:${String(port)}`),
+			fetch,
+			{ kind: 'default' },
+			undefined,
+			undefined,
+			() => 0,
+			manualRefreshTiming(clock)
+		);
+		const { window, forgotten } = observedWindow();
+
+		try {
+			const pending = rejectedBy(() =>
+				client.tokenRefresh('refresh-1', window)
+			);
+
+			for (const attempt of [1, 2, 3]) {
+				await arrivals.reach(attempt);
+				await clock.advanceThroughDelay(10_000);
+			}
+
+			const error = await pending;
+
+			expect({
+				failure: failureSummary(error).name,
+				forgotten: forgotten(),
+				arrivals: arrivals.count()
+			}).toStrictEqual({ ...expected, arrivals: 3 });
+		} finally {
+			for (const socket of sockets) {
+				socket.destroy();
+			}
+
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+
+	it('releases the record when every TLS handshake fails', async () => {
+		const connections = eventCounter();
+		// Answers the TLS ClientHello with bytes that are not TLS, so the client
+		// fails the handshake.
+		const server = createNetServer((socket) => {
+			connections.record();
+			socket.once('data', () => {
+				socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+			});
+		});
+		const port = await listenOnLoopback(server);
+		const client = new CupboardClient(
+			new URL(`https://127.0.0.1:${String(port)}`),
+			fetch,
+			{ kind: 'default' },
+			undefined,
+			undefined,
+			() => 0,
+			manualRefreshTiming(new ManualClock())
+		);
+		const { window, forgotten } = observedWindow();
+
+		try {
+			const error = await rejectedBy(() =>
+				client.tokenRefresh('refresh-1', window)
+			);
+			await connections.reach(5);
+
+			expect({
+				failure: failureSummary(error).name,
+				forgotten: forgotten(),
+				connections: connections.count()
+			}).toStrictEqual({
+				failure: 'UnreachableHostError',
+				forgotten: 1,
+				connections: 5
+			});
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+
+	it('releases the record when it is interrupted before the request is written', async () => {
+		const connections = eventCounter();
+		const sockets = new Set<Socket>();
+		const server = createNetServer((socket) => {
+			sockets.add(socket);
+			connections.record();
+		});
+		const port = await listenOnLoopback(server);
+		const controller = new AbortController();
+		const reason = new Error('stop renewing');
+		const client = new CupboardClient(
+			new URL(`https://127.0.0.1:${String(port)}`),
+			fetch,
+			{ kind: 'default' },
+			controller.signal,
+			undefined,
+			() => 0,
+			manualRefreshTiming(new ManualClock())
+		);
+		const { window, forgotten } = observedWindow();
+
+		try {
+			const pending = rejectedBy(() =>
+				client.tokenRefresh('refresh-1', window)
+			);
+			await connections.reach(1);
+			controller.abort(reason);
+
+			expect({ error: await pending, forgotten: forgotten() }).toStrictEqual({
+				error: reason,
+				forgotten: 1
+			});
+		} finally {
+			for (const socket of sockets) {
+				socket.destroy();
+			}
+
+			await new Promise((resolve) => server.close(resolve));
+		}
 	});
 });
 
@@ -651,7 +1547,8 @@ describe('CupboardClient token endpoint redirects', () => {
 		{
 			name: 'a refresh',
 			path: '/token',
-			request: (client: CupboardClient) => client.tokenRefresh('refresh-1')
+			request: (client: CupboardClient) =>
+				client.tokenRefresh('refresh-1', firstAttempt)
 		},
 		{
 			name: 'a read access request',
@@ -680,9 +1577,15 @@ describe('CupboardClient token endpoint redirects', () => {
 			const origin = await RedirectingOrigin.start([path]);
 
 			try {
-				const client = new CupboardClient(new URL(origin.origin), fetch, {
-					kind: 'default'
-				});
+				const client = new CupboardClient(
+					new URL(origin.origin),
+					fetch,
+					{ kind: 'default' },
+					undefined,
+					undefined,
+					undefined,
+					manualRefreshTiming(new ManualClock())
+				);
 				const error = await rejectedBy(() => request(client));
 
 				expectCupboardHttpError(error);

@@ -88,6 +88,21 @@ describe('session cache', () => {
 	);
 
 	testWithConfigHome(
+		'round-trips the start of the first refresh attempt with a session',
+		async () => {
+			const session = {
+				accessToken: jwt({ iss: tenant, aud: tenant }),
+				refreshToken: 'refresh-1',
+				refreshStartedAtMs: 1_700_000_000_000
+			};
+
+			await writeCachedSession(session, tenantTarget);
+
+			expect(await readCachedSession(tenantTarget)).toStrictEqual(session);
+		}
+	);
+
+	testWithConfigHome(
 		'round-trips a session granted no refresh token',
 		async () => {
 			const session = { accessToken: jwt({ iss: tenant, aud: tenant }) };

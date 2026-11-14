@@ -60,6 +60,14 @@ function authenticationError(
 	error: unknown,
 	options: HumanErrorOptions
 ): string | undefined {
+	if (error instanceof errors.SessionRenewalUnconfirmedError) {
+		return `The CLI could not confirm the renewal of your saved sign-in, and the server may already have replaced it. Run the command again straight away: the CLI can repeat the renewal until ${errors.windowSeconds(error.windowMs)} seconds after its first attempt. If the command then reports that the sign-in can no longer be renewed, run \`${loginCommand(options)}\`.`;
+	}
+
+	if (error instanceof errors.SessionRenewalExpiredError) {
+		return `The CLI could not confirm the renewal of your saved sign-in within ${errors.windowSeconds(error.windowMs)} seconds of its first attempt, so it can no longer renew it. Run \`${loginCommand(options)}\` to sign in again.`;
+	}
+
 	if (
 		error instanceof errors.SessionRejectedError ||
 		error instanceof errors.OwnerLoginRequiredError

@@ -20,6 +20,7 @@ import {
 	CliError,
 	CupboardHttpError,
 	OwnerLoginRequiredError,
+	SessionRenewalExpiredError,
 	UnreachableHostError
 } from '../errors.ts';
 
@@ -884,17 +885,26 @@ describe('decideAuthority', () => {
 			name: 'at a terminal: logs in',
 			interactive: true,
 			isUpdated: true,
-			logins: [`logInAsAdmin:${deploymentUrl.href}:${admin.subject}`]
+			logins: [`logInAsAdmin:${deploymentUrl.href}:${admin.subject}`],
+			unusable: () => new OwnerLoginRequiredError()
 		},
 		{
 			name: 'without a terminal: refuses',
 			interactive: false,
 			isUpdated: false,
-			logins: []
+			logins: [],
+			unusable: () => new OwnerLoginRequiredError()
+		},
+		{
+			name: 'at a terminal after an expired renewal window: logs in',
+			interactive: true,
+			isUpdated: true,
+			logins: [`logInAsAdmin:${deploymentUrl.href}:${admin.subject}`],
+			unusable: () => new SessionRenewalExpiredError(deploymentUrl.host, 30_000)
 		}
 	])(
 		'logs in as the admin when no session is cached ($name)',
-		async ({ interactive, isUpdated, logins }) => {
+		async ({ interactive, isUpdated, logins, unusable }) => {
 			let isLoggedIn = false;
 			const { deployment, effects, calls } = harness({
 				database: claimedDatabase,
@@ -903,8 +913,8 @@ describe('decideAuthority', () => {
 					get: () =>
 						isLoggedIn
 							? Promise.resolve(adminToken)
-							: Promise.reject(new OwnerLoginRequiredError()),
-					refresh: () => Promise.reject(new OwnerLoginRequiredError())
+							: Promise.reject(unusable()),
+					refresh: () => Promise.reject(unusable())
 				},
 				logInAsAdmin: () => {
 					isLoggedIn = true;

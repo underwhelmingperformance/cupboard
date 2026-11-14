@@ -15,6 +15,8 @@ import {
 	ReferenceSourceReadRefusedError,
 	ScopeForbiddenError,
 	SessionRejectedError,
+	SessionRenewalExpiredError,
+	SessionRenewalUnconfirmedError,
 	TransitionIncompleteError,
 	UnreachableHostError
 } from './errors.ts';
@@ -84,6 +86,24 @@ describe('human error presentation', () => {
 			}),
 			expected:
 				'Your saved sign-in was refused. Run `cupboard login https://cupboard.example.workers.dev/t/acme` to sign in again.'
+		},
+		{
+			error: new SessionRenewalUnconfirmedError(
+				'cupboard.example.workers.dev',
+				5,
+				30_000,
+				new Error('server internals')
+			),
+			expected:
+				'The CLI could not confirm the renewal of your saved sign-in, and the server may already have replaced it. Run the command again straight away: the CLI can repeat the renewal until 30 seconds after its first attempt. If the command then reports that the sign-in can no longer be renewed, run `cupboard login https://cupboard.example.workers.dev/t/acme`.'
+		},
+		{
+			error: new SessionRenewalExpiredError(
+				'cupboard.example.workers.dev',
+				30_000
+			),
+			expected:
+				'The CLI could not confirm the renewal of your saved sign-in within 30 seconds of its first attempt, so it can no longer renew it. Run `cupboard login https://cupboard.example.workers.dev/t/acme` to sign in again.'
 		},
 		{
 			error: new UnreachableHostError(

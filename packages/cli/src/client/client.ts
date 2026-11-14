@@ -46,7 +46,14 @@ import {
 	readResponseJson,
 	readResponseText
 } from '@cupboard/shared/response-body';
-import { type ReplaySafety, retryingFetcher } from '@cupboard/shared/retry';
+import {
+	isConnectionSetupFailure,
+	isTransientResponse,
+	type ReplaySafety,
+	responseBodyFailureCode,
+	retryingFetcher
+} from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
@@ -57,9 +64,11 @@ import {
 } from '../auth/bound-sign-in.ts';
 import {
 	CupboardHttpError,
+	CupboardResponseError,
 	InvalidCacheNameError,
 	MalformedResponseError,
-	ResponseSchemaMismatchError
+	ResponseSchemaMismatchError,
+	UnreachableHostError
 } from '../errors.ts';
 
 import {
@@ -71,6 +80,13 @@ import {
 } from './commit-socket.ts';
 import { type AccessCredential, bearerAttempt } from './credentials.ts';
 import {
+	type RefreshAttemptOutcome,
+	type RefreshRetryTiming,
+	type RefreshWindow,
+	retryRefresh,
+	systemRefreshRetryTiming
+} from './refresh-retry.ts';
+import {
 	reachableFetcher,
 	resilientFetcher,
 	tokenEndpointFetcher
@@ -80,6 +96,8 @@ export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
 const maximumErrorResponseBytes = 64 * 1024;
 const maximumClientResponseBytes = 16 * 1024 * 1024;
+const rateLimitStatus: number = StatusCodes.TOO_MANY_REQUESTS;
+const badRequestStatus: number = StatusCodes.BAD_REQUEST;
 
 export class CupboardClient {
 	static fromUrl(value: URL, options: CupboardClientOptions): CupboardClient {
@@ -97,7 +115,7 @@ export class CupboardClient {
 
 	private readonly replayUnsafeFetcher: typeof fetch;
 
-	private readonly signupFetcher: typeof fetch;
+	private readonly singleAttemptFetcher: typeof fetch;
 
 	constructor(
 		public readonly baseUrl: URL,
@@ -107,7 +125,8 @@ export class CupboardClient {
 		public readonly cache: CacheScope,
 		public readonly signal?: AbortSignal,
 		private readonly connectSocket: CommitSocketConnect = connectCommitSocket,
-		random?: RandomSource
+		private readonly random?: RandomSource,
+		private readonly refreshTiming: RefreshRetryTiming = systemRefreshRetryTiming
 	) {
 		this.replaySafeFetcher = resilientFetcher(
 			'replay-safe',
@@ -128,8 +147,9 @@ export class CupboardClient {
 		);
 		// The claim in `cupboard init` retries `/signup` 30 times. Retrying each of
 		// those calls again here would multiply the time to report an unreachable
-		// deployment.
-		this.signupFetcher = reachableFetcher(
+		// deployment. `tokenRefresh` times every refresh attempt against the
+		// server's grace period, so a refresh must not be repeated here either.
+		this.singleAttemptFetcher = reachableFetcher(
 			retryingFetcher(fetcher, 'replay-unsafe', {
 				trustedOrigin: baseUrl.origin,
 				retriesConnectionFailures: false,
@@ -253,26 +273,108 @@ export class CupboardClient {
 		});
 
 		if (!response.ok) {
-			throw new CupboardHttpError(
-				'POST',
-				'/token',
-				response.status,
-				await readResponseText(response, {
-					description: 'Cupboard token error response',
-					maximumBytes: maximumErrorResponseBytes,
-					signal: this.signal
-				}),
-				rayOf(response)
-			);
+			throw await this.tokenError(response, this.signal);
 		}
 
 		return response;
 	}
 
+	private async tokenError(
+		response: Response,
+		signal: AbortSignal | undefined
+	): Promise<CupboardHttpError> {
+		return new CupboardHttpError(
+			'POST',
+			'/token',
+			response.status,
+			await readResponseText(response, {
+				description: 'Cupboard token error response',
+				maximumBytes: maximumErrorResponseBytes,
+				signal
+			}),
+			rayOf(response)
+		);
+	}
+
+	private async refreshAttempt(
+		body: string,
+		signal: AbortSignal
+	): Promise<RefreshAttemptOutcome<TokenResponse>> {
+		try {
+			const response = await this.singleAttemptFetcher(this.resolve('/token'), {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body,
+				redirect: 'manual',
+				signal
+			});
+
+			if (
+				isTransientResponse(response) &&
+				response.status !== rateLimitStatus
+			) {
+				return {
+					kind: 'failed',
+					failure: await this.tokenError(response, signal),
+					mayHaveBeenProcessed: true,
+					response
+				};
+			}
+
+			if (!response.ok) {
+				const failure = await this.tokenError(response, signal);
+
+				if (isRefreshTokenRefusal(failure)) {
+					throw failure;
+				}
+
+				// The token endpoint's rate limiter answers 429 before it reads the
+				// request, so the token handler never received it.
+				return {
+					kind: 'refused',
+					failure,
+					mayHaveBeenProcessed: response.status !== rateLimitStatus
+				};
+			}
+
+			return {
+				kind: 'succeeded',
+				value: await this.parseJson(
+					'/token',
+					tokenResponseSchema,
+					response,
+					signal
+				)
+			};
+		} catch (error) {
+			if (error instanceof UnreachableHostError) {
+				return {
+					kind: 'failed',
+					failure: error,
+					mayHaveBeenProcessed: !isConnectionSetupFailure(error.cause)
+				};
+			}
+
+			if (
+				error instanceof Error &&
+				responseBodyFailureCode(error) !== undefined
+			) {
+				return { kind: 'failed', failure: error, mayHaveBeenProcessed: true };
+			}
+
+			if (error instanceof CupboardResponseError) {
+				return { kind: 'refused', failure: error, mayHaveBeenProcessed: true };
+			}
+
+			throw error;
+		}
+	}
+
 	private async parseJson<S extends z.ZodType>(
 		path: string,
 		schema: S,
-		response: Response
+		response: Response,
+		signal: AbortSignal | undefined = this.signal
 	): Promise<z.output<S>> {
 		let payload: unknown;
 
@@ -280,7 +382,7 @@ export class CupboardClient {
 			payload = await readResponseJson(response, {
 				description: `Cupboard ${path} response`,
 				maximumBytes: maximumClientResponseBytes,
-				signal: this.signal
+				signal
 			});
 		} catch (error) {
 			if (error instanceof SyntaxError) {
@@ -399,7 +501,7 @@ export class CupboardClient {
 			}),
 			...bindingFormFields(binding)
 		});
-		const response = await this.signupFetcher(url, {
+		const response = await this.singleAttemptFetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: body.toString(),
@@ -509,17 +611,45 @@ export class CupboardClient {
 	refresh_token grant. The server rotates the credential on first use. For
 	one minute, a retry of the consumed token can return the same successor.
 	Callers must persist each successful response.
-	*/
-	async tokenRefresh(refreshToken: string): Promise<TokenResponse> {
-		const response = await this.postTokenForm(
-			{
-				grant_type: refreshTokenGrantType,
-				refresh_token: refreshToken
-			},
-			'replay-unsafe'
-		);
 
-		return this.parseJson('/token', tokenResponseSchema, response);
+	`window` says whether an earlier renewal has sent this refresh token, and
+	if so, how long ago. The method sends the token only within half of the
+	server's grace period after the first attempt. It repeats the request
+	after a network failure, a 502, 503 or 504, a response body that fails
+	after the headers, or an attempt that takes longer than 10 seconds, with
+	at most four repeats.
+
+	In a new window, when the token handler cannot have received any attempt,
+	the method calls `window.onNotProcessed` and throws the last failure, or
+	the abort reason when the client's signal aborts. That happens when each
+	connection, including its TLS handshake, failed or was abandoned before
+	the request was written, or when the rate limiter answered 429.
+
+	A 400 `invalid_grant` is thrown as a `CupboardHttpError`. The first
+	attempt of a new window also throws any other error response as a
+	`CupboardHttpError`, and a body that is not a token response as a
+	`MalformedResponseError` or `ResponseSchemaMismatchError`. When the
+	renewal stops without a token response in any other case, the method
+	throws `SessionRenewalUnconfirmedError` while time is left in the window,
+	and `SessionRenewalExpiredError` after it.
+	*/
+	async tokenRefresh(
+		refreshToken: string,
+		window: RefreshWindow
+	): Promise<TokenResponse> {
+		const body = new URLSearchParams({
+			grant_type: refreshTokenGrantType,
+			refresh_token: refreshToken
+		}).toString();
+
+		return retryRefresh((signal) => this.refreshAttempt(body, signal), {
+			window,
+			timing: this.refreshTiming,
+			host: this.baseUrl.host,
+			target: this.resolve('/token').href,
+			random: this.random,
+			signal: this.signal
+		});
 	}
 }
 
@@ -573,6 +703,15 @@ const defaultCommitWaitSeconds = 600;
 
 const connectCommitSocket: CommitSocketConnect = (url, headers) =>
 	new WebSocket(url, { headers: { ...headers } });
+
+// The server's answer to a refresh token that it does not accept. The caller
+// asks the user to sign in again.
+function isRefreshTokenRefusal(failure: CupboardHttpError): boolean {
+	return (
+		failure.status === badRequestStatus &&
+		failure.oauthError?.error === 'invalid_grant'
+	);
+}
 
 // Cloudflare stamps edge responses with `cf-ray`, which ties a server failure to
 // its log entry. Local and non-Cloudflare responses can omit the header.

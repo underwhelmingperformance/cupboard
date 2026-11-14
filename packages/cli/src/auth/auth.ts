@@ -3,11 +3,13 @@ import {
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
 import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
+import { type RefreshWindow } from '../client/refresh-retry.ts';
 import { jwtExpiryMs } from '../deploy/cloudflare-oauth.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 
@@ -17,6 +19,7 @@ import {
 	githubOidcExchangeFailure
 } from './github-oidc.ts';
 import { hasOAuthErrorCode } from './oauth-error.ts';
+import { type SecretFileLockState } from './secret-lock.ts';
 import {
 	type CachedSession,
 	readCachedSession,
@@ -26,7 +29,10 @@ import {
 } from './token-store.ts';
 
 interface SessionTokenClient {
-	tokenRefresh(refreshToken: string): Promise<TokenResponse>;
+	tokenRefresh(
+		refreshToken: string,
+		window: RefreshWindow
+	): Promise<TokenResponse>;
 }
 
 export interface OwnerSessionDependencies {
@@ -39,7 +45,7 @@ export interface OwnerSessionDependencies {
 	) => Promise<void>;
 	readonly withSessionLock?: <T>(
 		target: URL,
-		action: (signal?: AbortSignal) => Promise<T>,
+		action: (signal?: AbortSignal, lock?: SecretFileLockState) => Promise<T>,
 		signal?: AbortSignal
 	) => Promise<T>;
 	readonly now?: () => number;
@@ -57,6 +63,13 @@ is used as is; an expired or refused one is renewed by rotating the cupboard
 refresh token. When the session has no refresh token, or the server refuses
 it, the provider throws `OwnerLoginRequiredError`, whose message tells the
 user to run `cupboard login` again.
+
+Before it first sends a refresh token, the provider records the time in the
+cached session. Every later renewal with that token, in this process or a
+later one, passes the time since then to `tokenRefresh`, so the retries of
+all those renewals share one window. When the token handler cannot have
+received any attempt of the renewal that made the record, the provider
+removes the record again.
 */
 export function cachedOwnerProvider(
 	target: URL,
@@ -70,7 +83,7 @@ export function cachedOwnerProvider(
 	const renew = (observed: CachedSession | undefined): Promise<string> =>
 		withSessionLock(
 			target,
-			async (lockSignal) => {
+			async (lockSignal, lock) => {
 				const signal = lockSignal ?? dependencies.signal;
 				const client =
 					dependencies.client ??
@@ -89,10 +102,38 @@ export function cachedOwnerProvider(
 					return session.accessToken;
 				}
 
-				const rotated =
-					session?.refreshToken === undefined
-						? undefined
-						: await rotateSession(client, session.refreshToken);
+				if (session?.refreshToken === undefined) {
+					throw new OwnerLoginRequiredError();
+				}
+
+				const forgetWindow = async (): Promise<void> => {
+					if (lock?.isLost === true) {
+						return;
+					}
+
+					await bestEffort(() => writeSession(session, target));
+				};
+				const openWindow = async (): Promise<RefreshWindow> => {
+					if (session.refreshStartedAtMs !== undefined) {
+						return {
+							kind: 'continued',
+							sinceFirstAttemptMs: now() - session.refreshStartedAtMs
+						};
+					}
+
+					await writeSession(
+						{ ...session, refreshStartedAtMs: now() },
+						target,
+						signal
+					);
+
+					return { kind: 'new', onNotProcessed: forgetWindow };
+				};
+				const rotated = await rotateSession(
+					client,
+					session.refreshToken,
+					await openWindow()
+				);
 
 				if (rotated === undefined) {
 					throw new OwnerLoginRequiredError();
@@ -181,10 +222,13 @@ export function isAccessTokenExpired(
 // caller throws `OwnerLoginRequiredError`. A transport or server failure propagates.
 async function rotateSession(
 	client: SessionTokenClient,
-	refreshToken: string
+	refreshToken: string,
+	window: RefreshWindow
 ): Promise<CachedSession | undefined> {
 	try {
-		return sessionFromTokenResponse(await client.tokenRefresh(refreshToken));
+		return sessionFromTokenResponse(
+			await client.tokenRefresh(refreshToken, window)
+		);
 	} catch (error) {
 		if (isStaleRefreshToken(error)) {
 			return undefined;
