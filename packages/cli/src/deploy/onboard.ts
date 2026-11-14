@@ -14,6 +14,8 @@ import type {
 } from '@cupboard/protocol/instance';
 import { instanceNameSchema } from '@cupboard/protocol/instance';
 import {
+	isUnpinnedGithubRule,
+	type OidcTrustListResponse,
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
@@ -46,6 +48,11 @@ import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { cacheLoginSession } from '../commands/login.ts';
+import {
+	adminControlRuleId,
+	unpinnedGithubAdminRuleWarning,
+	unpinnedGithubRuleWarning
+} from '../commands/oidc-trust/format.ts';
 import {
 	CliError,
 	CupboardHttpError,
@@ -184,6 +191,12 @@ export interface OnboardClient extends Pick<
 		credential: AccessCredential
 	): Promise<{ readonly tenants: number }>;
 	controlCheck(credential: AccessCredential): Promise<ControlCheckReport>;
+	/**
+	The control plane's trust rules, including disabled ones.
+	*/
+	listControlTrust(
+		credential: AccessCredential
+	): Promise<OidcTrustListResponse>;
 }
 
 function defaultInstanceName(publicUrl: string): InstanceName {
@@ -464,6 +477,10 @@ export async function onboardDeployment(
 		);
 	}
 
+	if (authority.kind === 'admin') {
+		await warnUnpinnedControlTrust(ui, client, credential, url);
+	}
+
 	if (existing.length > 0 && options.cacheSlug !== undefined) {
 		ui.info(
 			`--cache ${options.cacheSlug} was not applied, because the deployment ` +
@@ -592,6 +609,58 @@ export async function onboardDeployment(
 			created: { access: first.access, read: first.read }
 		})
 	};
+}
+
+/**
+Warns about each enabled control trust rule that accepts GitHub Actions tokens
+without an exact `repository_id` or `repository_owner_id`. The deployment
+refuses to add such a rule, but it still matches stored ones. The check only
+reports, so a failure to list the rules is a warning: the deploy has already
+succeeded, and onboarding continues.
+*/
+async function warnUnpinnedControlTrust(
+	ui: DeployUi,
+	client: OnboardClient,
+	credential: AccessCredential,
+	url: string
+): Promise<void> {
+	let listed: OidcTrustListResponse;
+
+	try {
+		listed = await ui
+			.reporter()
+			.phase('Checking control trust rules', () =>
+				client.listControlTrust(credential)
+			);
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+
+		ui.warn(
+			'The deploy could not list the control trust rules, so it did not check them for GitHub Actions rules without a repository pin. ' +
+				`List them with \`cupboard control-oidc-trust list ${url}\`.`
+		);
+		return;
+	}
+
+	for (const rule of listed.rules) {
+		if (rule.disabled || !isUnpinnedGithubRule(rule)) {
+			continue;
+		}
+
+		const warning =
+			rule.id === adminControlRuleId
+				? unpinnedGithubAdminRuleWarning
+				: unpinnedGithubRuleWarning;
+
+		ui.warn(
+			warning(
+				`Control trust rule ${rule.id}`,
+				`cupboard control-oidc-trust remove ${url} ${rule.id}`
+			)
+		);
+	}
 }
 
 async function resolveDeploymentUrl(
@@ -744,7 +813,8 @@ function onboardClientFor(
 			control(credential).tenants.create(body),
 		rebuildMembership: (credential) =>
 			rebuildMembershipPages(control(credential).membership),
-		controlCheck: (credential) => control(credential).check()
+		controlCheck: (credential) => control(credential).check(),
+		listControlTrust: (credential) => control(credential).oidcTrust.list()
 	};
 }
 

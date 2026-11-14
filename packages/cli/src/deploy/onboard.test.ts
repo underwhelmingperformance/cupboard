@@ -10,6 +10,8 @@ import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
 	oidcSubjectSchema,
+	type OidcTrustListResponse,
+	oidcTrustListResponseSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import type { R2CredentialCheck } from '@cupboard/protocol/reports';
@@ -654,6 +656,10 @@ function controlFetcher(respond: (request: ControlRequest) => Response) {
 			return Response.json({ state: 'configured', name: 'cupboard' });
 		}
 
+		if (route === 'GET /control/oidc-trust') {
+			return Response.json({ rules: [] });
+		}
+
 		if (
 			route === 'GET /control/tenants' ||
 			route === 'POST /control/membership/rebuild'
@@ -739,6 +745,7 @@ interface ClientScript {
 	readonly creates?: Scripted<TenantSummary>[];
 	readonly rebuilds?: Scripted<MembershipRebuildResponse>[];
 	readonly controlChecks?: Scripted<R2CredentialCheck>[];
+	readonly controlTrust?: OidcTrustListResponse | Error;
 	readonly publicKeys?: Scripted<string>[];
 	readonly instanceName?: InstanceName;
 	readonly instanceConfigured?: boolean;
@@ -765,6 +772,7 @@ interface ScriptedClient {
 	readonly createdBodies: unknown[];
 	readonly membershipRebuildTokens: string[];
 	readonly controlCheckTokens: string[];
+	readonly controlTrustTokens: string[];
 	readonly cacheAccessTokens: string[];
 	readonly initialisedInstanceNames: InstanceName[];
 	readonly cachedSessions: { session: TokenResponse; target: URL }[];
@@ -789,6 +797,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const createdBodies: unknown[] = [];
 	const membershipRebuildTokens: string[] = [];
 	const controlCheckTokens: string[] = [];
+	const controlTrustTokens: string[] = [];
 	const cacheAccessTokens: string[] = [];
 	const cachedSessions: { session: TokenResponse; target: URL }[] = [];
 	const initialisedInstanceNames: InstanceName[] = [];
@@ -803,6 +812,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 		createdBodies,
 		membershipRebuildTokens,
 		controlCheckTokens,
+		controlTrustTokens,
 		cacheAccessTokens,
 		initialisedInstanceNames,
 		cachedSessions,
@@ -865,6 +875,15 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 						db: { result: 'ok' },
 						r2: await answer(controlChecks, '/control/check', orpcRejection)
 					};
+				},
+				listControlTrust: async (credential) => {
+					controlTrustTokens.push(await tokenOf(credential));
+
+					if (script.controlTrust instanceof Error) {
+						throw script.controlTrust;
+					}
+
+					return script.controlTrust ?? { rules: [] };
 				},
 				publicKey: () => answer(publicKeys, '/pubkey')
 			};
@@ -2233,6 +2252,130 @@ describe('onboardDeployment', () => {
 		}
 	);
 
+	it('warns about each enabled GitHub Actions control rule without a repository pin', async () => {
+		const { ui, warnings } = scriptedUi();
+		const github = 'https://token.actions.githubusercontent.com';
+		const rule = {
+			audience: 'https://cache.example.com',
+			permittedGrants: [{ type: 'cupboard_wildcard' }],
+			disabled: false
+		};
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[tenantSummary('builds'), tenantSummary('laney')]],
+			rebuilds: [{ tenants: 2 }],
+			controlTrust: oidcTrustListResponseSchema.parse({
+				rules: [
+					{
+						...rule,
+						id: 'ci-deploy',
+						issuer: github,
+						claims: { sub: 'repo:acme/infra:ref:refs/heads/main' }
+					},
+					{
+						...rule,
+						id: 'pinned',
+						issuer: github,
+						claims: { repository_id: '1234' }
+					},
+					{
+						...rule,
+						id: 'retired',
+						issuer: github,
+						claims: { ref: 'refs/heads/main' },
+						disabled: true
+					},
+					{
+						...rule,
+						id: 'signup',
+						issuer: 'https://dash.cloudflare.com',
+						claims: { sub: 'operator' }
+					}
+				]
+			})
+		});
+
+		const outcome = await onboardDeployment(baseOptions(ui, client));
+
+		expect({
+			outcome,
+			warnings,
+			controlTrustTokens: client.controlTrustTokens
+		}).toStrictEqual({
+			outcome: {
+				kind: 'already-initialised',
+				url: 'https://cache.example.com',
+				slugs: ['builds', 'laney']
+			} satisfies OnboardOutcome,
+			warnings: [
+				'Control trust rule ci-deploy accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim. Any repository whose tokens satisfy its other claims can use it. Add a rule that pins the repository, then remove this rule with `cupboard control-oidc-trust remove https://cache.example.com ci-deploy`.'
+			],
+			controlTrustTokens: ['admin-jwt']
+		});
+	});
+
+	it('tells the operator to replace an unpinned GitHub Actions admin rule before removing it', async () => {
+		const { ui, warnings } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[tenantSummary('builds'), tenantSummary('laney')]],
+			rebuilds: [{ tenants: 2 }],
+			controlTrust: oidcTrustListResponseSchema.parse({
+				rules: [
+					{
+						id: 'signup',
+						issuer: 'https://token.actions.githubusercontent.com',
+						audience: 'https://cache.example.com',
+						claims: { sub: 'repo:acme/infra:ref:refs/heads/main' },
+						permittedGrants: [{ type: 'cupboard_wildcard' }],
+						disabled: false
+					}
+				]
+			})
+		});
+
+		await onboardDeployment(baseOptions(ui, client));
+
+		expect(warnings).toStrictEqual([
+			"Control trust rule signup is the rule for the deployment's admin, and it accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim. Its subject binds at most the repository's name. Before you remove it, add a control trust rule with the same issuer, audience and sub claim, the repository's exact repository_id and repository_owner_id, and the wildcard grant. Without such a rule, the admin can no longer sign in and cupboard init stops. Then remove this rule with `cupboard control-oidc-trust remove https://cache.example.com signup`."
+		]);
+	});
+
+	it('warns and creates the first cache when the control trust rules cannot be listed', async () => {
+		const { ui, warnings } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1'],
+			controlTrust: new CupboardHttpError(
+				'GET',
+				'/control/oidc-trust',
+				StatusCodes.SERVICE_UNAVAILABLE,
+				''
+			)
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			cacheSlug: 'builds'
+		});
+
+		expect({ outcome, warnings }).toStrictEqual({
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
+				publicKey: 'pk-1',
+				created: { access: 'public', read }
+			} satisfies OnboardOutcome,
+			warnings: [
+				'The deploy could not list the control trust rules, so it did not check them for GitHub Actions rules without a repository pin. List them with `cupboard control-oidc-trust list https://cache.example.com`.'
+			]
+		});
+	});
+
 	it('says that --cache was not applied when the deployment already has a tenant', async () => {
 		const { ui, infos } = scriptedUi();
 		const client = scriptedClient({
@@ -2426,6 +2569,7 @@ describe('onboardDeployment', () => {
 			'GET /control/tenants': () =>
 				Response.json({ tenants: [tenantSummary('laney')] }),
 			'POST /control/membership/rebuild': () => Response.json({ tenants: 1 }),
+			'GET /control/oidc-trust': () => Response.json({ rules: [] }),
 			'GET /t/laney/pubkey': () => new Response(`${publicKey}\n`)
 		};
 		const fetcher: typeof fetch = (input, init) => {
@@ -2465,6 +2609,7 @@ describe('onboardDeployment', () => {
 				'PUT /control/instance',
 				'GET /control/tenants',
 				'POST /control/membership/rebuild',
+				'GET /control/oidc-trust',
 				'GET /t/laney/pubkey'
 			]
 		});

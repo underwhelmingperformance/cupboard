@@ -269,6 +269,151 @@ describe('runOidcTrustList', () => {
 		});
 	});
 
+	it('marks GitHub Actions rules without a repository pin, and warns about the enabled ones', async () => {
+		const results: ResultRow[][] = [];
+		const warns: string[] = [];
+		const response = oidcTrustListResponseSchema.parse({
+			rules: [
+				summary({ id: 'rule-1' }),
+				summary({ id: 'branch-only', claims: { ref: 'refs/heads/main' } }),
+				summary({
+					id: 'retired',
+					claims: { sub: 'repo:acme/infra:ref:refs/heads/main' },
+					disabled: true
+				})
+			]
+		});
+
+		await runOidcTrustList(
+			reporter(results, [], warns),
+			{ list: () => Promise.resolve(response) },
+			'tenant',
+			new URL(tenantUrl)
+		);
+
+		const unpinnedRows = (
+			id: string,
+			claim: string,
+			state: string
+		): ResultRow[] => [
+			{ label: 'Rule', value: id },
+			{ label: 'Issuer', value: 'https://token.actions.githubusercontent.com' },
+			{ label: 'Audience', value: 'https://cache.example.workers.dev' },
+			{ label: 'Claims', value: claim },
+			{
+				label: 'Repository pin',
+				value:
+					'None. The rule requires no exact repository_id or repository_owner_id claim.'
+			},
+			...ciRuleRows.filter((row) => row.label === 'Access'),
+			{ label: 'State', value: state }
+		];
+
+		expect({ results, warns }).toStrictEqual({
+			results: [
+				[
+					...ciRuleRows.filter((row) => row.label !== ''),
+					...unpinnedRows('branch-only', 'ref=refs/heads/main', 'enabled'),
+					...unpinnedRows(
+						'retired',
+						'sub=repo:acme/infra:ref:refs/heads/main',
+						'disabled'
+					)
+				]
+			],
+			warns: [
+				'Trust rule branch-only accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim. Any repository whose tokens satisfy its other claims can use it. Add a rule that pins the repository, then remove this rule with `cupboard oidc-trust remove https://cache.example.workers.dev/t/acme branch-only`.'
+			]
+		});
+	});
+
+	it.each([
+		{
+			plane: 'tenant' as const,
+			id: 'owner',
+			warning:
+				"Trust rule owner is the tenant's owner rule, and it accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim. Its subject binds at most the repository's name. The owner rule cannot be removed, and a tenant's owner cannot be changed. Do not rename or delete the repository in its subject, or the account that owns the repository. Either change frees the name, and a new repository with the same name would match the rule. To stop trusting it, ask the operator to remove the tenant and create a new one whose owner is a person."
+		},
+		{
+			plane: 'control' as const,
+			id: 'signup',
+			warning:
+				"Trust rule signup is the rule for the deployment's admin, and it accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim. Its subject binds at most the repository's name. Before you remove it, add a control trust rule with the same issuer, audience and sub claim, the repository's exact repository_id and repository_owner_id, and the wildcard grant. Without such a rule, the admin can no longer sign in and cupboard init stops. Then remove this rule with `cupboard control-oidc-trust remove https://cache.example.workers.dev signup`."
+		},
+		{
+			plane: 'control' as const,
+			id: 'ci-deploy',
+			warning:
+				'Trust rule ci-deploy accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim. Any repository whose tokens satisfy its other claims can use it. Add a rule that pins the repository, then remove this rule with `cupboard control-oidc-trust remove https://cache.example.workers.dev ci-deploy`.'
+		}
+	])(
+		'gives $plane advice for the unpinned GitHub Actions rule $id',
+		async ({ plane, id, warning }) => {
+			const warns: string[] = [];
+
+			await runOidcTrustList(
+				reporter([], [], warns),
+				{
+					list: () =>
+						Promise.resolve(
+							oidcTrustListResponseSchema.parse({
+								rules: [
+									summary({
+										id,
+										claims: { sub: 'repo:acme/infra:ref:refs/heads/main' },
+										permittedGrants: [{ type: 'cupboard_wildcard' }]
+									})
+								]
+							})
+						)
+				},
+				plane,
+				new URL(
+					plane === 'tenant' ? tenantUrl : 'https://cache.example.workers.dev'
+				)
+			);
+
+			expect(warns).toStrictEqual([warning]);
+		}
+	);
+
+	it('gives the machine-readable warning for an unpinned owner rule', async () => {
+		const details: { label: string; value: string | undefined }[] = [];
+
+		await runOidcTrustList(
+			{
+				...reporter([]),
+				warn: (label, value) => {
+					details.push({ label, value });
+				}
+			},
+			{
+				list: () =>
+					Promise.resolve(
+						oidcTrustListResponseSchema.parse({
+							rules: [
+								summary({
+									id: 'owner',
+									claims: { sub: 'repo:acme/infra:ref:refs/heads/main' },
+									permittedGrants: [{ type: 'cupboard_wildcard' }]
+								})
+							]
+						})
+					)
+			},
+			'tenant',
+			new URL(tenantUrl)
+		);
+
+		expect(details).toStrictEqual([
+			{
+				label: 'The owner rule does not pin a GitHub repository',
+				value:
+					'The owner rule cannot be removed. Do not rename or delete the repository in its subject or the account that owns it. To stop trusting it, ask the operator to remove the tenant.'
+			}
+		]);
+	});
+
 	it('warns that an unreadable operator rule blocks operator sign-ins', async () => {
 		const results: ResultRow[][] = [];
 		const warns: string[] = [];

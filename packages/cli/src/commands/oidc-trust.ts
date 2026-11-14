@@ -8,6 +8,7 @@ import {
 	type ClaimMatch,
 	controlOidcTrustAddBodySchema,
 	githubActionsIssuer,
+	isUnpinnedGithubRule,
 	type OidcTrustAddBodyInput,
 	oidcTrustAddBodySchema,
 	type OidcTrustListResponse,
@@ -52,7 +53,13 @@ import {
 	WorkflowDiscoveryError
 } from './github/discovery.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
-import { trustRuleSummaryRows } from './oidc-trust/format.ts';
+import {
+	adminControlRuleId,
+	trustRuleSummaryRows,
+	unpinnedGithubAdminRuleWarning,
+	unpinnedGithubOwnerRuleWarning,
+	unpinnedGithubRuleWarning
+} from './oidc-trust/format.ts';
 import {
 	lookupRepository,
 	parseRepository,
@@ -632,7 +639,7 @@ function buildOidcTrustCommands(
 	oidcTrust
 		.command('list')
 		.description(
-			"List the trust rules, including disabled ones, with each rule's issuer, audience and grants."
+			"List the trust rules, including disabled ones, with each rule's issuer, audience and grants. Warns about each enabled GitHub Actions rule that does not pin a repository."
 		)
 		.argument('<url>', plane.urlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -1038,10 +1045,13 @@ function registerTenantRuleAdd(
 				'',
 				'Example:',
 				"  # Let a reusable workflow push to its pull request's own cache and",
-				'  # no other. The rule matches on the job_workflow_ref claim.',
+				"  # no other. The rule matches on the repository's ID and the",
+				'  # job_workflow_ref claim. A GitHub Actions rule must require an',
+				'  # exact repository_id or repository_owner_id.',
 				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
 				'    --issuer https://token.actions.githubusercontent.com \\',
 				'    --audience https://cupboard.example.workers.dev/t/acme \\',
+				'    --claim repository_id=123456789 \\',
 				'    --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \\',
 				'    --allow push --allow root --template-source github-pr \\',
 				'    --cache-template pr-{pr} --root-template pr-{pr}'
@@ -1132,6 +1142,50 @@ export async function runOidcTrustList(
 		empty: unreadable.length === 0 ? 'No OIDC trust rules.' : undefined
 	});
 
+	const target = url?.href.replace(/\/$/u, '') ?? '<url>';
+
+	for (const rule of rules) {
+		if (rule.disabled || !isUnpinnedGithubRule(rule)) {
+			continue;
+		}
+
+		if (plane === 'tenant' && rule.id === 'owner') {
+			reporter.warn(
+				'The owner rule does not pin a GitHub repository',
+				'The owner rule cannot be removed. Do not rename or delete the repository in its subject or the account that owns it. To stop trusting it, ask the operator to remove the tenant.',
+				{ humanMessage: unpinnedGithubOwnerRuleWarning }
+			);
+			continue;
+		}
+
+		const removal = `cupboard ${plane === 'control' ? 'control-oidc-trust' : 'oidc-trust'} remove ${target} ${rule.id}`;
+
+		if (plane === 'control' && rule.id === adminControlRuleId) {
+			reporter.warn(
+				`Trust rule ${rule.id} does not pin a GitHub repository`,
+				`This is the admin's rule. First add a control trust rule with the same issuer, audience and sub claim, the repository's exact repository_id and repository_owner_id, and the wildcard grant. Then run ${removal}`,
+				{
+					humanMessage: unpinnedGithubAdminRuleWarning(
+						`Trust rule ${rule.id}`,
+						removal
+					)
+				}
+			);
+			continue;
+		}
+
+		reporter.warn(
+			`Trust rule ${rule.id} does not pin a GitHub repository`,
+			`Add a rule that requires an exact repository_id or repository_owner_id, then run ${removal}`,
+			{
+				humanMessage: unpinnedGithubRuleWarning(
+					`Trust rule ${rule.id}`,
+					removal
+				)
+			}
+		);
+	}
+
 	for (const { id, disabled: isDisabled } of unreadable) {
 		if (isDisabled) {
 			reporter.info(
@@ -1146,7 +1200,7 @@ export async function runOidcTrustList(
 			{
 				humanMessage:
 					plane === 'control'
-						? `Operator sign-ins are blocked by unreadable trust rule ${id}. Repair or remove it with \`cupboard control-oidc-trust remove ${url?.href.replace(/\/$/u, '') ?? '<url>'} ${id}\`.`
+						? `Operator sign-ins are blocked by unreadable trust rule ${id}. Repair or remove it with \`cupboard control-oidc-trust remove ${target} ${id}\`.`
 						: `Trust rule ${id} cannot authorise new sign-ins. Repair or remove the rule. Other readable rules can still authorise access.`
 			}
 		);

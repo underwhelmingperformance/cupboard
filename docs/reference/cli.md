@@ -1409,6 +1409,8 @@ Options:
 Commands:
   list <url>                   List the trust rules, including disabled ones,
                                with each rule's issuer, audience and grants.
+                               Warns about each enabled GitHub Actions rule that
+                               does not pin a repository.
   show <url> <id>              Show one trust rule in full: the tokens that it
                                accepts and the grants that it gives.
   add [options] <url>          Add a control-plane trust rule from a JSON file:
@@ -1427,7 +1429,8 @@ Commands:
 Usage: cupboard control-oidc-trust list [options] <url>
 
 List the trust rules, including disabled ones, with each rule's issuer, audience
-and grants.
+and grants. Warns about each enabled GitHub Actions rule that does not pin a
+repository.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
@@ -2211,7 +2214,9 @@ Options:
 Commands:
   list <url>                           List the trust rules, including disabled
                                        ones, with each rule's issuer, audience
-                                       and grants.
+                                       and grants. Warns about each enabled
+                                       GitHub Actions rule that does not pin a
+                                       repository.
   show <url> <id>                      Show one trust rule in full: the tokens
                                        that it accepts and the grants that it
                                        gives.
@@ -2242,7 +2247,8 @@ Commands:
 Usage: cupboard oidc-trust list [options] <url>
 
 List the trust rules, including disabled ones, with each rule's issuer, audience
-and grants.
+and grants. Warns about each enabled GitHub Actions rule that does not pin a
+repository.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -2295,10 +2301,13 @@ Options:
 
 Example:
   # Let a reusable workflow push to its pull request's own cache and
-  # no other. The rule matches on the job_workflow_ref claim.
+  # no other. The rule matches on the repository's ID and the
+  # job_workflow_ref claim. A GitHub Actions rule must require an
+  # exact repository_id or repository_owner_id.
   cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
     --issuer https://token.actions.githubusercontent.com \
     --audience https://cupboard.example.workers.dev/t/acme \
+    --claim repository_id=123456789 \
     --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \
     --allow push --allow root --template-source github-pr \
     --cache-template pr-{pr} --root-template pr-{pr}
