@@ -699,44 +699,14 @@ export class CommitPipelineService {
 		// The probe can report a missing canonical NAR after another saga has already
 		// committed this generation. Check the current generation before reclaiming
 		// it, and apply grace and root retention before releasing the same gate.
-		const read = await this.readReservation(cache, metadata, generation);
-		const confirmed = await this.context.criticalSection(async () => {
-			const reclaim = await this.releaseReservation({
-				uploadId,
-				cache,
-				path: metadata,
-				generation,
-				reason: 'failed-upload',
-				read
-			});
-
-			if (reclaim === 'stale-read') {
-				return reclaim;
-			}
-			if (reclaim !== 'committed-current') {
-				return;
-			}
-
-			// This upload's captured retention decisions have not run. Apply them
-			// while the winning generation is still protected by the identity check.
-			this.attachRootTarget(
-				cache,
-				attachRootName,
-				metadata.storePathHash,
-				metadata.storePath,
-				graceDecision?.retentionEpoch ?? 0
-			);
-
-			return confirmGrace(
-				this.context,
-				this.retention,
-				cache,
-				metadata.storePathHash,
-				generation,
-				metadata.narHash,
-				graceDecision
-			);
-		});
+		const confirmed = await this.releaseFailedReservation(
+			cache,
+			uploadId,
+			metadata,
+			generation,
+			graceDecision,
+			attachRootName
+		);
 
 		if (confirmed === 'stale-read') {
 			return this.deferToVerification(uploadId, metadata, graceDecision);
@@ -906,14 +876,8 @@ export class CommitPipelineService {
 			cache.id,
 			[row.storePathHash],
 			async (demotions) => {
-				const versions = await this.narInfoObjects.servableNarInfoVersions(
-					cache,
-					[row.storePathHash]
-				);
-				const served = versions.get(row.storePathHash);
 				if (
-					served?.generation !== row.generation ||
-					served.narHash !== row.narHash ||
+					!(await this.servesGeneration(cache, row, row.generation)) ||
 					demotions.wasDemoted(row.storePathHash)
 				) {
 					return;
@@ -928,6 +892,79 @@ export class CommitPipelineService {
 					row.narHash,
 					graceDecision
 				);
+			}
+		);
+	}
+
+	// Releases the reservation of an upload whose materialisation failed. When a
+	// commit of the generation was charged and Nix can fetch the path, the
+	// upload's grace and root decisions apply to that generation. The charge
+	// read cannot show whether the NAR is still present, so the path's
+	// availability is read as well. Demotion deletes the narinfo object without
+	// changing the row, so the path is watched for demotion from the
+	// availability read until the gate decides. Returns undefined when the upload
+	// fails, and `stale-read` when a later pass must decide.
+	private async releaseFailedReservation(
+		cache: ResolvedCache,
+		uploadId: UploadId,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration,
+		graceDecision: GraceDecision | undefined,
+		attachRootName: RootName | undefined
+	): Promise<ConfirmedGrace | 'stale-read' | undefined> {
+		return this.context.narInfoDemotions.watching(
+			cache.id,
+			[metadata.storePathHash],
+			async (demotions) => {
+				const read = await this.readReservation(cache, metadata, generation);
+				const isServed =
+					read.isCharged &&
+					(await this.servesGeneration(cache, metadata, generation));
+
+				return this.context.criticalSection(async () => {
+					const reclaim = await this.releaseReservation({
+						uploadId,
+						cache,
+						path: metadata,
+						generation,
+						reason: 'failed-upload',
+						read
+					});
+
+					if (reclaim === 'stale-read') {
+						return reclaim;
+					}
+					if (reclaim !== 'committed-current') {
+						return;
+					}
+					// The upload fails, so it stops sharing the charged reservation, as it
+					// does when `releaseReservation` decides the failure.
+					if (!isServed || demotions.wasDemoted(metadata.storePathHash)) {
+						this.uploadState.releaseStartedCommit(uploadId);
+						return;
+					}
+
+					// This upload's captured retention decisions have not run. Apply them
+					// while the winning generation is still protected by the identity
+					// check.
+					this.attachRootTarget(
+						cache,
+						attachRootName,
+						metadata.storePathHash,
+						metadata.storePath,
+						graceDecision?.retentionEpoch ?? 0
+					);
+
+					return confirmGrace(
+						this.context,
+						this.retention,
+						cache,
+						metadata.storePathHash,
+						generation,
+						metadata.narHash,
+						graceDecision
+					);
+				});
 			}
 		);
 	}
@@ -3151,6 +3188,31 @@ export class CommitPipelineService {
 			this.materialiseQueue.push({ request, resolve, reject });
 			this.materialiseDrain ??= this.drainMaterialiseQueue(logger);
 		});
+	}
+
+	/**
+	Whether Nix can fetch `generation` of the path with `path.narHash` as its
+	NAR. A charged generation can have lost its NAR, and the charge read does
+	not show that, so callers that answer from a charge check this as well.
+	The availability read repairs a missing narinfo object when the NAR is
+	present. Call it outside the input gate.
+
+	The answer can go stale before the caller's gate: a replacement upload can
+	make the path servable after this read. The caller then treats a served
+	path as unserved, which is harmless, because its client negotiates the
+	path again and finds it present.
+	*/
+	async servesGeneration(
+		cache: ResolvedCache,
+		path: Pick<UploadPathNegotiation, 'storePathHash' | 'narHash'>,
+		generation: NarInfoGeneration
+	): Promise<boolean> {
+		const versions = await this.narInfoObjects.servableNarInfoVersions(cache, [
+			path.storePathHash
+		]);
+		const served = versions.get(path.storePathHash);
+
+		return served?.generation === generation && served.narHash === path.narHash;
 	}
 
 	/**
