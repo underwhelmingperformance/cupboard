@@ -24,22 +24,24 @@ it('keeps a long claim pattern on one line', () => {
 		disabled: false
 	});
 
-	expect(trustRuleRows(rule)).toStrictEqual([
+	const rows = [
 		{ label: 'Rule', value: 'long-pattern' },
 		{ label: 'Issuer', value: 'https://token.actions.githubusercontent.com' },
 		{ label: 'Audience', value: 'https://cupboard.supply/t/laney' },
 		{ label: 'Claims', value: `sub matches ${pattern}` },
+		{
+			label: 'Repository pin',
+			value:
+				'None. The rule requires no exact repository_id or repository_owner_id claim.'
+		},
 		{ label: 'Access', value: 'Every operation on every resource' },
 		{ label: 'State', value: 'enabled' }
-	]);
-	expect(trustRuleSummaryRows(rule)).toStrictEqual([
-		{ label: 'Rule', value: 'long-pattern' },
-		{ label: 'Issuer', value: 'https://token.actions.githubusercontent.com' },
-		{ label: 'Audience', value: 'https://cupboard.supply/t/laney' },
-		{ label: 'Claims', value: `sub matches ${pattern}` },
-		{ label: 'Access', value: 'Every operation on every resource' },
-		{ label: 'State', value: 'enabled' }
-	]);
+	];
+
+	expect({
+		rows: trustRuleRows(rule),
+		summaryRows: trustRuleSummaryRows(rule)
+	}).toStrictEqual({ rows, summaryRows: rows });
 });
 
 it('shows the exact view selector in a read grant', () => {
