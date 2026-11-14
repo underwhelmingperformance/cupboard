@@ -29,6 +29,8 @@ You'll need:
   [Signing in](../admin/signing-in.md).
 - A repository on github.com with a flake at its root. The reusable workflows
   don't run on GitHub Enterprise Server or GHE.com.
+- Runners for Linux (x86-64 or arm64) or macOS on Apple silicon. The reusable
+  workflows fail on x86-64 macOS runners.
 
 This guide assumes anyone can read your tenant's caches. If your caches are
 private, get this setup working first, then follow

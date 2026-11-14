@@ -107,7 +107,7 @@ To update one system only, pass it with `--system`:
 pnpm update:conformance-oracle --system x86_64-linux
 ```
 
-CI uses this form, with one job for each of the four systems. Each job
+CI uses this form, with one job for each of the three systems. Each job
 regenerates its system's table before running the suite. If the committed files
 are out of date, the job runs `git diff --exit-code`, which prints the
 differences in the job log so that you can apply them by hand.

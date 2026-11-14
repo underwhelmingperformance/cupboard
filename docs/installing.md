@@ -8,7 +8,11 @@ push store paths from your own machine. You don't need it just to read from a
 cache with Nix. CI jobs that use cupboard's GitHub Actions install it for
 themselves.
 
-The CLI runs on Linux and macOS, on both x86-64 and arm64.
+The CLI runs on Linux, on both x86-64 and arm64, and on macOS with Apple silicon
+(arm64). Releases and the flake don't build it for x86-64 macOS, and
+`pnpm build:binary` refuses that host. A CLI that you run from a source checkout
+with `pnpm cli` on an unsupported host, such as x86-64 macOS, doesn't recognise
+any Nix setting, so it ignores the settings in `nix.conf`.
 
 ## Installing with Nix
 
@@ -114,7 +118,6 @@ has one archive for each platform:
 
 - `cupboard-linux-x64.tar.gz`
 - `cupboard-linux-arm64.tar.gz`
-- `cupboard-macos-x64.tar.gz`
 - `cupboard-macos-arm64.tar.gz`
 
 The release also has a `checksums.txt` file, and GitHub artifact attestations
