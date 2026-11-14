@@ -610,6 +610,13 @@
 			"when": 1794659147996,
 			"tag": "0086_root_target_path_index",
 			"breakpoints": true
+		},
+		{
+			"idx": 87,
+			"version": "6",
+			"when": 1794672215283,
+			"tag": "0087_backfill_unpublishable_narinfo",
+			"breakpoints": true
 		}
 	]
 }

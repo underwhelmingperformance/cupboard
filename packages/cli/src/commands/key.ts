@@ -1,11 +1,14 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import type {
-	BackfillStatus,
-	KeyAbortResponse,
-	KeyListResponse,
-	KeyRetireResponse,
-	KeyRotateResponse,
-	SigningKeyEntry
+import {
+	backfillEntryDefectRecord,
+	backfillEntryDefectText,
+	type BackfillStatus,
+	type KeyAbortResponse,
+	type KeyListResponse,
+	type KeyRetireResponse,
+	type KeyRotateResponse,
+	type SigningKeyEntry,
+	type UnpublishableStorePaths
 } from '@cupboard/protocol/keys';
 import {
 	type Reporter,
@@ -16,6 +19,7 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { cacheLabel } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { SigningKeyNotFoundError } from '../errors.ts';
@@ -201,6 +205,75 @@ export async function runKeyStatus(
 		rows: selected.flatMap((entry) => keyStatusRows(entry, reporter)),
 		empty: 'No signing keys.'
 	});
+
+	const notUpdated = selected.flatMap((entry) =>
+		entry.state === 'signing'
+			? (entry.backfill?.unpublishable?.storePaths ?? [])
+			: []
+	);
+
+	if (notUpdated.length === 0) {
+		return;
+	}
+
+	// The outgoing key can be retired only once the signature update has
+	// finished, and only while it still signs beside the incoming key.
+	const signingKeys = keys.filter((entry) => entry.state === 'signing');
+	const isUpdateRunning = selected.some(
+		(entry) =>
+			entry.state === 'signing' &&
+			entry.backfill !== undefined &&
+			entry.backfill.state !== 'complete'
+	);
+	reporter.info(
+		notUpdatedAdvice(notUpdated, signingKeys.length > 1 && !isUpdateRunning)
+	);
+}
+
+// What the operator can do about the listed store paths. `canRetire` is true
+// when the outgoing key can be retired now.
+function notUpdatedAdvice(
+	storePaths: readonly UnpublishableStorePaths['storePaths'][number][],
+	canRetire: boolean
+): string {
+	const records = new Set(
+		storePaths.map((path) => backfillEntryDefectRecord[path.defect])
+	);
+
+	return [
+		'The signature update skipped the store paths listed as not updated, because their stored metadata is invalid or incomplete.',
+		'They keep only the signatures that they had before the rotation, so Nix ignores them once a client stops trusting the keys that made those signatures.',
+		...(records.has('narinfo')
+			? [
+					'To fix a path whose narinfo record is invalid, delete it with `cupboard delete` and push it again. The new upload is signed by every signing key.'
+				]
+			: []),
+		...(records.has('either')
+			? [
+					'Deleting and pushing again also fixes a path with an unattributed defect, but only if the defect is in its narinfo record.'
+				]
+			: []),
+		...(records.has('blob')
+			? [
+					"An invalid URL, compression, file hash or file size is stored in the deployment's shared record of the NAR, which a new push reuses, so no cupboard command fixes it."
+				]
+			: []),
+		...(records.has('cache')
+			? [
+					'A path whose cache is missing from the cache registry cannot be deleted or pushed again, so no cupboard command fixes it.'
+				]
+			: []),
+		...(records.has('missingBlob')
+			? [
+					'A path whose NAR record is missing from the deployment cannot be substituted from the cache with any key.'
+				]
+			: []),
+		...(canRetire
+			? [
+					'You can retire the outgoing key without fixing them. `cupboard key retire` counts the paths that the key signed, because clients need a key that signed a path for as long as they should accept that path.'
+				]
+			: [])
+	].join(' ');
 }
 
 export async function runKeyRetire(
@@ -208,13 +281,28 @@ export async function runKeyRetire(
 	ui: CliUi,
 	client: KeyClient
 ): Promise<void> {
+	const reporter = ui.reporter();
+	const { keys } = await reporter.phase('Reading signing keys', () =>
+		client.list()
+	);
+	const notUpdated =
+		keys.find((entry) => entry.key.id === id)?.unpublishableSigned ?? 0;
+	const notUpdatedWarning =
+		notUpdated === 0
+			? ''
+			: ` A signature update skipped ${storePathCount(notUpdated)} that this key signed, ` +
+				`so ${notUpdated === 1 ? 'that path keeps' : 'those paths keep'} only the signatures from before that update. ` +
+				`Clients need this key, or another key that signed ${notUpdated === 1 ? 'it' : 'them'}, in \`trusted-public-keys\` for as long as they should accept ` +
+				`${notUpdated === 1 ? 'that path' : 'those paths'}, not only until their narinfo cache expires. ` +
+				'`cupboard key status` lists the skipped paths.';
 	const outcome = await ui.confirm({
 		message: `Retire signing key ${id}?`,
 		detail:
 			'The first retirement stops the key signing. A client that trusts only ' +
 			'this key will then reject newly published store paths. The second ' +
 			"retirement removes the key from /pubkey. Keep the key in each client's " +
-			'`trusted-public-keys` until its positive narinfo cache has expired.'
+			'`trusted-public-keys` until its positive narinfo cache has expired.' +
+			notUpdatedWarning
 	});
 
 	if (outcome !== 'yes') {
@@ -222,7 +310,6 @@ export async function runKeyRetire(
 		return;
 	}
 
-	const reporter = ui.reporter();
 	const result = await reporter.phase('Retiring signing key', () =>
 		client.retire({ id })
 	);
@@ -243,9 +330,14 @@ export async function runKeyRetire(
 				'their signatures for `narinfo-cache-positive-ttl`, which defaults to 30 ' +
 				"days. Keep this key in each client's `trusted-public-keys` until that " +
 				"client's cache window has elapsed, or clear its narinfo cache. Retiring " +
-				'the key again removes it from /pubkey but does not change client trust.'
+				'the key again removes it from /pubkey but does not change client trust.' +
+				notUpdatedWarning
 		);
 	}
+}
+
+function storePathCount(count: number): string {
+	return count === 1 ? '1 store path' : `${String(count)} store paths`;
 }
 
 export async function runKeyAbort(
@@ -320,10 +412,41 @@ function signatureUpdateRows(
 		...(status.state === 'complete'
 			? []
 			: [{ label: 'Remaining', value: String(status.remaining) }]),
+		...(status.unpublishable === undefined
+			? []
+			: notUpdatedRows(status.unpublishable)),
 		...(status.state === 'retrying' && shouldShowDebug(reporter)
 			? [
 					{ label: 'Failed operation', value: status.failure.operation },
 					{ label: 'Server error', value: status.failure.message }
+				]
+			: [])
+	];
+}
+
+function notUpdatedRows(unpublishable: UnpublishableStorePaths): ResultRow[] {
+	const unlisted = unpublishable.total - unpublishable.storePaths.length;
+
+	return [
+		{ label: 'Store paths not updated', value: String(unpublishable.total) },
+		...unpublishable.storePaths.map((path) => ({
+			label: 'Not updated',
+			raw: true,
+			value: `${path.storePath} in ${
+				path.cache === undefined
+					? 'a cache missing from the registry'
+					: cacheLabel(path.cache)
+			}: ${backfillEntryDefectText[path.defect]}`
+		})),
+		...(unlisted > 0
+			? [
+					{
+						label: 'Not updated',
+						value:
+							unlisted === 1
+								? '1 more store path, not listed'
+								: `${String(unlisted)} more store paths, not listed`
+					}
 				]
 			: [])
 	];

@@ -18,6 +18,7 @@ import {
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import type { BackfillEntryDefect } from '@cupboard/protocol/keys';
 import type {
 	OidcIssuer,
 	OidcSubject,
@@ -972,6 +973,33 @@ export const signingKeyBackfills = sqliteTable('signing_key_backfill', {
 	failedAt: text('failed_at').$type<IsoTimestamp>(),
 	failureMessage: text('failure_message')
 });
+
+// A narinfo that the backfill of `target_generation` set aside because it
+// cannot be published. The row applies only while the narinfo keeps
+// `narinfo_generation`, so a re-commit of the path makes it stale. The key
+// starts with the narinfo's own key, because the backfill looks a narinfo up
+// with a range on the target generation.
+export const backfillUnpublishableNarInfos = sqliteTable(
+	'backfill_unpublishable_narinfo',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		targetGeneration: integer('target_generation')
+			.$type<SigningKeyGeneration>()
+			.notNull(),
+		narInfoGeneration: integer('narinfo_generation')
+			.$type<NarInfoGeneration>()
+			.notNull(),
+		defect: text('defect').$type<BackfillEntryDefect>().notNull(),
+		failedAttempts: integer('failed_attempts').notNull(),
+		setAsideAt: text('set_aside_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.storePathHash, table.targetGeneration]
+		})
+	]
+);
 
 export const cachePurgeContinuations = sqliteTable(
 	'cache_purge_continuation',

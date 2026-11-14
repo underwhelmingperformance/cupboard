@@ -79,6 +79,15 @@ the outgoing key and the new one the incoming key.
    the outgoing key. Use `--debug` to include the failed operation and the
    server's error message.
 
+   If a store path's stored metadata is invalid or incomplete, the tenant can't
+   re-sign the path. The tenant tries three times and then skips the path, so
+   the update can complete without that path. The second try usually follows
+   within a minute, and the third about 5 minutes later. A path whose cache is
+   missing from the cache registry is skipped at once. `cupboard key status`
+   counts the skipped paths in `Store paths not updated` and lists up to 100 of
+   them under `Not updated`, each with its cache and the invalid field. See
+   [Store paths that were not updated](#store-paths-that-were-not-updated).
+
 4. Retire the outgoing key. Identify it by the ID that `cupboard key list`
    shows. The tenant's first key has the ID `active`. Later keys have UUIDs.
 
@@ -88,7 +97,9 @@ the outgoing key and the new one the incoming key.
 
    The tenant stops signing with the outgoing key. It still publishes the key at
    `/pubkey`, though, so clients that have cached narinfos signed only by that
-   key can still check them.
+   key can still check them. If a signature update skipped store paths that the
+   outgoing key signed, the command says how many, because those paths still
+   need that key.
 
 5. Remove the outgoing key from every client's `trusted-public-keys`.
 
@@ -107,6 +118,51 @@ Until then, a client may still have narinfos signed only by the outgoing key.
 
 So keep the outgoing key in clients' `trusted-public-keys` until that long after
 the re-signing finished. Alternatively, clear the clients' narinfo caches.
+
+### Store paths that were not updated
+
+A store path that the signature update skipped still has only the signatures
+from before the rotation. Nix accepts it while a client trusts the outgoing key.
+Once a client no longer trusts the outgoing key, Nix ignores the path's narinfo
+with the warning
+`ignoring substitute for '...' from '...', as it's not signed by any of the keys in 'trusted-public-keys'`,
+and then tries its other substituters or builds the path itself.
+
+You can retire the outgoing key without fixing these paths. Clients then need a
+key that signed a path in `trusted-public-keys` for as long as they should
+accept that path, not only until their narinfo cache expires.
+`cupboard key retire` says how many of these paths the key being retired signed.
+
+Whether you can fix a path depends on where its invalid field is stored:
+
+- The store path, NAR hash, NAR size, references, deriver, content address and
+  signatures are stored in the tenant's record of the path. To fix one of these,
+  delete the path from its cache and push it again:
+
+  ```sh
+  cupboard delete https://cupboard.example.workers.dev/t/acme /nix/store/...
+  cupboard push https://cupboard.example.workers.dev/t/acme /nix/store/...
+  ```
+
+  For a named cache, give the cache name before the store path, as with any
+  `cupboard delete` or `cupboard push`. The cache doesn't replace the record of
+  a path that it already has, so delete the path first. The new upload is signed
+  by every signing key, and `cupboard key status` no longer lists the path.
+
+- The URL, compression, file hash and file size are stored in the deployment's
+  shared record of the NAR. A new push of the same NAR reuses that record, so
+  deleting the path and pushing it again doesn't fix it, and no cupboard command
+  does.
+- A path whose cache is missing from the cache registry can't be deleted or
+  pushed again, and no cupboard command fixes it.
+- A path listed with `its NAR record is missing from the deployment` can't be
+  substituted from the cache with any key.
+- For a path listed with `a hash does not parse` or
+  `it does not render as a narinfo`, the invalid field isn't known. Deleting the
+  path and pushing it again fixes it only if the field is in the tenant's
+  record.
+
+The next rotation tries every skipped path again.
 
 ### Rules for retiring a key
 
