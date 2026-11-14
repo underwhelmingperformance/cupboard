@@ -394,15 +394,39 @@ writes files and counts. By default, the action also writes inline path lists to
 the step outputs.
 
 If the build fails in a way that another attempt could fix, the action tries
-again, up to five attempts in total, and waits longer after each failure. Nix
-treats a builder failure on the runner as permanent, unless the derivation is a
-fixed-output or impure derivation or the disk was full. The action follows Nix
-and fails without another attempt when every failed builder is permanent. A
-failure on a remote builder is retried, because Nix cannot tell a failed builder
-from a lost connection. A successful rebuild that reports no build activity
-fails immediately, because another attempt cannot recover the missing
-observation. If the last attempt fails, the step fails. Set `allow-failure` to
-let the job continue anyway.
+again, up to five attempts in total, and waits longer after each failure. The
+action reads the reason that Nix gives for each failure. It fails without
+another attempt when every failure has one of these reasons:
+
+- A builder on the runner failed. Nix treats this as permanent, unless the
+  derivation is a fixed-output or impure derivation, which can fail because of
+  the network, or the disk was full.
+- A rebuild (`build: rebuild`) produced outputs that differ from the first
+  build. Another attempt can pass and hide the difference that the rebuild
+  exists to find, so the action never tries again, even when another failure in
+  the same attempt could be repeated.
+- The build used more log output than Nix allows, or Nix rejected an output, for
+  example because of a hash mismatch, a missing output or a reference that the
+  output may not have.
+- No machine can build the derivation, because the runner and the remote
+  builders lack the system or the system features that it requires.
+- The build timed out. Another attempt costs another full timeout, so the action
+  tries again only when a stalled download could be the cause, because a
+  download can succeed the second time. Nix does not report which derivation
+  timed out on the runner, so the action tries again when any derivation that it
+  built on the runner is a fixed-output or impure derivation. For a timeout on a
+  remote builder, Nix reports the derivation, and the action tries again when
+  that derivation is a fixed-output or impure derivation.
+
+A builder failure on a remote builder is retried, because Nix cannot tell a
+failed builder from a lost connection. The same applies to a derivation that no
+machine can build when Nix could not connect to a remote builder, because the
+builder can be reachable on the next attempt. A failed dependency adds no reason
+of its own: the failure of the dependency decides.
+
+A successful rebuild that reports no build activity fails immediately, because
+another attempt cannot recover the missing observation. If the last attempt
+fails, the step fails. Set `allow-failure` to let the job continue anyway.
 
 The default `publish: built` includes selected requested outputs and successful
 intermediates reported by the post-build hook. Derivation-backed builds also
