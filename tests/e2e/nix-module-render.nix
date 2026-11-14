@@ -10,7 +10,6 @@ let
   flake = (import (root + "/flake.nix")).outputs {
     self = { };
     nixpkgs = { inherit lib; };
-    nixpkgs-x86_64-darwin = { };
   };
   isNixos = input.module == "nixos";
 

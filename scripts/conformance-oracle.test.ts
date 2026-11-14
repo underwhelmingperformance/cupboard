@@ -50,7 +50,6 @@ const movedVersion = 'nix (Nix) 2.35.0';
 const pinnedVersions: Readonly<Record<OracleSystem, string>> = {
 	'x86_64-linux': pinnedVersion,
 	'aarch64-linux': pinnedVersion,
-	'x86_64-darwin': pinnedVersion,
 	'aarch64-darwin': pinnedVersion
 };
 
@@ -71,7 +70,6 @@ function generatedSettings(
 	return {
 		'x86_64-linux': { generatedFromNix: versions['x86_64-linux'] },
 		'aarch64-linux': { generatedFromNix: versions['aarch64-linux'] },
-		'x86_64-darwin': { generatedFromNix: versions['x86_64-darwin'] },
 		'aarch64-darwin': { generatedFromNix: versions['aarch64-darwin'] }
 	};
 }
@@ -182,13 +180,13 @@ describe('parseOracleRecord', () => {
 		},
 		{
 			name: 'a version outside the format printed by nix --version',
-			text: `{ "versions": { "x86_64-linux": "2.34.7", "aarch64-linux": "${pinnedVersion}", "x86_64-darwin": "${pinnedVersion}", "aarch64-darwin": "${pinnedVersion}" } }`,
+			text: `{ "versions": { "x86_64-linux": "2.34.7", "aarch64-linux": "${pinnedVersion}", "aarch64-darwin": "${pinnedVersion}" } }`,
 			issues: [{ code: 'invalid_format', path: ['versions', 'x86_64-linux'] }]
 		},
 		{
 			name: 'a missing system',
-			text: `{ "versions": { "x86_64-linux": "${pinnedVersion}", "aarch64-linux": "${pinnedVersion}", "x86_64-darwin": "${pinnedVersion}" } }`,
-			issues: [{ code: 'custom', path: ['versions', 'aarch64-darwin'] }]
+			text: `{ "versions": { "x86_64-linux": "${pinnedVersion}", "aarch64-linux": "${pinnedVersion}" } }`,
+			issues: [{ code: 'invalid_type', path: ['versions', 'aarch64-darwin'] }]
 		},
 		{
 			name: 'an obsolete nixpkgs revision',
@@ -555,7 +553,6 @@ describe('updateConformanceOracle', () => {
 
 		expect(error.missingSystems).toStrictEqual([
 			'aarch64-linux',
-			'x86_64-darwin',
 			'aarch64-darwin'
 		]);
 		expect(workspace.tables).toStrictEqual([]);
@@ -788,7 +785,7 @@ describe('oracle builds', () => {
 describe('prefixLines', () => {
 	it('writes each complete line with the prefix and keeps the unfinished line', () => {
 		const lines: string[] = [];
-		const output = prefixLines('[x86_64-darwin] ', (line) => {
+		const output = prefixLines('[aarch64-darwin] ', (line) => {
 			lines.push(line);
 		});
 
@@ -796,14 +793,14 @@ describe('prefixLines', () => {
 		output.push(Buffer.from('ing\nunfinished'));
 
 		expect(lines).toStrictEqual([
-			'[x86_64-darwin] copying\n',
-			'[x86_64-darwin] building\n'
+			'[aarch64-darwin] copying\n',
+			'[aarch64-darwin] building\n'
 		]);
 	});
 
 	it('writes the unfinished line once when flushed', () => {
 		const lines: string[] = [];
-		const output = prefixLines('[x86_64-darwin] ', (line) => {
+		const output = prefixLines('[aarch64-darwin] ', (line) => {
 			lines.push(line);
 		});
 
@@ -812,8 +809,8 @@ describe('prefixLines', () => {
 		output.flush();
 
 		expect(lines).toStrictEqual([
-			'[x86_64-darwin] copying\n',
-			'[x86_64-darwin] unfinished\n'
+			'[aarch64-darwin] copying\n',
+			'[aarch64-darwin] unfinished\n'
 		]);
 	});
 });

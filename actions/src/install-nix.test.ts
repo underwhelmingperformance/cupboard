@@ -195,7 +195,6 @@ enable_kvm "$SYSTEM"
 	it.each([
 		{ architecture: 'x86_64', kernel: 'Linux', system: 'x86_64-linux' },
 		{ architecture: 'aarch64', kernel: 'Linux', system: 'aarch64-linux' },
-		{ architecture: 'x86_64', kernel: 'Darwin', system: 'x86_64-darwin' },
 		{ architecture: 'arm64', kernel: 'Darwin', system: 'aarch64-darwin' }
 	])('selects the archive for $system', ({ architecture, kernel, system }) => {
 		expect(
@@ -204,6 +203,15 @@ enable_kvm "$SYSTEM"
 				KERNEL: kernel
 			})
 		).toStrictEqual({ status: 0, stdout: `${system}\n`, stderr: '' });
+	});
+
+	it('rejects x86_64 macOS before installing', () => {
+		expect(run('nix_system x86_64 Darwin')).toStrictEqual({
+			status: 1,
+			stdout: '',
+			stderr:
+				'::error::x86_64 macOS is not supported. Use an arm64 macOS runner or a Linux runner, or pin an older ref of the cupboard action or workflow.\n'
+		});
 	});
 
 	it('rejects unsupported systems before installing', () => {

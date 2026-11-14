@@ -32,7 +32,7 @@ Local changes:
   keeps the other entries, and writes the file with mode `0600` through a
   temporary file and a rename. It treats each line whose first word is `machine`
   or `default` as the start of an entry.
-- Only the four runner systems in `packages/nix/src/nix-systems.json` are
+- Only the three runner systems in `packages/nix/src/nix-systems.json` are
   supported. The pinned Nix version enables flakes without a version check.
 - Database registration makes at most three attempts and reports exhaustion
   explicitly. HTTP download failures are fatal.
@@ -57,7 +57,7 @@ release asset:
 ```
 
 Check those values against your own download of each archive. Review upstream
-installer changes and run the action tests and CI on all four systems. Keep the
+installer changes and run the action tests and CI on all three systems. Keep the
 remote-store fixture's Nix version in the same release series.
 
 Record the digests only when the version pins change. The archive for an
