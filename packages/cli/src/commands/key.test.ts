@@ -56,6 +56,25 @@ function entry(
 	return parsed;
 }
 
+// The sentences of the advice that `cupboard key status` prints for store
+// paths that the signature update skipped.
+const advice = {
+	skipped:
+		'The signature update skipped the store paths listed as not updated, because their stored metadata is invalid or incomplete. ' +
+		'They keep only the signatures that they had before the rotation, so Nix ignores them once a client stops trusting the keys that made those signatures.',
+	narinfo:
+		'To fix a path whose narinfo record is invalid, delete it with `cupboard delete` and push it again. The new upload is signed by every signing key.',
+	either:
+		'Deleting and pushing again also fixes a path with an unattributed defect, but only if the defect is in its narinfo record.',
+	blob: "An invalid URL, compression, file hash or file size is stored in the deployment's shared record of the NAR, which a new push reuses, so no cupboard command fixes it.",
+	cache:
+		'A path whose cache is missing from the cache registry cannot be deleted or pushed again, so no cupboard command fixes it.',
+	missingBlob:
+		'A path whose NAR record is missing from the deployment cannot be substituted from the cache with any key.',
+	retire:
+		'You can retire the outgoing key without fixing them. `cupboard key retire` counts the paths that the key signed, because clients need a key that signed a path for as long as they should accept that path.'
+};
+
 function keyClient(overrides: Partial<KeyClient>): KeyClient {
 	return {
 		list: () => Promise.resolve({ keys: [] }),
@@ -261,6 +280,277 @@ describe('runKeyStatus', () => {
 			]);
 		}
 	);
+	it('lists the store paths that a completed signature update set aside', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+		const response = keyListResponseSchema.parse({
+			keys: [
+				{
+					...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+					backfill: {
+						state: 'complete',
+						startedAt: '2026-01-01T00:00:00.000Z',
+						completedAt: '2026-01-01T00:20:00.000Z',
+						resigned: 12,
+						unpublishable: {
+							total: 6,
+							storePaths: [
+								{
+									storePath: `/nix/store/${'a'.repeat(32)}-app`,
+									cache: { kind: 'default' },
+									defect: 'ca',
+									setAsideAt: '2026-01-01T00:10:00.000Z'
+								},
+								{
+									storePath: `/nix/store/${'b'.repeat(32)}-lib`,
+									cache: { kind: 'named', name: 'ci' },
+									defect: 'references',
+									setAsideAt: '2026-01-01T00:15:00.000Z'
+								},
+								{
+									storePath: `/nix/store/${'c'.repeat(32)}-tool`,
+									defect: 'cacheIdentity',
+									setAsideAt: '2026-01-01T00:15:00.000Z'
+								},
+								{
+									storePath: `/nix/store/${'d'.repeat(32)}-data`,
+									cache: { kind: 'default' },
+									defect: 'fileHash',
+									setAsideAt: '2026-01-01T00:15:00.000Z'
+								},
+								{
+									storePath: `/nix/store/${'f'.repeat(32)}-misc`,
+									cache: { kind: 'default' },
+									defect: 'unknown',
+									setAsideAt: '2026-01-01T00:15:00.000Z'
+								},
+								{
+									storePath: `/nix/store/${'g'.repeat(32)}-lost`,
+									cache: { kind: 'default' },
+									defect: 'blobState',
+									setAsideAt: '2026-01-01T00:15:00.000Z'
+								}
+							]
+						}
+					}
+				}
+			]
+		});
+
+		await runKeyStatus(
+			reporter(results, infos),
+			{ list: () => Promise.resolve(response) },
+			uuid
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [
+				[
+					{ label: 'Key', value: uuid },
+					{ label: 'State', value: 'signing and published' },
+					{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+					{ label: 'Signature update', value: 'Signature update complete' },
+					{ label: 'Store paths updated', value: '12' },
+					{ label: 'Store paths not updated', value: '6' },
+					{
+						label: 'Not updated',
+						raw: true,
+						value: `/nix/store/${'a'.repeat(32)}-app in (default): its content address is invalid`
+					},
+					{
+						label: 'Not updated',
+						raw: true,
+						value: `/nix/store/${'b'.repeat(32)}-lib in ci: its references are invalid`
+					},
+					{
+						label: 'Not updated',
+						raw: true,
+						value: `/nix/store/${'c'.repeat(32)}-tool in a cache missing from the registry: its cache is missing from the cache registry`
+					},
+					{
+						label: 'Not updated',
+						raw: true,
+						value: `/nix/store/${'d'.repeat(32)}-data in (default): its file hash is invalid`
+					},
+					{
+						label: 'Not updated',
+						raw: true,
+						value: `/nix/store/${'f'.repeat(32)}-misc in (default): it does not render as a narinfo`
+					},
+					{
+						label: 'Not updated',
+						raw: true,
+						value: `/nix/store/${'g'.repeat(32)}-lost in (default): its NAR record is missing from the deployment`
+					}
+				]
+			],
+			infos: [
+				[
+					advice.skipped,
+					advice.narinfo,
+					advice.either,
+					advice.blob,
+					advice.cache,
+					advice.missingBlob
+				].join(' ')
+			]
+		});
+	});
+	// The outgoing key still signs, but retirement is refused until the
+	// signature update has finished, so the advice does not offer it.
+	it.each([
+		{ total: 2, unlisted: '1 more store path, not listed' },
+		{ total: 101, unlisted: '100 more store paths, not listed' }
+	])(
+		'counts the set-aside store paths that the server does not list ($total)',
+		async ({ total, unlisted }) => {
+			const results: ResultRow[][] = [];
+			const infos: string[] = [];
+			const response = keyListResponseSchema.parse({
+				keys: [
+					entry(),
+					{
+						...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+						backfill: {
+							...runningBackfill,
+							resigned: 12,
+							remaining: 3,
+							unpublishable: {
+								total,
+								storePaths: [
+									{
+										storePath: `/nix/store/${'a'.repeat(32)}-app`,
+										cache: { kind: 'default' },
+										defect: 'deriver',
+										setAsideAt: '2026-01-01T00:10:00.000Z'
+									}
+								]
+							}
+						}
+					}
+				]
+			});
+
+			await runKeyStatus(
+				reporter(results, infos),
+				{ list: () => Promise.resolve(response) },
+				uuid
+			);
+
+			expect({ results, infos }).toStrictEqual({
+				results: [
+					[
+						{ label: 'Key', value: uuid },
+						{ label: 'State', value: 'signing and published' },
+						{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+						{ label: 'Signature update', value: 'Updating signatures' },
+						{ label: 'Store paths updated', value: '12' },
+						{ label: 'Remaining', value: '3' },
+						{ label: 'Store paths not updated', value: String(total) },
+						{
+							label: 'Not updated',
+							raw: true,
+							value: `/nix/store/${'a'.repeat(32)}-app in (default): its deriver is invalid`
+						},
+						{ label: 'Not updated', value: unlisted }
+					]
+				],
+				infos: [[advice.skipped, advice.narinfo].join(' ')]
+			});
+		}
+	);
+	// The signature update has finished and the outgoing key still signs, so
+	// the advice offers retirement.
+	it('offers retirement once the signature update has finished', async () => {
+		const infos: string[] = [];
+		const response = keyListResponseSchema.parse({
+			keys: [
+				entry(),
+				{
+					...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+					backfill: {
+						state: 'complete',
+						startedAt: '2026-01-01T00:00:00.000Z',
+						completedAt: '2026-01-01T00:20:00.000Z',
+						resigned: 12,
+						unpublishable: {
+							total: 1,
+							storePaths: [
+								{
+									storePath: `/nix/store/${'a'.repeat(32)}-app`,
+									cache: { kind: 'default' },
+									defect: 'deriver',
+									setAsideAt: '2026-01-01T00:10:00.000Z'
+								}
+							]
+						}
+					}
+				}
+			]
+		});
+
+		await runKeyStatus(
+			reporter([], infos),
+			{ list: () => Promise.resolve(response) },
+			uuid
+		);
+
+		expect(infos).toStrictEqual([
+			[advice.skipped, advice.narinfo, advice.retire].join(' ')
+		]);
+	});
+	// The stored store path of a set-aside narinfo need not parse as a store
+	// path. It is reported as it is stored, so one such narinfo does not make
+	// the whole response invalid.
+	it('lists a set-aside narinfo whose stored store path is invalid', async () => {
+		const results: ResultRow[][] = [];
+		const response = keyListResponseSchema.parse({
+			keys: [
+				{
+					...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+					backfill: {
+						state: 'complete',
+						startedAt: '2026-01-01T00:00:00.000Z',
+						completedAt: '2026-01-01T00:20:00.000Z',
+						resigned: 12,
+						unpublishable: {
+							total: 1,
+							storePaths: [
+								{
+									storePath: 'not a store path',
+									cache: { kind: 'default' },
+									defect: 'storePath',
+									setAsideAt: '2026-01-01T00:10:00.000Z'
+								}
+							]
+						}
+					}
+				}
+			]
+		});
+
+		await runKeyStatus(
+			reporter(results),
+			{ list: () => Promise.resolve(response) },
+			uuid
+		);
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Key', value: uuid },
+				{ label: 'State', value: 'signing and published' },
+				{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+				{ label: 'Signature update', value: 'Signature update complete' },
+				{ label: 'Store paths updated', value: '12' },
+				{ label: 'Store paths not updated', value: '1' },
+				{
+					label: 'Not updated',
+					raw: true,
+					value: 'not a store path in (default): its store path is invalid'
+				}
+			]
+		]);
+	});
 	it('reports backfill progress for one selected key', async () => {
 		const results: ResultRow[][] = [];
 		const response = keyListResponseSchema.parse({
@@ -348,6 +638,102 @@ describe('runKeyRetire', () => {
 					}
 				],
 				infos
+			});
+		}
+	);
+
+	// The warning counts only the skipped paths that the key being retired
+	// signed. Another key's count, and the skipped paths of the incoming key's
+	// backfill, do not add to it.
+	it.each([
+		{
+			case: 'one path that it signed',
+			retiringSigned: 1,
+			warning:
+				' A signature update skipped 1 store path that this key signed, ' +
+				'so that path keeps only the signatures from before that update. ' +
+				'Clients need this key, or another key that signed it, in `trusted-public-keys` for as long as they should accept ' +
+				'that path, not only until their narinfo cache expires. ' +
+				'`cupboard key status` lists the skipped paths.'
+		},
+		{
+			case: 'three paths that it signed',
+			retiringSigned: 3,
+			warning:
+				' A signature update skipped 3 store paths that this key signed, ' +
+				'so those paths keep only the signatures from before that update. ' +
+				'Clients need this key, or another key that signed them, in `trusted-public-keys` for as long as they should accept ' +
+				'those paths, not only until their narinfo cache expires. ' +
+				'`cupboard key status` lists the skipped paths.'
+		},
+		{
+			case: 'paths that only another key signed',
+			retiringSigned: undefined,
+			warning: ''
+		}
+	])(
+		'warns about the skipped store paths of $case',
+		async ({ retiringSigned, warning }) => {
+			const response = keyRetireResponseSchema.parse({
+				id: 'active',
+				state: 'published-only'
+			});
+			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+			const keys = keyListResponseSchema.parse({
+				keys: [
+					{ ...entry(), unpublishableSigned: retiringSigned },
+					{
+						...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+						backfill: {
+							state: 'complete',
+							startedAt: '2026-01-01T00:00:00.000Z',
+							completedAt: '2026-01-01T00:20:00.000Z',
+							resigned: 12,
+							unpublishable: {
+								total: 3,
+								storePaths: [
+									{
+										storePath: `/nix/store/${'a'.repeat(32)}-app`,
+										cache: { kind: 'default' },
+										defect: 'ca',
+										setAsideAt: '2026-01-01T00:10:00.000Z'
+									}
+								]
+							}
+						},
+						unpublishableSigned: 2
+					}
+				]
+			});
+
+			await runKeyRetire(
+				'active',
+				ui,
+				keyClient({
+					list: () => Promise.resolve(keys),
+					retire: () => Promise.resolve(response)
+				})
+			);
+
+			expect({
+				details: captured.confirms.map((confirm) => confirm.detail),
+				infos: captured.infos
+			}).toStrictEqual({
+				details: [
+					'The first retirement stops the key signing. A client that trusts only ' +
+						'this key will then reject newly published store paths. The second ' +
+						"retirement removes the key from /pubkey. Keep the key in each client's " +
+						'`trusted-public-keys` until its positive narinfo cache has expired.' +
+						warning
+				],
+				infos: [
+					'The key no longer signs but stays published. Nix caches narinfos and ' +
+						'their signatures for `narinfo-cache-positive-ttl`, which defaults to 30 ' +
+						"days. Keep this key in each client's `trusted-public-keys` until that " +
+						"client's cache window has elapsed, or clear its narinfo cache. Retiring " +
+						'the key again removes it from /pubkey but does not change client trust.' +
+						warning
+				]
 			});
 		}
 	);

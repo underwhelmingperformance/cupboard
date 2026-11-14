@@ -22,6 +22,22 @@ describe('signing key schemas', () => {
 		resigned: 12,
 		remaining: 4
 	};
+	const unpublishable = {
+		total: 2,
+		storePaths: [
+			{
+				storePath: `/nix/store/${'a'.repeat(32)}-app`,
+				cache: { kind: 'named', name: 'ci' },
+				defect: 'ca',
+				setAsideAt: '2026-02-01T00:10:00.000Z'
+			},
+			{
+				storePath: `/nix/store/${'b'.repeat(32)}-lib`,
+				defect: 'cacheIdentity',
+				setAsideAt: '2026-02-01T00:10:00.000Z'
+			}
+		]
+	};
 
 	it.each([
 		{
@@ -35,9 +51,23 @@ describe('signing key schemas', () => {
 			expected: { state: 'signing', key, backfill: running }
 		},
 		{
+			name: 'a signing key whose backfill set store paths aside',
+			value: { state: 'signing', key, backfill: { ...running, unpublishable } },
+			expected: {
+				state: 'signing',
+				key,
+				backfill: { ...running, unpublishable }
+			}
+		},
+		{
 			name: 'a published-only key',
 			value: { state: 'published-only', key },
 			expected: { state: 'published-only', key }
+		},
+		{
+			name: 'a published-only key that signed set-aside store paths',
+			value: { state: 'published-only', key, unpublishableSigned: 2 },
+			expected: { state: 'published-only', key, unpublishableSigned: 2 }
 		}
 	])('accepts $name', ({ value, expected }) => {
 		expect(signingKeyEntrySchema.parse(value)).toStrictEqual(expected);

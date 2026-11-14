@@ -876,18 +876,75 @@ therefore take their turns least recently failed first, a row that always fails
 goes to the back after each attempt, and one tenant's rows with failures use at
 most one slot of the deployment's pace every 5 minutes, however many of them
 there are. At the default interval of 24 seconds, that is one slot in 12.5.
-Backfill rows never expire, so an entry that always fails keeps its row and its
-turns, and the backfill cannot complete until it is published.
 
-Staging counts only the rows without a failure when it decides how many rows to
-queue, so the rows with failures do not reduce the size of the requests. Staging
-runs after every pass except one that waits for the pace or for a wait after a
-failure, or that ends with a failure of the whole attempt or of the claim. A
-failure that refuses every request therefore stages nothing more, and staging
-continues while only entries fail. While a row has a failure, the key's backfill
-reports `retrying` with the failure that the backfill recorded most recently.
-That failure can belong to a row that has since succeeded, while another row's
-failure keeps the state at `retrying`.
+Backfill rows never expire, so the pass bounds the failures of an entry instead.
+Its third failure sets it aside: the pass clears the narinfo's
+`pending_signature_generation` and writes a row to
+`backfill_unpublishable_narinfo` with the target generation, the narinfo's
+generation and the defect. The second attempt comes at the tenant's next turn,
+which is usually the next pass, and the third comes a turn later, so an entry is
+set aside about 5 minutes after its first failure. An entry failure repeats
+until the stored rows change. The bound ends the retries, and the next rotation
+tries the narinfo again.
+
+Before it publishes an entry from a row with failures, the pass signs the
+narinfo row with every signing key over the row's current fingerprint, and
+writes the signatures if they changed. A narinfo that failed to stage still has
+its old signatures, and a repair of a row between attempts changes its
+fingerprint. Staging signed the entries of the other rows over the fingerprint
+that it read, so the pass publishes them without signing them again. An entry is
+recorded as signed only after its narinfo object has been written with the
+signatures of the row. When the blob row of an entry is missing, the pass cannot
+write the object, so the entry fails with the defect `blobState` and is set
+aside at its third failure.
+
+Staging, the remaining count and the coverage check of retirement leave out a
+narinfo that has a set-aside row for the target generation or a later one, and
+for the narinfo's current generation. The backfill therefore completes without
+it, and the outgoing key can be retired. A re-commit of the path writes a new
+generation that every signing key signs, so the set-aside row no longer matches.
+The next rotation has a new target generation, so its backfill tries the narinfo
+again. When that backfill completes, it has signed each narinfo that an earlier
+backfill set aside or set it aside again, so it deletes the set-aside rows of
+earlier generations. An abort deletes the set-aside rows of its generation, and
+so does the deletion of the key of that generation.
+
+The key list reports the set-aside narinfos that still lack the signature in
+`unpublishable`: their number, and the first 100 by store path with the cache
+and the defect. The field is present only when there is at least one.
+`cupboard key status` lists them and says which defects a new push of the path
+can fix: those in the tenant's narinfo row, but not those in the shared blob row
+or a missing cache identity. Each key's entry gives, in `unpublishableSigned`,
+the number of set-aside narinfos whose published narinfo has that key's
+signature, counting each narinfo once. A narinfo was last published at its
+signature generation, so only keys of that generation or earlier count. Staging
+writes the incoming key's signature into the row before publication, so the
+stored signatures alone would also credit that key. `cupboard key retire` gives
+the retiring key's number. Reads serve the R2 object whose commit metadata
+matches the D1 edge, and they do not compare its signature generation, so a
+set-aside narinfo is still served with the signatures that the object had before
+the rotation. Once a client no longer trusts the outgoing key, Nix ignores that
+narinfo.
+
+Staging parses each narinfo's references and signatures to re-sign it. A narinfo
+whose stored references or signatures do not parse, or whose store path or
+fingerprint is invalid, is an entry failure: staging marks it as pending, keeps
+its signatures, and writes its entry to a row with failures, so the other
+narinfos of the batch are staged. Its first failure counts towards the bound
+above. An entry's purge tag contains its cache's scope, so staging sets a
+narinfo whose cache is missing from the cache registry aside at once, without
+queueing an entry. Staging counts only the rows without a failure when it
+decides how many rows to queue, so the rows with failures do not reduce the size
+of the requests. A pass stages at most four batches, so a run of narinfos that
+all fail is staged over several passes. While narinfos remain to be staged and
+fewer than four rows without a failure are queued, the next pass is due at once.
+Staging runs after every pass except one that waits after a failure, or that
+ends with a failure of the whole attempt or of the claim. A failure that refuses
+every request therefore stages nothing more, and staging continues while only
+entries fail. While a row has a failure, the key's backfill reports `retrying`
+with the failure that the backfill recorded most recently. That failure can
+belong to a row that has since succeeded, while another row's failure keeps the
+state at `retrying`.
 
 The interval is twice the 12 seconds that the account's bucket needs to refill
 one token, so the backfills of one deployment use at most half of the refill,

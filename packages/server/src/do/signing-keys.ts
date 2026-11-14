@@ -70,19 +70,22 @@ export function publicSigningKey(key: SigningKey): PublicSigningKey {
 
 export function keyEntry(
 	key: SigningKey,
-	backfill?: BackfillStatusInput
+	backfill: BackfillStatusInput | undefined,
+	unpublishableSigned: number
 ): SigningKeyEntryInput {
 	const publicKey = publicSigningKey(key);
+	const signedField = unpublishableSigned > 0 ? { unpublishableSigned } : {};
 
 	if (key.signing) {
 		return {
 			state: 'signing',
 			key: publicKey,
-			...(backfill !== undefined && { backfill })
+			...(backfill !== undefined && { backfill }),
+			...signedField
 		};
 	}
 
-	return { state: 'published-only', key: publicKey };
+	return { state: 'published-only', key: publicKey, ...signedField };
 }
 
 export function signingKeyName(

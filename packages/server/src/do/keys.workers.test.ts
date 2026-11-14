@@ -1,3 +1,4 @@
+import type { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	signingKeyGenerationSchema,
 	signingKeyIdSchema,
@@ -20,7 +21,7 @@ import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq, ne, sql } from 'drizzle-orm';
+import { eq, isNotNull, ne, sql } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import {
 	beforeEach,
@@ -47,6 +48,7 @@ import {
 	bootstrap,
 	cacheWriteGrants,
 	currentServer,
+	deletePath,
 	deployedSubrequestAllowance,
 	type FakeAlarm,
 	fakeAlarm,
@@ -500,7 +502,8 @@ class ScheduledPassRepeatsError extends Error {
 	}
 }
 
-// The backfill's rows and its state, to compare before and after a run.
+// The backfill's rows, its set-aside narinfos and its state, to compare before
+// and after a run.
 function backfillSnapshot(context: ServerContext): string {
 	return JSON.stringify({
 		rows: context.db
@@ -508,6 +511,7 @@ function backfillSnapshot(context: ServerContext): string {
 			.from(schema.cachePurgeContinuations)
 			.orderBy(schema.cachePurgeContinuations.id)
 			.all(),
+		setAside: setAsideRows(context),
 		backfills: context.db.select().from(schema.signingKeyBackfills).all()
 	});
 }
@@ -636,6 +640,28 @@ function queryPlanSummary(
 		usesIndex: rows.some((row) => row.detail.includes(index)),
 		sorts: rows.some((row) => row.detail.includes('USE TEMP B-TREE'))
 	};
+}
+
+// The narinfos that the backfill set aside, in store-path-hash order.
+function setAsideRows(context: ServerContext) {
+	return context.db
+		.select()
+		.from(schema.backfillUnpublishableNarInfos)
+		.all()
+		.toSorted((left, right) =>
+			byCodeUnit(left.storePathHash, right.storePathHash)
+		);
+}
+
+// The hashes of the narinfos that wait for a backfill to publish them.
+function pendingHashes(context: ServerContext): string[] {
+	return context.db
+		.select({ hash: schema.narInfos.storePathHash })
+		.from(schema.narInfos)
+		.where(isNotNull(schema.narInfos.pendingSignatureGeneration))
+		.all()
+		.map((row) => row.hash)
+		.toSorted(byCodeUnit);
 }
 
 // The hashes of the narinfos that do not have the rotated key's signature.
@@ -892,8 +918,8 @@ describe('signing key rotation', () => {
 		const aborted = await abort(init.token, rotation.body.rotated.key.id);
 		const listedResponse = await authorisedFetch('/keys', init.token);
 		const listed = keyListResponseSchema.parse(await listedResponse.json());
-		// The abort removed the backfill, so the alarm after the stalled pass's
-		// retry deadline finds no backfill to run.
+		// The abort removed the backfill, so a later alarm finds no backfill to
+		// run.
 		await alarmAfterBackfillRetry();
 
 		expect({
@@ -907,48 +933,472 @@ describe('signing key rotation', () => {
 		});
 	});
 
-	it('reports a stall when the backfill cannot be staged', async () => {
-		const init = await bootstrap();
-		const before = uploadMetadata({
-			fileSize: narBytes.byteLength,
-			storePathHash: 'h'.repeat(32),
-			name: 'stage-failure'
-		});
-		await withoutAlarmArming(() => pushPath(init.token, before));
-		const failedAt = Date.now();
-
-		const result = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				instance.context.db
-					.update(schema.narInfos)
-					.set({ referencesJson: '{' })
-					.where(eq(schema.narInfos.storePathHash, before.storePathHash))
+	// Staging needs the cache's scope for an entry's purge tag, so it sets a
+	// narinfo whose cache is missing from the cache registry aside at once,
+	// without queueing an entry. The backfill completes, and the key's status
+	// lists the path without a cache.
+	it('sets aside a narinfo whose cache is missing when it stages it', async () => {
+		const result = await withNarInfoBackfill(
+			1,
+			new Set(),
+			async ({ context, service, clock }) => {
+				const cacheId = resolvedCache(context).id;
+				context.db
+					.delete(schema.cacheIdentities)
+					.where(eq(schema.cacheIdentities.id, cacheId))
 					.run();
-				const signingKeys = new SigningKeysService(
-					instance.context,
-					new NarInfoObjectsService(instance.context),
-					retryPolicy
-				);
-				const alarm = fakeAlarm(state.storage);
+				const origin = clock.now();
+				const runs = await runAsScheduled(context, service, clock, 1_000_000);
+				const listed = keyListResponseSchema.parse(await service.keyList());
+				const rotated = listed.keys.find((entry) => entry.key.id !== 'active');
 
-				try {
-					await signingKeys.rotateKey();
-					alarm.clear();
-					const outcome = await asOneInvocation(() =>
-						signingKeys.runBackfillOnce()
+				return {
+					runs,
+					rows: backfillRows(context),
+					pending: pendingHashes(context),
+					setAside: setAsideRows(context),
+					backfill: backfillState(context),
+					unpublishable:
+						rotated?.state === 'signing' &&
+						rotated.backfill?.state === 'complete'
+							? rotated.backfill.unpublishable
+							: undefined,
+					cacheId,
+					origin,
+					narInfoGeneration: context.db
+						.select({ generation: schema.narInfos.generation })
+						.from(schema.narInfos)
+						.get()?.generation
+				};
+			}
+		);
+
+		const unpublishableSince = isoTimestamp(new Date(result.origin));
+
+		expect(result).toStrictEqual({
+			runs: [scheduledRun(0, 'progressed'), scheduledRun(0, 'progressed')],
+			rows: [],
+			pending: [],
+			setAside: [
+				{
+					cacheId: result.cacheId,
+					storePathHash: 'a'.repeat(32),
+					targetGeneration: 2,
+					narInfoGeneration: result.narInfoGeneration,
+					defect: 'cacheIdentity',
+					failedAttempts: 1,
+					setAsideAt: unpublishableSince
+				}
+			],
+			backfill: {
+				state: 'complete',
+				resigned: 0,
+				failureOperation: undefined,
+				failureRecorded: false
+			},
+			unpublishable: {
+				total: 1,
+				storePaths: [
+					{
+						storePath: `/nix/store/${'a'.repeat(32)}-many-narinfos`,
+						defect: 'cacheIdentity',
+						setAsideAt: unpublishableSince
+					}
+				]
+			},
+			cacheId: result.cacheId,
+			origin: result.origin,
+			narInfoGeneration: result.narInfoGeneration
+		});
+	});
+
+	// The narinfo at index 5 has stored references or signatures that do not
+	// parse. Staging moves its entry to a row with failures and stages the
+	// other narinfos. The tenant's first turn comes at once, so the next pass
+	// sends the row with failures before the other rows. Publication fails on
+	// the same field then and at the next turn, 300 seconds later. The third
+	// failure sets the narinfo aside, and the backfill completes.
+	it.each([
+		{ field: 'referencesJson' as const, defect: 'references' as const },
+		{ field: 'sigsJson' as const, defect: 'sigs' as const }
+	])(
+		'stages the other narinfos when the stored $defect of one do not parse',
+		async ({ field, defect }) => {
+			const bad = nixBase32Hash(5);
+
+			const result = await withNarInfoBackfill(
+				100,
+				new Set(),
+				async ({ context, service, clock }) => {
+					context.db
+						.update(schema.narInfos)
+						.set({ [field]: '{' })
+						.where(
+							eq(schema.narInfos.storePathHash, storePathHashSchema.parse(bad))
+						)
+						.run();
+					let afterStaging: unknown;
+					const runs = await runAsScheduled(
+						context,
+						service,
+						clock,
+						1_000_000,
+						(count) => {
+							if (count === 1) {
+								afterStaging = {
+									rows: backfillRows(context),
+									backfill: backfillState(context)
+								};
+							}
+						}
 					);
 
-					return { outcome, alarm: alarm.scheduled() };
+					return {
+						afterStaging,
+						runs,
+						unsigned: unsignedHashes(context),
+						rows: backfillRows(context),
+						setAside: setAsideRows(context).map((row) => ({
+							storePathHash: row.storePathHash,
+							defect: row.defect,
+							failedAttempts: row.failedAttempts
+						})),
+						backfill: backfillState(context)
+					};
+				}
+			);
+
+			expect(result).toStrictEqual({
+				afterStaging: {
+					rows: [
+						unfailedRow([...nixBase32Hashes(1, 4), ...nixBase32Hashes(6, 32)]),
+						unfailedRow(nixBase32Hashes(33, 64)),
+						unfailedRow(nixBase32Hashes(65, 96)),
+						unfailedRow([...nixBase32Hashes(97, 99), 'a'.repeat(32)]),
+						{ hashes: [bad], failedAttempts: 1, priority: 2 }
+					],
+					backfill: {
+						state: 'retrying',
+						resigned: 0,
+						failureOperation: 'resigning',
+						failureRecorded: true
+					}
+				},
+				runs: [
+					scheduledRun(0, 'progressed'),
+					scheduledRun(0, 'progressed'),
+					scheduledRun(7, 'progressed'),
+					scheduledRun(300, 'progressed')
+				],
+				unsigned: [bad],
+				rows: [],
+				setAside: [{ storePathHash: bad, defect, failedAttempts: 3 }],
+				backfill: {
+					state: 'complete',
+					resigned: 99,
+					failureOperation: undefined,
+					failureRecorded: false
+				}
+			});
+		}
+	);
+
+	// The narinfo at index 5 has stored references that do not parse, so
+	// staging keeps its old signatures. The references are repaired before the
+	// tenant's first turn. Publication signs an entry from a row with failures
+	// before it publishes it, so the published narinfo has the incoming key's
+	// signature.
+	it('signs a narinfo repaired after it failed to stage', async () => {
+		const bad = storePathHashSchema.parse(nixBase32Hash(5));
+
+		const result = await withNarInfoBackfill(
+			100,
+			new Set(),
+			async ({ context, service, clock, publish }) => {
+				const narInfoObjects = new NarInfoObjectsService(context);
+				const badCondition = eq(schema.narInfos.storePathHash, bad);
+				const original = context.db
+					.select()
+					.from(schema.narInfos)
+					.where(badCondition)
+					.get();
+				context.db
+					.update(schema.narInfos)
+					.set({ referencesJson: '{' })
+					.where(badCondition)
+					.run();
+				await runAsScheduled(context, service, clock, 1_000_000, (count) => {
+					if (count !== 1 || original === undefined) {
+						return;
+					}
+
+					context.db
+						.update(schema.narInfos)
+						.set({ referencesJson: original.referencesJson })
+						.where(badCondition)
+						.run();
+				});
+				const row = context.db
+					.select()
+					.from(schema.narInfos)
+					.where(badCondition)
+					.get();
+				const blob =
+					row === undefined
+						? undefined
+						: await narInfoObjects.blobFields(row.narHash);
+				const stored =
+					row === undefined || blob === undefined
+						? undefined
+						: narInfoObjects.buildNarInfo(row, blob);
+				const published = publish.mock.calls.find(
+					([, storePathHash]) => storePathHash === bad
+				)?.[4];
+				const [outgoing, incoming] = context.db
+					.select({ publicKey: schema.signingKeys.publicKey })
+					.from(schema.signingKeys)
+					.orderBy(schema.signingKeys.generation)
+					.all()
+					.map((key) => key.publicKey);
+
+				if (outgoing === undefined || incoming === undefined) {
+					throw new Error('Expected the outgoing and incoming keys');
+				}
+
+				const signatures = async (narInfo: NarInfo | undefined) =>
+					narInfo === undefined
+						? undefined
+						: {
+								outgoing: await isNarInfoSignatureValid(narInfo, outgoing),
+								incoming: await isNarInfoSignatureValid(narInfo, incoming)
+							};
+
+				return {
+					signatureGeneration: row?.signatureGeneration,
+					pendingSignatureGeneration:
+						row?.pendingSignatureGeneration ?? undefined,
+					stored: await signatures(stored),
+					published: await signatures(published),
+					setAside: setAsideRows(context),
+					backfill: backfillState(context)
+				};
+			}
+		);
+
+		const signed = { outgoing: true, incoming: true };
+
+		expect(result).toStrictEqual({
+			signatureGeneration: 2,
+			pendingSignatureGeneration: undefined,
+			stored: signed,
+			published: signed,
+			setAside: [],
+			backfill: {
+				state: 'complete',
+				resigned: 100,
+				failureOperation: undefined,
+				failureRecorded: false
+			}
+		});
+	});
+
+	// Staging signs each narinfo that parses. Publication signs only the
+	// entries of rows with failures again, so the page of entries that staged
+	// without a failure is published without signing.
+	it('publishes the entries of rows without a failure without signing them again', async () => {
+		const result = await withNarInfoBackfill(
+			100,
+			new Set(),
+			async ({ service }) => {
+				const stage = await asOneInvocation(() => service.runBackfillOnce());
+				const sign = vi.spyOn(crypto.subtle, 'sign');
+
+				try {
+					const publish = await asOneInvocation(() =>
+						service.runBackfillOnce()
+					);
+
+					return { stage, publish, signatures: sign.mock.calls.length };
 				} finally {
-					alarm.restore();
+					sign.mockRestore();
 				}
 			}
 		);
 
 		expect(result).toStrictEqual({
-			outcome: 'stalled',
-			alarm: failedAt + noProgressRetryMs
+			stage: 'progressed',
+			publish: 'progressed',
+			signatures: 0
+		});
+	});
+
+	// A stored NAR hash that does not parse is a defect of the narinfo row,
+	// which a delete and a new push can fix, and an invalid stored store path
+	// is reported as it is stored. Both narinfos are set aside with the defect
+	// of their own field, and the key list still parses.
+	it.each([
+		{ field: 'narHash' as const, defect: 'narHash' as const },
+		{ field: 'storePath' as const, defect: 'storePath' as const }
+	])(
+		'sets aside a narinfo whose stored $field is invalid',
+		async ({ field, defect }) => {
+			const bad = storePathHashSchema.parse(nixBase32Hash(5));
+
+			const result = await withNarInfoBackfill(
+				100,
+				new Set(),
+				async ({ context, service, clock }) => {
+					context.db
+						.update(schema.narInfos)
+						.set({ [field]: sql`${'not valid'}` })
+						.where(eq(schema.narInfos.storePathHash, bad))
+						.run();
+					await runAsScheduled(context, service, clock, 1_000_000);
+					const listed = keyListResponseSchema.safeParse(
+						await service.keyList()
+					);
+					const rotated = listed.success
+						? listed.data.keys.find((entry) => entry.key.id !== 'active')
+						: undefined;
+
+					return {
+						isListed: listed.success,
+						storePaths:
+							rotated?.state === 'signing' &&
+							rotated.backfill?.state === 'complete'
+								? rotated.backfill.unpublishable?.storePaths.map((entry) => ({
+										storePath: entry.storePath,
+										defect: entry.defect
+									}))
+								: undefined,
+						setAside: setAsideRows(context).map((row) => ({
+							storePathHash: row.storePathHash,
+							defect: row.defect,
+							failedAttempts: row.failedAttempts
+						}))
+					};
+				}
+			);
+
+			expect(result).toStrictEqual({
+				isListed: true,
+				storePaths: [
+					{
+						storePath:
+							field === 'storePath'
+								? 'not valid'
+								: `/nix/store/${bad}-many-narinfos`,
+						defect
+					}
+				],
+				setAside: [{ storePathHash: bad, defect, failedAttempts: 3 }]
+			});
+		}
+	);
+
+	// The narinfo at index 5 refers to a NAR whose blob row is missing, so the
+	// pass cannot write its narinfo object. Each attempt fails with defect
+	// `blobState`, and the third sets the narinfo aside, so it stays unsigned
+	// and the key's status lists it.
+	it('sets aside a narinfo whose blob row is missing', async () => {
+		const bad = storePathHashSchema.parse(nixBase32Hash(5));
+
+		const result = await withNarInfoBackfill(
+			100,
+			new Set(),
+			async ({ context, service, clock, publish }) => {
+				const badCondition = eq(schema.narInfos.storePathHash, bad);
+				const original = context.db
+					.select({ narHash: schema.narInfos.narHash })
+					.from(schema.narInfos)
+					.where(badCondition)
+					.get();
+
+				if (original === undefined) {
+					throw new Error('Expected the narinfo at index 5');
+				}
+
+				const lastDigit = original.narHash.endsWith('0') ? '1' : '0';
+				const missingNarHash = `${original.narHash.slice(0, -1)}${lastDigit}`;
+				context.db
+					.update(schema.narInfos)
+					.set({ narHash: sql`${missingNarHash}` })
+					.where(badCondition)
+					.run();
+				const runs = await runAsScheduled(context, service, clock, 1_000_000);
+
+				return {
+					runs,
+					published: publish.mock.calls.some(
+						([, storePathHash]) => storePathHash === bad
+					),
+					unsigned: unsignedHashes(context),
+					pending: pendingHashes(context),
+					setAside: setAsideRows(context).map((row) => ({
+						storePathHash: row.storePathHash,
+						defect: row.defect,
+						failedAttempts: row.failedAttempts
+					})),
+					backfill: backfillState(context)
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			runs: [
+				scheduledRun(0, 'progressed'),
+				scheduledRun(0, 'progressed'),
+				scheduledRun(7, 'progressed'),
+				scheduledRun(307, 'progressed')
+			],
+			published: false,
+			unsigned: [bad],
+			pending: [],
+			setAside: [
+				{ storePathHash: bad, defect: 'blobState', failedAttempts: 3 }
+			],
+			backfill: {
+				state: 'complete',
+				resigned: 99,
+				failureOperation: undefined,
+				failureRecorded: false
+			}
+		});
+	});
+
+	// Every narinfo has references that do not parse. A pass stages at most
+	// four batches, as many as fill one request, and leaves the rest for the
+	// next pass, which is due at once.
+	it('stages at most four batches in a pass when every narinfo fails', async () => {
+		const result = await withNarInfoBackfill(
+			200,
+			new Set(),
+			async ({ context, service, clock }) => {
+				context.db.update(schema.narInfos).set({ referencesJson: '{' }).run();
+				const outcome = await asOneInvocation(() => service.runBackfillOnce());
+
+				return {
+					outcome,
+					rows: backfillRows(context).map((row) => ({
+						entries: row.hashes.length,
+						failedAttempts: row.failedAttempts,
+						priority: row.priority
+					})),
+					pending: pendingHashes(context).length,
+					workAt: await service.backfillWorkAt(clock.now()),
+					now: clock.now()
+				};
+			}
+		);
+
+		const failingRow = { entries: 32, failedAttempts: 1, priority: 2 };
+
+		expect(result).toStrictEqual({
+			outcome: 'progressed',
+			rows: [failingRow, failingRow, failingRow, failingRow],
+			pending: 128,
+			workAt: result.now,
+			now: result.now
 		});
 	});
 
@@ -993,9 +1443,6 @@ describe('signing key rotation', () => {
 			alarmArmed: true
 		});
 
-		// The alarm's backfill pass stalled on the corrupt references. Repair
-		// them and run the alarm after the pass's retry deadline, so the pass can
-		// stage the backfill.
 		await setReferences('[]');
 		await alarmAfterBackfillRetry();
 	});
@@ -1438,9 +1885,15 @@ describe('signing key rotation', () => {
 	it('uses covering indexes for backfill and purge continuation scans', async () => {
 		await bootstrap();
 		const planRowSchema = z.object({ detail: z.string() });
+		const unpublishableCondition = sql.raw(
+			'NOT EXISTS (SELECT 1 FROM backfill_unpublishable_narinfo AS set_aside WHERE set_aside.cache_id = narinfo.cache_id AND set_aside.store_path_hash = narinfo.store_path_hash AND set_aside.target_generation >= 2 AND set_aside.narinfo_generation = narinfo.generation)'
+		);
 		const plans = await runInDurableObject(currentServer(), (instance) => ({
 			staging: instance.context.db.all(
-				sql`EXPLAIN QUERY PLAN SELECT * FROM narinfo WHERE signature_generation < ${2} AND pending_signature_generation IS NULL ORDER BY signature_generation, cache_id, store_path_hash LIMIT ${32}`
+				sql`EXPLAIN QUERY PLAN SELECT * FROM narinfo WHERE signature_generation < ${2} AND pending_signature_generation IS NULL AND ${unpublishableCondition} ORDER BY signature_generation, cache_id, store_path_hash LIMIT ${32}`
+			),
+			setAsideLookup: instance.context.db.all(
+				sql`EXPLAIN QUERY PLAN SELECT count(*) FROM narinfo WHERE signature_generation < ${2} AND ${unpublishableCondition}`
 			),
 			oldestRow: instance.context.db.all(
 				sql`EXPLAIN QUERY PLAN SELECT * FROM cache_purge_continuation WHERE kind = ${'backfill'} AND priority = ${2} ORDER BY created_at LIMIT ${1}`
@@ -1466,21 +1919,21 @@ describe('signing key rotation', () => {
 		}));
 		const parsed = z.record(z.string(), z.array(planRowSchema)).parse(plans);
 		const continuationIndex = 'cache_purge_kind_priority_created_at_idx';
+		const planIndexes: Record<string, string> = {
+			staging: 'narinfo_pending_signature_generation_idx',
+			setAsideLookup: 'sqlite_autoindex_backfill_unpublishable_narinfo_1'
+		};
 
 		expect(
 			Object.fromEntries(
 				Object.entries(parsed).map(([query, rows]) => [
 					query,
-					queryPlanSummary(
-						rows,
-						query === 'staging'
-							? 'narinfo_pending_signature_generation_idx'
-							: continuationIndex
-					)
+					queryPlanSummary(rows, planIndexes[query] ?? continuationIndex)
 				])
 			)
 		).toStrictEqual({
 			staging: { usesIndex: true, sorts: false },
+			setAsideLookup: { usesIndex: true, sorts: false },
 			oldestRow: { usesIndex: true, sorts: false },
 			oldestUnfailedRow: { usesIndex: true, sorts: false },
 			oldestEarlierFailedRow: { usesIndex: true, sorts: false },
@@ -2292,12 +2745,526 @@ describe('signing key rotation', () => {
 		}
 	);
 
+	// The narinfo at index 5 cannot be rendered. It fails in the first request,
+	// at the first turn and at the next turn, 300 seconds later. The third
+	// failure sets it aside, and the backfill completes without it. The key's
+	// status lists the store path, and the outgoing key can be retired.
+	it('sets aside a narinfo at its third failure and completes the backfill', async () => {
+		const bad = nixBase32Hash(5);
+
+		const result = await withNarInfoBackfill(
+			100,
+			new Set([bad]),
+			async ({ context, service, clock }) => {
+				const origin = clock.now();
+				const runs = await runAsScheduled(context, service, clock, 1_000_000);
+				const listed = keyListResponseSchema.parse(await service.keyList());
+				const retired = await service.retireKey(
+					signingKeyIdSchema.parse('active')
+				);
+
+				return {
+					origin,
+					runs,
+					unsigned: unsignedHashes(context),
+					pending: pendingHashes(context),
+					rows: backfillRows(context),
+					setAside: setAsideRows(context),
+					rotated: listed.keys.find((entry) => entry.key.id !== 'active'),
+					retired,
+					cacheId: resolvedCache(context).id,
+					narInfoGeneration: context.db
+						.select({ generation: schema.narInfos.generation })
+						.from(schema.narInfos)
+						.where(
+							eq(schema.narInfos.storePathHash, storePathHashSchema.parse(bad))
+						)
+						.get()?.generation
+				};
+			}
+		);
+
+		const unpublishableSince = isoTimestamp(new Date(result.origin + 307_000));
+		const rotated = result.rotated;
+
+		if (
+			rotated?.state !== 'signing' ||
+			rotated.backfill?.state !== 'complete'
+		) {
+			throw new Error('Expected the rotated key backfill to be complete');
+		}
+
+		expect(result).toStrictEqual({
+			origin: result.origin,
+			runs: [
+				scheduledRun(0, 'progressed'),
+				scheduledRun(0, 'progressed'),
+				scheduledRun(7, 'progressed'),
+				scheduledRun(307, 'progressed')
+			],
+			unsigned: [bad],
+			pending: [],
+			rows: [],
+			setAside: [
+				{
+					targetGeneration: 2,
+					cacheId: result.cacheId,
+					storePathHash: bad,
+					narInfoGeneration: result.narInfoGeneration,
+					defect: 'ca',
+					failedAttempts: 3,
+					setAsideAt: unpublishableSince
+				}
+			],
+			rotated: {
+				state: 'signing',
+				key: rotated.key,
+				backfill: {
+					state: 'complete',
+					startedAt: rotated.backfill.startedAt,
+					completedAt: rotated.backfill.completedAt,
+					resigned: 99,
+					unpublishable: {
+						total: 1,
+						storePaths: [
+							{
+								storePath: `/nix/store/${bad}-many-narinfos`,
+								cache: { kind: 'default' },
+								defect: 'ca',
+								setAsideAt: unpublishableSince
+							}
+						]
+					}
+				}
+			},
+			retired: { id: 'active', state: 'published-only' },
+			cacheId: result.cacheId,
+			narInfoGeneration: result.narInfoGeneration
+		});
+	});
+
+	// A pushed narinfo that cannot be rendered is set aside, and the outgoing
+	// key is retired twice. Reads still serve the object that the commit
+	// wrote, which has only the outgoing key's signature, so a client that
+	// trusts only the incoming key rejects it.
+	it('serves a set-aside narinfo with only the retired key signature', async () => {
+		const init = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'j'.repeat(32),
+			name: 'set-aside'
+		});
+
+		const result = await withoutAlarmArming(async () => {
+			await pushPath(init.token, path);
+			const rotation = await rotate(init.token);
+			const runs = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					instance.context.db
+						.update(schema.narInfos)
+						.set({ ca: malformedContentAddress })
+						.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+						.run();
+					const clock = testClock();
+					const service = pacedService(instance.context, clock);
+					const purge = vi
+						.spyOn(instance.context, 'purgeCacheTags')
+						.mockResolvedValue(undefined);
+
+					try {
+						return await runAsScheduled(
+							instance.context,
+							service,
+							clock,
+							1_000_000
+						);
+					} finally {
+						purge.mockRestore();
+					}
+				}
+			);
+			const first = await retire(init.token);
+			const second = await retire(init.token);
+			const listedResponse = await authorisedFetch('/keys', init.token);
+
+			return {
+				rotated: rotation.body.rotated.key.publicKey,
+				runs,
+				retired: [first.body.state, second.body.state],
+				listed: keyListResponseSchema.parse(await listedResponse.json())
+			};
+		});
+		const narInfo = await fetchNarInfo(path.storePathHash);
+		const [listed] = result.listed.keys;
+
+		if (listed?.state !== 'signing' || listed.backfill?.state !== 'complete') {
+			throw new Error('Expected the remaining key backfill to be complete');
+		}
+
+		expect({
+			runs: result.runs,
+			retired: result.retired,
+			unpublishable: listed.backfill.unpublishable?.storePaths.map(
+				(entry) => entry.storePath
+			),
+			publishedKeys: await publishedKeys(),
+			sigs: narInfo.sigs.length,
+			verifiesUnderRetired: await isNarInfoSignatureValid(
+				narInfo,
+				init.publicKey
+			),
+			verifiesUnderRemaining: await isNarInfoSignatureValid(
+				narInfo,
+				result.rotated
+			)
+		}).toStrictEqual({
+			runs: [
+				scheduledRun(0, 'progressed'),
+				scheduledRun(0, 'progressed'),
+				scheduledRun(7, 'progressed'),
+				scheduledRun(307, 'progressed')
+			],
+			retired: ['published-only', 'absent'],
+			unpublishable: [path.storePath],
+			publishedKeys: [result.rotated],
+			sigs: 1,
+			verifiesUnderRetired: true,
+			verifiesUnderRemaining: false
+		});
+	});
+
+	// A pushed narinfo that cannot be rendered is set aside. Deleting the path
+	// and pushing it again writes a new narinfo generation that every signing
+	// key signs, so the key's status no longer lists the path.
+	it('stops listing a set-aside path once it is deleted and pushed again', async () => {
+		const init = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'm'.repeat(32),
+			name: 'pushed-again'
+		});
+		const listed = async () => {
+			const response = await authorisedFetch('/keys', init.token);
+			const [, rotated] = keyListResponseSchema.parse(
+				await response.json()
+			).keys;
+
+			return rotated?.state === 'signing' &&
+				rotated.backfill?.state === 'complete'
+				? rotated.backfill.unpublishable?.storePaths.map(
+						(entry) => entry.storePath
+					)
+				: undefined;
+		};
+
+		const result = await withoutAlarmArming(async () => {
+			await pushPath(init.token, path);
+			const rotation = await rotate(init.token);
+			await runInDurableObject(currentServer(), async (instance) => {
+				instance.context.db
+					.update(schema.narInfos)
+					.set({ ca: malformedContentAddress })
+					.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+					.run();
+				const clock = testClock();
+				const purge = vi
+					.spyOn(instance.context, 'purgeCacheTags')
+					.mockResolvedValue(undefined);
+
+				try {
+					await runAsScheduled(
+						instance.context,
+						pacedService(instance.context, clock),
+						clock,
+						1_000_000
+					);
+				} finally {
+					purge.mockRestore();
+				}
+			});
+			const before = await listed();
+			await deletePath(init.token, path.storePathHash);
+			await pushPath(init.token, path);
+
+			return {
+				incoming: rotation.body.rotated.key.publicKey,
+				before,
+				after: await listed()
+			};
+		});
+		const narInfo = await fetchNarInfo(path.storePathHash);
+
+		expect({
+			before: result.before,
+			after: result.after,
+			outgoing: await isNarInfoSignatureValid(narInfo, init.publicKey),
+			incoming: await isNarInfoSignatureValid(narInfo, result.incoming)
+		}).toStrictEqual({
+			before: [path.storePath],
+			after: undefined,
+			outgoing: true,
+			incoming: true
+		});
+	});
+
+	// Purge requests fail from 10 seconds on, so the backfill cannot complete,
+	// and the narinfo at index 5 is set aside at its third failure, at 326
+	// seconds. Aborting the rotation deletes that set-aside row.
+	it('deletes the set-aside rows of an aborted rotation', async () => {
+		const bad = nixBase32Hash(5);
+
+		const result = await withNarInfoBackfill(
+			300,
+			new Set([bad]),
+			async ({ context, service, clock, purge }) => {
+				const origin = clock.now();
+				purge.mockImplementation(() =>
+					clock.now() - origin >= 10_000
+						? Promise.reject(new Error('purge unavailable'))
+						: Promise.resolve()
+				);
+				await runAsScheduled(context, service, clock, 330_000);
+				const before = setAsideRows(context).map((row) => row.storePathHash);
+				const incoming = context.db
+					.select({ id: schema.signingKeys.id })
+					.from(schema.signingKeys)
+					.where(
+						eq(
+							schema.signingKeys.generation,
+							signingKeyGenerationSchema.parse(2)
+						)
+					)
+					.get();
+
+				if (incoming === undefined) {
+					throw new Error('Expected the incoming key');
+				}
+
+				await service.abortKeyRotation(signingKeyIdSchema.parse(incoming.id));
+
+				return { before, after: setAsideRows(context) };
+			}
+		);
+
+		expect(result).toStrictEqual({ before: [bad], after: [] });
+	});
+
+	// The second key's backfill sets aside the narinfo at index 5, which keeps
+	// the first key's signature only. During the third key's backfill, which
+	// cannot complete while purge requests fail, the narinfo is set aside
+	// again, so two backfills' rows set it aside. The key list credits the
+	// narinfo once, and only to the first key.
+	it('counts each set-aside narinfo once for each key that signed it', async () => {
+		const bad = nixBase32Hash(5);
+
+		const result = await withNarInfoBackfill(
+			300,
+			new Set([bad]),
+			async ({ context, service, clock, purge }) => {
+				const counts = async () =>
+					keyListResponseSchema
+						.parse(await service.keyList())
+						.keys.map((entry) => entry.unpublishableSigned);
+				await runAsScheduled(context, service, clock, 1_000_000);
+				const afterSecond = await counts();
+				await service.rotateKey();
+				const origin = clock.now();
+				purge.mockImplementation(() =>
+					clock.now() - origin >= 10_000
+						? Promise.reject(new Error('purge unavailable'))
+						: Promise.resolve()
+				);
+				await runAsScheduled(context, service, clock, 1_000_000);
+
+				return {
+					afterSecond,
+					duringThird: await counts(),
+					targets: setAsideRows(context).map((row) => row.targetGeneration)
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			afterSecond: [1, undefined],
+			duringThird: [1, undefined, undefined],
+			targets: [2, 3]
+		});
+	});
+
+	// The incoming key's backfill sets aside the narinfo at index 5. Retiring
+	// the incoming key twice deletes it, and its set-aside rows with it.
+	it('deletes the set-aside rows of a key that is deleted', async () => {
+		const bad = nixBase32Hash(5);
+
+		const result = await withNarInfoBackfill(
+			100,
+			new Set([bad]),
+			async ({ context, service, clock }) => {
+				await runAsScheduled(context, service, clock, 1_000_000);
+				const before = setAsideRows(context).map((row) => row.storePathHash);
+				const incoming = context.db
+					.select({ id: schema.signingKeys.id })
+					.from(schema.signingKeys)
+					.where(
+						eq(
+							schema.signingKeys.generation,
+							signingKeyGenerationSchema.parse(2)
+						)
+					)
+					.get();
+
+				if (incoming === undefined) {
+					throw new Error('Expected the incoming key');
+				}
+
+				const id = signingKeyIdSchema.parse(incoming.id);
+				const retired = [
+					await service.retireKey(id),
+					await service.retireKey(id)
+				].map((response) => response.state);
+
+				return { before, retired, after: setAsideRows(context) };
+			}
+		);
+
+		expect(result).toStrictEqual({
+			before: [bad],
+			retired: ['published-only', 'absent'],
+			after: []
+		});
+	});
+
+	// The first rotation sets aside the narinfo at index 5. The next rotation
+	// stages it and tries it again. It signs the narinfo if it has been
+	// repaired in between, and otherwise sets it aside again at its third
+	// failure. When the next rotation completes, it deletes the set-aside rows
+	// of the first.
+	it.each([{ isRepaired: true }, { isRepaired: false }])(
+		'tries a set-aside narinfo again in the next rotation (repaired: $isRepaired)',
+		async ({ isRepaired }) => {
+			const bad = nixBase32Hash(5);
+
+			const result = await withNarInfoBackfill(
+				100,
+				new Set([bad]),
+				async ({ context, service, clock, build }) => {
+					const setAside = () =>
+						setAsideRows(context).map((row) => ({
+							storePathHash: row.storePathHash,
+							targetGeneration: row.targetGeneration
+						}));
+					await runAsScheduled(context, service, clock, 1_000_000);
+					const afterFirst = setAside();
+
+					if (isRepaired) {
+						repairNarInfo(context, bad);
+					}
+
+					await service.rotateKey();
+					await runAsScheduled(context, service, clock, 1_000_000);
+
+					return {
+						afterFirst,
+						afterNext: setAside(),
+						attempts: build.mock.calls.filter(
+							([row]) => row.storePathHash === bad
+						).length,
+						signatureGeneration: context.db
+							.select({ generation: schema.narInfos.signatureGeneration })
+							.from(schema.narInfos)
+							.where(
+								eq(
+									schema.narInfos.storePathHash,
+									storePathHashSchema.parse(bad)
+								)
+							)
+							.get()?.generation
+					};
+				}
+			);
+
+			expect(result).toStrictEqual({
+				afterFirst: [{ storePathHash: bad, targetGeneration: 2 }],
+				afterNext: isRepaired
+					? []
+					: [{ storePathHash: bad, targetGeneration: 3 }],
+				attempts: isRepaired ? 4 : 6,
+				signatureGeneration: isRepaired ? 3 : 1
+			});
+		}
+	);
+
+	// The narinfo at index 5 is committed again while its third attempt runs.
+	// The attempt fails on the old row and then finds the row changed when it
+	// records the failure, so it does not set the narinfo aside.
+	it('does not set aside a narinfo that is committed again during its last attempt', async () => {
+		const bad = storePathHashSchema.parse(nixBase32Hash(5));
+
+		const result = await withNarInfoBackfill(
+			100,
+			new Set([bad]),
+			async ({ context, service, clock, build }) => {
+				const unspied = new NarInfoObjectsService(context);
+				let attempts = 0;
+				build.mockImplementation((row, blob) => {
+					attempts += row.storePathHash === bad ? 1 : 0;
+
+					if (attempts === 3 && row.storePathHash === bad) {
+						context.db
+							.update(schema.narInfos)
+							.set({
+								generation: sql`${schema.narInfos.generation} + 1`,
+								signatureGeneration: signingKeyGenerationSchema.parse(2),
+								pendingSignatureGeneration: sql`null`,
+								ca: sql`null`
+							})
+							.where(eq(schema.narInfos.storePathHash, bad))
+							.run();
+					}
+
+					return unspied.buildNarInfo(row, blob);
+				});
+				const runs = await runAsScheduled(context, service, clock, 1_000_000);
+
+				return {
+					runs,
+					attempts,
+					rows: backfillRows(context),
+					setAside: setAsideRows(context),
+					unsigned: unsignedHashes(context),
+					backfill: backfillState(context)
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			runs: [
+				scheduledRun(0, 'progressed'),
+				scheduledRun(0, 'progressed'),
+				scheduledRun(7, 'progressed'),
+				scheduledRun(307, 'progressed')
+			],
+			attempts: 3,
+			rows: [],
+			setAside: [],
+			unsigned: [],
+			backfill: {
+				state: 'complete',
+				resigned: 99,
+				failureOperation: undefined,
+				failureRecorded: false
+			}
+		});
+	});
+
 	// The tenant has 260 narinfos, and the narinfos at indices 5, 40 and 120
 	// cannot be rendered. Each request publishes the other entries, purges
 	// their tags and moves the three to new rows with the failure recorded.
 	// Staging counts only the rows without a failure, and queues four of them
 	// after the first request. The rows with failures are sent together when
-	// the tenant's turn comes, and the turns are 300 seconds apart.
+	// the tenant's turn comes, and the turns are 300 seconds apart. Each of the
+	// three is set aside at its third failure, and the backfill then completes.
 	it('signs every other narinfo when some narinfos cannot be rendered', async () => {
 		const bad = [5, 40, 120].map((index) => nixBase32Hash(index));
 
@@ -2329,6 +3296,7 @@ describe('signing key rotation', () => {
 						.filter((storePathHash) => bad.includes(storePathHash)),
 					unsigned: unsignedHashes(context),
 					rows: backfillRows(context),
+					setAside: setAsideRows(context).map((row) => row.storePathHash),
 					backfill: backfillState(context)
 				};
 			}
@@ -2367,17 +3335,17 @@ describe('signing key rotation', () => {
 				bad[0],
 				bad[1],
 				bad[2],
-				bad[0],
-				bad[1],
 				bad[2]
 			],
 			unsigned: bad,
-			rows: [
-				{ hashes: [bad[0]], failedAttempts: 4, priority: 2 },
-				{ hashes: [bad[1]], failedAttempts: 4, priority: 2 },
-				{ hashes: [bad[2]], failedAttempts: 3, priority: 2 }
-			],
-			backfill: { state: 'retrying', resigned: 257, ...failure }
+			rows: [],
+			setAside: bad,
+			backfill: {
+				state: 'complete',
+				resigned: 257,
+				failureOperation: undefined,
+				failureRecorded: false
+			}
 		});
 	});
 
@@ -2430,7 +3398,9 @@ describe('signing key rotation', () => {
 	// the backfill waits 9, 18, 36, 72 and then 144 seconds, and no row moves
 	// to the rows with failures. The first pass after the outage is the turn of
 	// the rows with failures, the next pass sends the same page that failed
-	// during the outage, and every other narinfo is signed.
+	// during the outage, and every other narinfo is signed. The turns at 333,
+	// 633 and 933 seconds set aside each narinfo that cannot be rendered at its
+	// third failure.
 	it('signs every renderable narinfo after a purge outage', async () => {
 		const bad = Array.from({ length: 59 }, (_, index) =>
 			nixBase32Hash((index + 1) * 10)
@@ -2456,6 +3426,7 @@ describe('signing key rotation', () => {
 					failingHashes: backfillRows(context)
 						.flatMap((row) => row.hashes)
 						.toSorted(byCodeUnit),
+					setAside: setAsideRows(context).map((row) => row.storePathHash),
 					resigned: backfillState(context).resigned
 				};
 			}
@@ -2481,7 +3452,8 @@ describe('signing key rotation', () => {
 				scheduledRun(933, 'progressed')
 			],
 			unsigned: bad,
-			failingHashes: bad,
+			failingHashes: [],
+			setAside: bad,
 			resigned: 600 - bad.length
 		});
 	});

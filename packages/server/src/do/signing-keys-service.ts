@@ -2,9 +2,11 @@ import {
 	InvalidNixSha256HashError,
 	InvalidStorePathError
 } from '@cupboard/nix-store/errors';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { narFingerprint, type NarInfo } from '@cupboard/nix-store/narinfo';
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
+	type CacheScope,
 	narInfoGenerationSchema,
 	type NixFingerprint,
 	type SigningKeyGeneration,
@@ -21,15 +23,28 @@ import {
 	instanceNameSchema
 } from '@cupboard/protocol/instance';
 import type {
+	BackfillEntryDefect,
 	BackfillStatusInput,
 	KeyAbortResponseInput,
 	KeyListResponseInput,
 	KeyRetireResponseInput,
 	KeyRotateResponseInput,
-	SigningKeyEntryInput
+	SigningKeyEntryInput,
+	UnpublishableStorePathsInput
 } from '@cupboard/protocol/keys';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, gt, isNull, lt, ne, sql } from 'drizzle-orm';
+import {
+	and,
+	count,
+	eq,
+	gt,
+	gte,
+	isNull,
+	lt,
+	ne,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 import { z } from 'zod';
 
@@ -38,11 +53,14 @@ import {
 	generateSigningKeyMaterial,
 	signNixFingerprint
 } from '../crypto/crypto.ts';
-import { cacheIdSchema, type ResolvedCache } from '../db/cache.ts';
+import {
+	type CacheId,
+	cacheIdSchema,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
-	type BackfillEntryDefect,
 	BackfillEntryInvalidError,
 	CacheIdentityMissingError,
 	LastSigningKeyError,
@@ -61,6 +79,7 @@ import {
 	TextBody as CachedTextBody,
 	type TextBody
 } from '../http/http.ts';
+import { parseStored } from '../http/parse.ts';
 
 import {
 	armAlarmNoLaterThan,
@@ -131,6 +150,15 @@ const failingRowTurnSchema = z.strictObject({ notBefore: z.number() });
 // tenant.
 const failingRowTurnMs = cachePurgeBackoffCapMs;
 
+// The failed attempt at which the backfill sets an entry aside instead of
+// moving it to another row with failures. The second attempt comes at the
+// tenant's next turn, which can be the next pass, and the third comes a turn
+// later, so an entry is set aside about 5 minutes after its first failure.
+const backfillEntryAttemptLimit = 3;
+
+// The most set-aside store paths that the status of one key lists.
+const listedUnpublishableStorePaths = 100;
+
 // The storage key of the backfill's wait after a failure of a whole attempt,
 // and the number of consecutive such failures.
 const attemptRetryKey = 'cache-purge:backfill-retry';
@@ -181,6 +209,8 @@ type BackfillRow = typeof schema.signingKeyBackfills.$inferSelect;
 
 type ContinuationRow = typeof schema.cachePurgeContinuations.$inferSelect;
 
+type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
 // The entries of one continuation row in a page: those that the pass publishes
 // and purges, and those that stay in the row.
 interface BackfillPagePart {
@@ -203,12 +233,13 @@ interface PublicationFailure {
 	readonly error: BackfillEntryInvalidError;
 }
 
-// The entries of one row that their stored rows keep from being published.
-// They move to a new row with the failure recorded.
+// The entries of one row that their stored rows keep from being published,
+// and the number of failed attempts that includes this one. Below
+// `backfillEntryAttemptLimit` they move to a new row with the failure
+// recorded, and at the limit they are set aside.
 interface FailedEntries {
-	readonly entries: readonly PurgeEntry[];
+	readonly failures: readonly PublicationFailure[];
 	readonly failedAttempts: number;
-	readonly message: string;
 }
 
 // The backfill row whose request is sent next, and the earliest time at which
@@ -239,8 +270,13 @@ const narInfoFields = [
 
 // The part of a stored narinfo row that `error` shows to be invalid. Building
 // parses the references, the signatures, the store path and the hashes, and
-// rendering validates every field and names the first that it rejects.
-function narInfoDefect(error: unknown): BackfillEntryDefect {
+// rendering validates every field and names the first that it rejects. A hash
+// that does not parse is attributed to the NAR hash or the file hash when
+// `hashes` contains the value, because the two are stored in different rows.
+function narInfoDefect(
+	error: unknown,
+	hashes?: { readonly narHash: string; readonly fileHash?: string }
+): BackfillEntryDefect {
 	if (error instanceof StoredReferencesInvalidError) {
 		return 'references';
 	}
@@ -254,7 +290,11 @@ function narInfoDefect(error: unknown): BackfillEntryDefect {
 	}
 
 	if (error instanceof InvalidNixSha256HashError) {
-		return 'hash';
+		if (error.value === hashes?.fileHash) {
+			return 'fileHash';
+		}
+
+		return error.value === hashes?.narHash ? 'narHash' : 'hash';
 	}
 
 	if (!(error instanceof z.ZodError)) {
@@ -271,16 +311,44 @@ function failedEntries(
 	row: ContinuationRow,
 	failures: readonly PublicationFailure[]
 ): FailedEntries | undefined {
-	const first = failures.at(0);
-
-	if (first === undefined) {
+	if (failures.length === 0) {
 		return undefined;
 	}
 
+	return { failures, failedAttempts: row.failedAttempts + 1 };
+}
+
+function isSetAside(failed: FailedEntries): boolean {
+	return failed.failedAttempts >= backfillEntryAttemptLimit;
+}
+
+/**
+A condition on `narinfo` that is false for a narinfo that the backfill of
+`generation`, or of a later generation, set aside. The backfill neither stages
+such a narinfo again nor counts it as remaining. A later backfill tried the
+narinfo again, so its set-aside row is the current one, and the rows of
+earlier generations are deleted when it completes. A set-aside row applies
+only to the narinfo generation that it records, so a re-commit of the path is
+counted again.
+*/
+function notSetAside(generation: SigningKeyGeneration): SQL {
+	const table = schema.backfillUnpublishableNarInfos;
+
+	return sql`NOT EXISTS (SELECT 1 FROM ${table} WHERE ${table.cacheId} = ${schema.narInfos.cacheId} AND ${table.storePathHash} = ${schema.narInfos.storePathHash} AND ${table.targetGeneration} >= ${generation} AND ${table.narInfoGeneration} = ${schema.narInfos.generation})`;
+}
+
+// The backfill fields of a key whose backfill has just recorded a failure.
+function retryingProgress(
+	operation: 'resigning' | 'cache-purge',
+	failedAt: IsoTimestamp,
+	message: string
+): SQLiteUpdateSetSource<typeof schema.signingKeyBackfills> {
 	return {
-		entries: failures.map((failure) => failure.entry),
-		failedAttempts: row.failedAttempts + 1,
-		message: errorMessage(first.error)
+		state: 'retrying',
+		updatedAt: failedAt,
+		failureOperation: operation,
+		failedAt,
+		failureMessage: message
 	};
 }
 
@@ -486,7 +554,8 @@ export class SigningKeysService {
 				.where(
 					and(
 						lt(schema.narInfos.signatureGeneration, generation),
-						narInfoOfLiveCache()
+						narInfoOfLiveCache(),
+						notSetAside(generation)
 					)
 				)
 				.get()?.value ?? 0
@@ -501,7 +570,8 @@ export class SigningKeysService {
 				.where(
 					and(
 						lt(schema.narInfos.signatureGeneration, generation),
-						narInfoOfLiveCache()
+						narInfoOfLiveCache(),
+						notSetAside(generation)
 					)
 				)
 				.limit(1)
@@ -586,12 +656,17 @@ export class SigningKeysService {
 	}
 
 	private backfillStatus(row: BackfillRow): BackfillStatusInput {
+		const unpublishable = this.unpublishable(row.generation);
+		const unpublishableField =
+			unpublishable === undefined ? {} : { unpublishable };
+
 		if (row.state === 'complete' && row.completedAt !== null) {
 			return {
 				state: 'complete',
 				startedAt: row.startedAt,
 				completedAt: row.completedAt,
-				resigned: row.resigned
+				resigned: row.resigned,
+				...unpublishableField
 			};
 		}
 
@@ -599,7 +674,8 @@ export class SigningKeysService {
 			startedAt: row.startedAt,
 			updatedAt: row.updatedAt,
 			resigned: row.resigned,
-			remaining: this.remaining(row.generation)
+			remaining: this.remaining(row.generation),
+			...unpublishableField
 		};
 
 		if (
@@ -622,6 +698,68 @@ export class SigningKeysService {
 		return { state: 'running', ...common };
 	}
 
+	// The narinfos that the backfill of `generation` set aside and that still
+	// lack its signature, or undefined when there are none. A narinfo that has
+	// been re-committed or deleted since then is not listed.
+	private unpublishable(
+		generation: SigningKeyGeneration
+	): UnpublishableStorePathsInput | undefined {
+		const table = schema.backfillUnpublishableNarInfos;
+		const condition = and(
+			eq(table.targetGeneration, generation),
+			lt(schema.narInfos.signatureGeneration, generation),
+			narInfoOfLiveCache()
+		);
+		const joined = and(
+			eq(schema.narInfos.cacheId, table.cacheId),
+			eq(schema.narInfos.storePathHash, table.storePathHash),
+			eq(schema.narInfos.generation, table.narInfoGeneration)
+		);
+		const total =
+			this.context.db
+				.select({ value: count() })
+				.from(table)
+				.innerJoin(schema.narInfos, joined)
+				.where(condition)
+				.get()?.value ?? 0;
+
+		if (total === 0) {
+			return undefined;
+		}
+
+		const rows = this.context.db
+			.select({
+				storePath: schema.narInfos.storePath,
+				cacheId: table.cacheId,
+				defect: table.defect,
+				setAsideAt: table.setAsideAt
+			})
+			.from(table)
+			.innerJoin(schema.narInfos, joined)
+			.where(condition)
+			.orderBy(schema.narInfos.storePath)
+			.limit(listedUnpublishableStorePaths)
+			.all();
+
+		return {
+			total,
+			storePaths: rows.map((row) => ({
+				storePath: row.storePath,
+				...this.cacheOf(row.cacheId),
+				defect: row.defect,
+				setAsideAt: row.setAsideAt
+			}))
+		};
+	}
+
+	// The scope of a cache for a status listing. A narinfo whose cache is
+	// missing from the cache registry is listed without one.
+	private cacheOf(cacheId: CacheId): { cache?: CacheScope } {
+		const cache = this.registeredCache(cacheId);
+
+		return cache === undefined ? {} : { cache: cache.scope };
+	}
+
 	private entries(keys: readonly SigningKey[]): SigningKeyEntryInput[] {
 		const backfills = new Map(
 			this.context.db
@@ -631,7 +769,46 @@ export class SigningKeysService {
 				.map((row) => [row.keyId, this.backfillStatus(row)] as const)
 		);
 
-		return keys.map((key) => keyEntry(key, backfills.get(key.id)));
+		return keys.map((key) =>
+			keyEntry(key, backfills.get(key.id), this.unpublishableSignedBy(key))
+		);
+	}
+
+	// The number of set-aside narinfos whose published narinfo has `key`'s
+	// signature. Each narinfo counts once, also while the rows of two
+	// backfills set it aside. Staging writes the signatures of the current
+	// signing keys into a row before it is published, so the stored
+	// signatures also include those that were never published. A narinfo was
+	// last published at its signature generation, so only a key of that
+	// generation or earlier can have signed the published narinfo.
+	private unpublishableSignedBy(key: SigningKey): number {
+		const table = schema.backfillUnpublishableNarInfos;
+		const narInfos = schema.narInfos;
+
+		return (
+			this.context.db
+				.select({
+					value: sql<number>`count(distinct ${table.cacheId} || ':' || ${table.storePathHash})`
+				})
+				.from(table)
+				.innerJoin(
+					narInfos,
+					and(
+						eq(narInfos.cacheId, table.cacheId),
+						eq(narInfos.storePathHash, table.storePathHash),
+						eq(narInfos.generation, table.narInfoGeneration)
+					)
+				)
+				.where(
+					and(
+						lt(narInfos.signatureGeneration, table.targetGeneration),
+						gte(narInfos.signatureGeneration, key.generation),
+						sql`instr(${narInfos.sigsJson}, ${`"${key.publicKey.name}:`}) > 0`,
+						narInfoOfLiveCache()
+					)
+				)
+				.get()?.value ?? 0
+		);
 	}
 
 	private completeCoverage(key: SigningKey): boolean {
@@ -669,13 +846,42 @@ export class SigningKeysService {
 
 	// Stages batches until enough rows are queued to fill one purge request.
 	// Staging more than that would grow the backlog faster than the requests
-	// can drain it.
+	// can drain it. A batch of narinfos that all fail adds no row without a
+	// failure, so the pass also stops after as many batches as fill one
+	// request, and `backfillWorkAt` makes the next pass due at once.
 	private async stageBackfills(row: BackfillRow): Promise<void> {
-		while (this.unfailedBackfillRowCount() < backfillRowsPerRequest) {
-			if ((await this.stageBackfill(row)) === 0) {
+		for (let batch = 0; batch < backfillRowsPerRequest; batch += 1) {
+			if (
+				this.unfailedBackfillRowCount() >= backfillRowsPerRequest ||
+				(await this.stageBackfill(row)) === 0
+			) {
 				return;
 			}
 		}
+	}
+
+	// Whether staging would add rows: fewer rows without a failure are queued
+	// than fill one request, and a narinfo remains to be staged.
+	private isStagingDue(generation: SigningKeyGeneration): boolean {
+		if (this.unfailedBackfillRowCount() >= backfillRowsPerRequest) {
+			return false;
+		}
+
+		return (
+			this.context.db
+				.select({ cache: schema.narInfos.cacheId })
+				.from(schema.narInfos)
+				.where(
+					and(
+						lt(schema.narInfos.signatureGeneration, generation),
+						isNull(schema.narInfos.pendingSignatureGeneration),
+						narInfoOfLiveCache(),
+						notSetAside(generation)
+					)
+				)
+				.limit(1)
+				.get() !== undefined
+		);
 	}
 
 	private unfailedBackfillRowCount(): number {
@@ -740,7 +946,8 @@ export class SigningKeysService {
 					and(
 						lt(schema.narInfos.signatureGeneration, row.generation),
 						isNull(schema.narInfos.pendingSignatureGeneration),
-						narInfoOfLiveCache()
+						narInfoOfLiveCache(),
+						notSetAside(row.generation)
 					)
 				)
 				.orderBy(
@@ -756,22 +963,23 @@ export class SigningKeysService {
 			}
 
 			const keys = await this.loadedKeys();
-			const rendered: { row: (typeof rows)[number]; sigs: string[] }[] = [];
+			const rendered: { row: NarInfoRow; sigs?: string[] }[] = [];
+			const invalid = new Map<NarInfoRow, BackfillEntryInvalidError>();
 
 			for (const narInfoRow of rows) {
-				const references = storedReferencesSchema.parse(
-					JSON.parse(narInfoRow.referencesJson) as unknown
+				const parsed = this.signatureInputs(narInfoRow);
+
+				if (parsed instanceof BackfillEntryInvalidError) {
+					invalid.set(narInfoRow, parsed);
+					rendered.push({ row: narInfoRow });
+					continue;
+				}
+
+				const sigs = await this.signaturesFor(
+					parsed.fingerprint,
+					parsed.existing,
+					keys
 				);
-				const existing = storedSignaturesSchema.parse(
-					JSON.parse(narInfoRow.sigsJson) as unknown
-				);
-				const fingerprint = narFingerprint(
-					new StorePath(narInfoRow.storePath),
-					narInfoRow.narHash,
-					narInfoRow.narSize,
-					references
-				);
-				const sigs = await this.signaturesFor(fingerprint, existing, keys);
 				rendered.push({ row: narInfoRow, sigs });
 			}
 
@@ -781,16 +989,40 @@ export class SigningKeysService {
 			);
 			const continuationId = crypto.randomUUID();
 			const entries: PurgeEntry[] = [];
+			const failures: PublicationFailure[] = [];
+			let unregistered = 0;
 
 			this.context.db.transaction((tx) => {
 				for (const item of rendered) {
-					const cache = this.context.cacheRepository.resolvedForId(
-						item.row.cacheId
-					);
+					const cache = this.registeredCache(item.row.cacheId);
+
+					// The entry's purge tag needs the cache's scope, and no code
+					// path restores a cache identity, so the narinfo is set
+					// aside at once.
+					if (cache === undefined) {
+						this.insertUnpublishable(tx, {
+							cacheId: item.row.cacheId,
+							storePathHash: item.row.storePathHash,
+							targetGeneration: row.generation,
+							narInfoGeneration: item.row.generation,
+							defect: 'cacheIdentity',
+							failedAttempts: 1,
+							setAsideAt: createdAt
+						});
+						unregistered += 1;
+						continue;
+					}
+
+					// A narinfo that cannot be re-signed keeps its signatures. It
+					// is still marked as pending, so staging does not read it
+					// again while its entry waits in a row with failures.
+					// Publication signs it before it publishes it.
 					const updated = tx
 						.update(schema.narInfos)
 						.set({
-							sigsJson: JSON.stringify(item.sigs),
+							...(item.sigs !== undefined && {
+								sigsJson: JSON.stringify(item.sigs)
+							}),
 							pendingSignatureGeneration: row.generation
 						})
 						.where(
@@ -811,7 +1043,7 @@ export class SigningKeysService {
 						continue;
 					}
 
-					entries.push({
+					const entry = {
 						cacheId: cache.id,
 						storePathHash: updated.storePathHash,
 						narInfoGeneration: updated.generation,
@@ -821,7 +1053,14 @@ export class SigningKeysService {
 							cache.scope,
 							updated.storePathHash
 						)
-					});
+					};
+					const error = invalid.get(item.row);
+
+					if (error === undefined) {
+						entries.push(entry);
+					} else {
+						failures.push({ entry, error });
+					}
 				}
 
 				if (entries.length > 0) {
@@ -837,28 +1076,200 @@ export class SigningKeysService {
 						.run();
 				}
 
+				// A failure at staging is the entry's first, so its entry goes to a
+				// row with failures.
+				const firstFailure = failures.at(0);
+				this.recordFailedEntries(
+					tx,
+					row.keyId,
+					expiresAt,
+					{ failures, failedAttempts: 1 },
+					createdAt
+				);
+
 				tx.update(schema.signingKeyBackfills)
-					.set(this.backfillProgress(tx, row.keyId, createdAt))
+					.set(
+						firstFailure === undefined
+							? this.backfillProgress(tx, row.keyId, createdAt)
+							: retryingProgress(
+									'resigning',
+									createdAt,
+									firstFailure.error.message
+								)
+					)
 					.where(eq(schema.signingKeyBackfills.keyId, row.keyId))
 					.run();
 			});
 
-			return entries.length;
+			return entries.length + failures.length + unregistered;
 		});
+	}
+
+	// The cache of a narinfo row, or undefined when the cache is missing from
+	// the cache registry.
+	private registeredCache(cacheId: CacheId): ResolvedCache | undefined {
+		try {
+			return this.context.cacheRepository.resolvedForId(cacheId);
+		} catch (error) {
+			if (error instanceof CacheIdentityMissingError) {
+				return undefined;
+			}
+
+			throw error;
+		}
+	}
+
+	// The fingerprint and the stored signatures of a narinfo row, or the
+	// defect that keeps the row from being re-signed.
+	private signatureInputs(
+		row: NarInfoRow
+	):
+		| BackfillEntryInvalidError
+		| { readonly fingerprint: NixFingerprint; readonly existing: string[] } {
+		try {
+			const references = parseStored(
+				storedReferencesSchema,
+				row.referencesJson,
+				(cause) => new StoredReferencesInvalidError(row.storePathHash, cause)
+			);
+			const existing = parseStored(
+				storedSignaturesSchema,
+				row.sigsJson,
+				(cause) => new StoredSignaturesInvalidError(row.storePathHash, cause)
+			);
+			// The fingerprint takes the NAR hash as text and does not check it.
+			// Parsing it here reports a hash that does not parse as a defect of
+			// the narinfo row, not as a missing blob row.
+			NixSha256Hash.parse(row.narHash);
+			const fingerprint = narFingerprint(
+				new StorePath(row.storePath),
+				row.narHash,
+				row.narSize,
+				references
+			);
+
+			return { fingerprint, existing };
+		} catch (error) {
+			return new BackfillEntryInvalidError(
+				row.storePathHash,
+				narInfoDefect(error, { narHash: row.narHash })
+			);
+		}
+	}
+
+	/**
+	Records the entries of `failed`. Below `backfillEntryAttemptLimit` they
+	move to a new row with failures, which records the first entry's error.
+	At the limit each entry is set aside: its narinfo is no longer pending,
+	and a `backfill_unpublishable_narinfo` row records its defect. An entry
+	whose narinfo has changed since it was staged is not set aside, because
+	staging reads the changed narinfo again if it still lacks the signature.
+	*/
+	private recordFailedEntries(
+		tx: SchemaWriter,
+		signingKeyId: string | null,
+		expiresAt: IsoTimestamp,
+		failed: FailedEntries,
+		now: IsoTimestamp
+	): void {
+		const first = failed.failures.at(0);
+
+		if (first === undefined) {
+			return;
+		}
+
+		if (!isSetAside(failed)) {
+			tx.insert(schema.cachePurgeContinuations)
+				.values({
+					id: crypto.randomUUID(),
+					kind: 'backfill',
+					signingKeyId,
+					entriesJson: JSON.stringify(
+						failed.failures.map((failure) => failure.entry)
+					),
+					createdAt: now,
+					expiresAt,
+					lastAttemptAt: now,
+					lastError: first.error.message,
+					failedAttempts: failed.failedAttempts,
+					priority: failingBackfillPriority
+				})
+				.run();
+
+			return;
+		}
+
+		for (const { entry, error } of failed.failures) {
+			const released = tx
+				.update(schema.narInfos)
+				.set({ pendingSignatureGeneration: sql`null` })
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, entry.cacheId),
+						eq(schema.narInfos.storePathHash, entry.storePathHash),
+						eq(schema.narInfos.generation, entry.narInfoGeneration),
+						eq(
+							schema.narInfos.pendingSignatureGeneration,
+							entry.targetGeneration
+						)
+					)
+				)
+				.returning({ generation: schema.narInfos.generation })
+				.all();
+
+			if (released.length === 0) {
+				continue;
+			}
+
+			this.insertUnpublishable(tx, {
+				cacheId: entry.cacheId,
+				storePathHash: entry.storePathHash,
+				targetGeneration: entry.targetGeneration,
+				narInfoGeneration: entry.narInfoGeneration,
+				defect: error.defect,
+				failedAttempts: failed.failedAttempts,
+				setAsideAt: now
+			});
+		}
+	}
+
+	private insertUnpublishable(
+		tx: SchemaWriter,
+		values: typeof schema.backfillUnpublishableNarInfos.$inferInsert
+	): void {
+		const table = schema.backfillUnpublishableNarInfos;
+		tx.insert(table)
+			.values(values)
+			.onConflictDoUpdate({
+				target: [table.cacheId, table.storePathHash, table.targetGeneration],
+				set: {
+					narInfoGeneration: values.narInfoGeneration,
+					defect: values.defect,
+					failedAttempts: values.failedAttempts,
+					setAsideAt: values.setAsideAt
+				}
+			})
+			.run();
 	}
 
 	// Publishes every entry, and returns the entries that their stored rows
 	// keep from being published. Such an entry does not keep the others from
 	// being published and signed. A read or a write that fails throws, and so
 	// does a deadline that expires during the loop, in `withDeadlineBudget`:
-	// those are failures of the whole attempt.
+	// those are failures of the whole attempt. The entries in `failedBefore`
+	// come from rows with failures, and are signed again before they are
+	// published.
 	private async publishContinuationEntries(
-		entries: readonly PurgeEntry[]
+		entries: readonly PurgeEntry[],
+		failedBefore: ReadonlySet<PurgeEntry>
 	): Promise<PublicationFailure[]> {
 		const failures: PublicationFailure[] = [];
 
 		for (const entry of entries) {
-			const failure = await this.publishContinuationEntry(entry);
+			const failure = await this.publishContinuationEntry(
+				entry,
+				failedBefore.has(entry)
+			);
 
 			if (failure !== undefined) {
 				failures.push(failure);
@@ -869,7 +1280,8 @@ export class SigningKeysService {
 	}
 
 	private async publishContinuationEntry(
-		entry: PurgeEntry
+		entry: PurgeEntry,
+		hasFailedBefore: boolean
 	): Promise<PublicationFailure | undefined> {
 		const row = this.context.db
 			.select()
@@ -888,15 +1300,9 @@ export class SigningKeysService {
 			return undefined;
 		}
 
-		let cache: ResolvedCache;
+		const cache = this.registeredCache(entry.cacheId);
 
-		try {
-			cache = this.context.cacheRepository.resolvedForId(entry.cacheId);
-		} catch (error) {
-			if (!(error instanceof CacheIdentityMissingError)) {
-				throw error;
-			}
-
+		if (cache === undefined) {
 			return {
 				entry,
 				error: new BackfillEntryInvalidError(
@@ -906,23 +1312,42 @@ export class SigningKeysService {
 			};
 		}
 
-		const blob = await this.narInfoObjects.blobFields(row.narHash);
+		const signed = hasFailedBefore ? await this.signedRow(row, entry) : row;
 
-		if (blob === undefined) {
+		if (signed === undefined) {
 			return undefined;
+		}
+
+		if (signed instanceof BackfillEntryInvalidError) {
+			return { entry, error: signed };
+		}
+
+		const blob = await this.narInfoObjects.blobFields(signed.narHash);
+
+		// Without the blob row the pass cannot write the narinfo object, so the
+		// object that readers are served keeps its old signatures. Recording
+		// the entry as signed would hide it from the key's status.
+		if (blob === undefined) {
+			return {
+				entry,
+				error: new BackfillEntryInvalidError(entry.storePathHash, 'blobState')
+			};
 		}
 
 		let narInfo: NarInfo;
 
 		try {
-			narInfo = this.narInfoObjects.buildNarInfo(row, blob);
+			narInfo = this.narInfoObjects.buildNarInfo(signed, blob);
 			narInfo.render();
 		} catch (error) {
 			return {
 				entry,
 				error: new BackfillEntryInvalidError(
 					entry.storePathHash,
-					narInfoDefect(error)
+					narInfoDefect(error, {
+						narHash: signed.narHash,
+						fileHash: blob.fileHash
+					})
 				)
 			};
 		}
@@ -931,11 +1356,60 @@ export class SigningKeysService {
 			cache,
 			entry.storePathHash,
 			entry.narInfoGeneration,
-			row.narHash,
+			signed.narHash,
 			narInfo
 		);
 
 		return undefined;
+	}
+
+	/**
+	The pending narinfo row of `entry` with the signatures of every signing key
+	over its current fingerprint, or the defect that keeps it from being signed.
+	Publication calls this for the entries of rows with failures. Staging keeps
+	the old signatures of a row that does not parse, and a repair of a row
+	between attempts changes its fingerprint, so the signatures that staging
+	wrote cannot be relied on for such an entry. A settled entry is recorded as
+	signed by the target key. Returns undefined when the row changed while it
+	was being signed.
+	*/
+	private async signedRow(
+		row: NarInfoRow,
+		entry: PurgeEntry
+	): Promise<BackfillEntryInvalidError | NarInfoRow | undefined> {
+		const inputs = this.signatureInputs(row);
+
+		if (inputs instanceof BackfillEntryInvalidError) {
+			return inputs;
+		}
+
+		const sigsJson = JSON.stringify(
+			await this.signaturesFor(
+				inputs.fingerprint,
+				inputs.existing,
+				await this.loadedKeys()
+			)
+		);
+
+		if (sigsJson === row.sigsJson) {
+			return row;
+		}
+
+		const updated = this.context.db
+			.update(schema.narInfos)
+			.set({ sigsJson })
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, entry.cacheId),
+					eq(schema.narInfos.storePathHash, entry.storePathHash),
+					eq(schema.narInfos.generation, entry.narInfoGeneration),
+					eq(schema.narInfos.pendingSignatureGeneration, entry.targetGeneration)
+				)
+			)
+			.returning({ generation: schema.narInfos.generation })
+			.all();
+
+		return updated.length === 0 ? undefined : { ...row, sigsJson };
 	}
 
 	/**
@@ -999,20 +1473,13 @@ export class SigningKeysService {
 			);
 
 			if (failed !== undefined && settlement.kind !== 'missing') {
-				tx.insert(schema.cachePurgeContinuations)
-					.values({
-						id: crypto.randomUUID(),
-						kind: 'backfill',
-						signingKeyId: continuation.signingKeyId,
-						entriesJson: JSON.stringify(failed.entries),
-						createdAt: now,
-						expiresAt: continuation.expiresAt,
-						lastAttemptAt: now,
-						lastError: failed.message,
-						failedAttempts: failed.failedAttempts,
-						priority: failingBackfillPriority
-					})
-					.run();
+				this.recordFailedEntries(
+					tx,
+					continuation.signingKeyId,
+					continuation.expiresAt,
+					failed,
+					now
+				);
 			}
 
 			if (continuation.signingKeyId !== null) {
@@ -1168,8 +1635,9 @@ export class SigningKeysService {
 	tags of the published entries in one request. The page starts with the
 	chosen row and, up to the request's limit of 100 tags, continues with the
 	rows of the same priority after it. An entry is not published when its
-	narinfo cannot be built or rendered from its stored fields, or when its
-	cache is missing from the cache registry. The pass records the published
+	narinfo cannot be built or rendered from its stored fields, when its cache
+	is missing from the cache registry, or when its blob row is missing. The
+	third failure sets the entry aside. The pass records the published
 	entries of each row as signed, and moves the entries that it could not
 	publish to a new row with a `BackfillEntryInvalidError` recorded. It reports `partial`
 	while a backfill row remains, and `runBackfillOnce` then stages more rows
@@ -1236,11 +1704,16 @@ export class SigningKeysService {
 
 		const page = this.backfillPage(continuation);
 		const entries = page.flatMap((part) => part.entries);
+		const failedBefore = new Set(
+			page
+				.filter((part) => part.row.failedAttempts > 0)
+				.flatMap((part) => part.entries)
+		);
 		let failures: PublicationFailure[];
 
 		try {
 			failures = await withDeadlineBudget(criticalSectionBudgetMs, () =>
-				this.publishContinuationEntries(entries)
+				this.publishContinuationEntries(entries, failedBefore)
 			);
 		} catch (error) {
 			await this.recordAttemptFailure(continuation, error, 'resigning', now);
@@ -1304,8 +1777,12 @@ export class SigningKeysService {
 				now
 			);
 
+			const firstFailure = failed?.failures.at(0);
+
 			if (
 				failed !== undefined &&
+				firstFailure !== undefined &&
+				!isSetAside(failed) &&
 				settlement.kind !== 'missing' &&
 				part.row.signingKeyId !== null
 			) {
@@ -1313,7 +1790,7 @@ export class SigningKeysService {
 					part.row.signingKeyId,
 					'resigning',
 					now,
-					failed.message
+					firstFailure.error.message
 				);
 			}
 		}
@@ -1533,13 +2010,7 @@ export class SigningKeysService {
 	): void {
 		this.context.db
 			.update(schema.signingKeyBackfills)
-			.set({
-				state: 'retrying',
-				updatedAt: failedAt,
-				failureOperation: operation,
-				failedAt,
-				failureMessage: message
-			})
+			.set(retryingProgress(operation, failedAt, message))
 			.where(eq(schema.signingKeyBackfills.keyId, keyId))
 			.run();
 	}
@@ -1560,18 +2031,30 @@ export class SigningKeysService {
 		}
 
 		const completedAt = isoTimestamp(new Date());
-		this.context.db
-			.update(schema.signingKeyBackfills)
-			.set({
-				state: 'complete',
-				updatedAt: completedAt,
-				completedAt,
-				failureOperation: sql`null`,
-				failedAt: sql`null`,
-				failureMessage: sql`null`
-			})
-			.where(eq(schema.signingKeyBackfills.keyId, row.keyId))
-			.run();
+		this.context.db.transaction((tx) => {
+			tx.update(schema.signingKeyBackfills)
+				.set({
+					state: 'complete',
+					updatedAt: completedAt,
+					completedAt,
+					failureOperation: sql`null`,
+					failedAt: sql`null`,
+					failureMessage: sql`null`
+				})
+				.where(eq(schema.signingKeyBackfills.keyId, row.keyId))
+				.run();
+			// This backfill signed or set aside every narinfo that an earlier
+			// backfill set aside, and `notSetAside` reads its rows for the
+			// earlier generations too.
+			tx.delete(schema.backfillUnpublishableNarInfos)
+				.where(
+					lt(
+						schema.backfillUnpublishableNarInfos.targetGeneration,
+						row.generation
+					)
+				)
+				.run();
+		});
 
 		return true;
 	}
@@ -1726,10 +2209,19 @@ export class SigningKeysService {
 				throw new SigningKeyBackfillIncompleteError(id);
 			}
 
-			this.context.db
-				.delete(schema.signingKeys)
-				.where(eq(schema.signingKeys.id, id))
-				.run();
+			this.context.db.transaction((tx) => {
+				tx.delete(schema.signingKeys)
+					.where(eq(schema.signingKeys.id, id))
+					.run();
+				tx.delete(schema.backfillUnpublishableNarInfos)
+					.where(
+						eq(
+							schema.backfillUnpublishableNarInfos.targetGeneration,
+							key.generation
+						)
+					)
+					.run();
+			});
 			this.resetKeyCaches();
 
 			return { state: 'absent' as const };
@@ -1778,6 +2270,14 @@ export class SigningKeysService {
 						eq(schema.narInfos.pendingSignatureGeneration, backfill.generation)
 					)
 					.run();
+				tx.delete(schema.backfillUnpublishableNarInfos)
+					.where(
+						eq(
+							schema.backfillUnpublishableNarInfos.targetGeneration,
+							backfill.generation
+						)
+					)
+					.run();
 				tx.delete(schema.signingKeyBackfills)
 					.where(eq(schema.signingKeyBackfills.keyId, id))
 					.run();
@@ -1821,30 +2321,35 @@ export class SigningKeysService {
 	purge waits, or `undefined` when nothing remains. A purge waits until the
 	row from {@link nextBackfillRow} is due, for the shared rate-limit wait and
 	the backfill's own wait after a failed attempt, and for the deployment's
-	backfill pace, as far as this object has learned it.
+	backfill pace, as far as this object has learned it. Staging that a pass
+	left unfinished is due at once, or after the backfill's waits, because a
+	pass that waits for them does not stage.
 
 	The alarm calls this before running the backfill. It reads only this
 	object's local storage, so it makes no D1 call.
 	*/
 	async backfillWorkAt(now: number): Promise<number | undefined> {
-		const next = await this.nextBackfillRow(now);
-
-		if (next !== undefined) {
-			return Math.max(
-				next.dueAt,
-				await this.attemptDueAt(now),
-				(await this.purgePace.knownNextAt()) ?? now
-			);
-		}
-
 		const backfill = this.context.db
-			.select({ keyId: schema.signingKeyBackfills.keyId })
+			.select({ generation: schema.signingKeyBackfills.generation })
 			.from(schema.signingKeyBackfills)
 			.where(ne(schema.signingKeyBackfills.state, 'complete'))
-			.limit(1)
+			.orderBy(schema.signingKeyBackfills.startedAt)
 			.get();
+		const next = await this.nextBackfillRow(now);
 
-		return backfill === undefined ? undefined : now;
+		if (next === undefined) {
+			return backfill === undefined ? undefined : now;
+		}
+
+		if (backfill !== undefined && this.isStagingDue(backfill.generation)) {
+			return Math.max(now, await this.attemptDueAt(now));
+		}
+
+		return Math.max(
+			next.dueAt,
+			await this.attemptDueAt(now),
+			(await this.purgePace.knownNextAt()) ?? now
+		);
 	}
 
 	async runBackfillOnce(): Promise<MaintenanceProgress> {
@@ -1854,14 +2359,9 @@ export class SigningKeysService {
 			return 'stalled';
 		}
 
-		// Waiting for the pace is the scheduled rhythm of the backfill. The alarm
-		// is armed for the end of the wait, and the pass reports no stall.
-		if (purge === 'paced') {
-			await this.armBackfillAlarm();
-
-			return 'progressed';
-		}
-
+		// Waiting for the pace is the scheduled rhythm of the backfill, so a
+		// paced pass reports no stall. It still stages, because `backfillWorkAt`
+		// makes a pass due at once while staging is due.
 		const row = this.context.db
 			.select()
 			.from(schema.signingKeyBackfills)
@@ -1871,7 +2371,7 @@ export class SigningKeysService {
 
 		if (row === undefined || this.completeIfDrained(row)) {
 			// Rows that remain wait for the next request.
-			if (purge === 'partial' || purge === 'turn') {
+			if (['partial', 'turn', 'paced'].includes(purge)) {
 				await this.armBackfillAlarm();
 			}
 
