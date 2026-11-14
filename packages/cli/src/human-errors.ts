@@ -317,6 +317,12 @@ function rpcError(code: string, options: HumanErrorOptions): string {
 		case 'OIDC_TRUST_RULE_CHANGED': {
 			return 'The trust rule changed while this command was running. Review the current rule and run the command again.';
 		}
+		case 'TENANT_OWNER_ISSUER_UNSUPPORTED': {
+			return "A tenant's owner must be a person who signs in with cupboard login, not a GitHub Actions workflow. Create the tenant with the person's identity. The owner can then let the workflow publish with cupboard github setup.";
+		}
+		case 'OIDC_TRUST_REPOSITORY_PIN_REQUIRED': {
+			return 'A trust rule for GitHub Actions must require an exact repository_id claim, or an exact repository_owner_id claim to trust every repository of one owner. Add the claim, then add the rule again. To extend a rule without either claim, add a replacement rule that has one and remove the old rule.';
+		}
 		case 'INSUFFICIENT_STORAGE': {
 			return `The tenant has insufficient storage for this request. ${errors.overQuotaAdvice}`;
 		}

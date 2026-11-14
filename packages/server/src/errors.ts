@@ -483,6 +483,39 @@ export class OidcIssuerTransportRequiredError extends ServerHttpError {
 	}
 }
 
+/**
+A GitHub Actions trust rule that requires neither an exact `repository_id`
+nor an exact `repository_owner_id`. Every repository on GitHub can obtain a
+token with the rule's issuer and audience, so the rule would accept the tokens
+of any repository that satisfy its other claims.
+*/
+export class OidcTrustRepositoryPinRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor() {
+		super(
+			'A GitHub Actions trust rule must require an exact repository_id or repository_owner_id claim'
+		);
+		this.name = 'OidcTrustRepositoryPinRequiredError';
+	}
+}
+
+/**
+A tenant whose owner would be a GitHub Actions identity. The owner rule can
+require only the `sub` claim, which contains at most the repository's name, and
+the rule can be neither removed nor changed.
+*/
+export class TenantOwnerIssuerUnsupportedError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(public readonly issuer: OidcIssuer) {
+		super(
+			"A tenant's owner must be a person who signs in with the CLI, not a GitHub Actions workflow"
+		);
+		this.name = 'TenantOwnerIssuerUnsupportedError';
+	}
+}
+
 export class CommitUpgradeRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.UPGRADE_REQUIRED;
 
@@ -1137,6 +1170,22 @@ export class InsecureTransportError extends OAuthError {
 export abstract class InvalidRequestError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_request';
+}
+
+/**
+A deployment claim with a GitHub Actions ID token. The claim would store a
+control trust rule that has the wildcard grant and requires only the `sub`
+claim, which contains at most the repository's name.
+*/
+export class SignupIssuerUnsupportedError extends InvalidRequestError {
+	readonly problem = 'signup-issuer-unsupported';
+
+	constructor() {
+		super(
+			"The deployment's administrator must be a person who signs in with the CLI, not a GitHub Actions workflow"
+		);
+		this.name = 'SignupIssuerUnsupportedError';
+	}
 }
 
 export class SubjectTokenRequiredError extends InvalidRequestError {

@@ -6,7 +6,10 @@ import {
 	type AuthorizationDetails,
 	isRootOperation
 } from '@cupboard/protocol/grants';
-import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
+import {
+	githubActionsIssuer,
+	type OidcTrustSummary
+} from '@cupboard/protocol/oidc';
 import { selectModelledOidcTrust } from '@cupboard/protocol/oidc-trust-diagnostics';
 import {
 	isClaimSatisfied,
@@ -36,7 +39,6 @@ import {
 	checkReuseViewCacheInfo,
 	type GithubCheckClient
 } from './check.ts';
-import { githubActionsIssuer } from './claims.ts';
 import {
 	parseExactWorkflowReference,
 	pullRequestViewName

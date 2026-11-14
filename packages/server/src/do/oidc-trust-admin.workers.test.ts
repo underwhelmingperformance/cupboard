@@ -489,6 +489,121 @@ describe('oidc-trust admin API', () => {
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
+
+	it.each<{ name: string; claims: OidcTrustAddBodyInput['claims'] }>([
+		{ name: 'only the branch', claims: { ref: 'refs/heads/main' } },
+		{
+			name: 'only the subject',
+			claims: { sub: 'repo:acme/app:ref:refs/heads/main' }
+		},
+		{
+			name: 'a repository ID pattern',
+			claims: { repository_id: { pattern: '^1234$' } }
+		}
+	])(
+		'refuses a GitHub Actions rule that pins $name, without storing it',
+		async ({ claims }) => {
+			const token = await adminToken();
+
+			const response = await addRule(token, { ...additionBody, claims });
+			const body = orpcErrorBodySchema.parse(await response.json());
+			const list = await listRules(token);
+
+			expect({
+				status: response.status,
+				code: body.code,
+				defined: body.defined,
+				rules: rulesById(await list.json())
+			}).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				code: 'OIDC_TRUST_REPOSITORY_PIN_REQUIRED',
+				defined: true,
+				rules: { owner: ownerSummary }
+			});
+		}
+	);
+
+	it.each<{ name: string; body: OidcTrustAddBodyInput }>([
+		{
+			name: 'a GitHub Actions rule with an exact repository ID',
+			body: {
+				...additionBody,
+				claims: { repository_id: '1234', ref: 'refs/heads/main' }
+			}
+		},
+		{
+			name: 'a rule for another issuer without repository claims',
+			body: {
+				...additionBody,
+				issuer: 'https://idp.example.test',
+				claims: { ref: 'refs/heads/main' }
+			}
+		}
+	])('adds $name', async ({ body }) => {
+		const token = await adminToken();
+
+		const response = await addRule(token, body);
+		const summary = oidcTrustSummarySchema.parse(await response.json());
+
+		expect({ status: response.status, summary }).toStrictEqual({
+			status: StatusCodes.OK,
+			summary: oidcTrustSummarySchema.parse({
+				id: summary.id,
+				issuer: body.issuer,
+				audience: body.audience,
+				claims: body.claims,
+				permittedGrants: body.permittedGrants,
+				disabled: false
+			})
+		});
+	});
+
+	it('lists a stored GitHub Actions rule without a repository pin and refuses to extend it', async () => {
+		const token = await adminToken();
+		const stored = oidcTrustSummarySchema.parse({
+			...addedSummary('unpinned'),
+			claims: { ref: 'refs/heads/main' }
+		});
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				'INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+				stored.id,
+				stored.issuer,
+				stored.audience,
+				JSON.stringify(stored.claims),
+				JSON.stringify(stored.permittedGrants),
+				'2999-01-01T00:00:00.000Z'
+			);
+		});
+
+		const extension = await authorisedFetch(
+			`/oidc-trust/${stored.id}/grants`,
+			token,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					expected: stored,
+					permittedGrants: [{ type: 'cupboard_domain', actions: ['gc:run'] }]
+				})
+			}
+		);
+		const body = orpcErrorBodySchema.parse(await extension.json());
+		const list = await listRules(token);
+
+		expect({
+			status: extension.status,
+			code: body.code,
+			defined: body.defined,
+			rules: rulesById(await list.json())
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			code: 'OIDC_TRUST_REPOSITORY_PIN_REQUIRED',
+			defined: true,
+			rules: { owner: ownerSummary, unpinned: stored }
+		});
+	});
 });
 
 async function createCache(

@@ -103,6 +103,7 @@ import {
 	type SubjectNonce,
 	subjectTokenLimits
 } from '../oidc/subject-binding.ts';
+import { warnUnpinnedGithubMatches } from '../oidc/unpinned-github-rule.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
@@ -271,7 +272,7 @@ export class TokenExchangeService {
 			selection.grants ??
 			this.implicitGrants(selection.rule, verified, requested);
 
-		return this.issuedResponse(
+		const response = await this.issuedResponse(
 			logger,
 			verified,
 			binding,
@@ -282,6 +283,21 @@ export class TokenExchangeService {
 				issued_token_type: issuedAccessTokenType
 			}
 		);
+
+		this.logUnpinnedGithubMatches(logger, rules, verified);
+
+		return response;
+	}
+
+	private logUnpinnedGithubMatches(
+		logger: Logger,
+		rules: readonly OidcTrustRule[],
+		verified: VerifiedOidcClaims
+	): void {
+		warnUnpinnedGithubMatches(logger, rules, verified, {
+			plane: 'tenant',
+			tenant: this.context.tenant()
+		});
 	}
 
 	private implicitGrants(
@@ -425,6 +441,7 @@ export class TokenExchangeService {
 			await this.maintenanceStateChanged?.();
 		}
 
+		this.logUnpinnedGithubMatches(logger, currentRules, verified);
 		logger.debug('read access acquired', { resources: facts.length });
 
 		return oauthJsonResponse({

@@ -340,6 +340,14 @@ describe('human error presentation', () => {
 			'The trust rule changed while this command was running. Review the current rule and run the command again.'
 		],
 		[
+			'TENANT_OWNER_ISSUER_UNSUPPORTED',
+			"A tenant's owner must be a person who signs in with cupboard login, not a GitHub Actions workflow. Create the tenant with the person's identity. The owner can then let the workflow publish with cupboard github setup."
+		],
+		[
+			'OIDC_TRUST_REPOSITORY_PIN_REQUIRED',
+			'A trust rule for GitHub Actions must require an exact repository_id claim, or an exact repository_owner_id claim to trust every repository of one owner. Add the claim, then add the rule again. To extend a rule without either claim, add a replacement rule that has one and remove the old rule.'
+		],
+		[
 			'CACHE_NOT_EMPTY',
 			'The cache still contains published paths. Review the contents and remove the paths before removing the cache, or use --force after reviewing the consequences.'
 		]

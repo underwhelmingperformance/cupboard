@@ -153,6 +153,7 @@ export const controlContract = {
 			.route({ method: 'POST', path: '/tenants' })
 			.input(tenantCreateBodySchema)
 			.errors({
+				TENANT_OWNER_ISSUER_UNSUPPORTED: { status: StatusCodes.BAD_REQUEST },
 				TENANT_MEMBERSHIP_UNPUBLISHED: {
 					status: StatusCodes.SERVICE_UNAVAILABLE,
 					data: tenantMembershipUnpublishedErrorDataSchema
@@ -369,6 +370,9 @@ export const controlContract = {
 			.meta({ requires: 'control-oidc-trust:add' })
 			.route({ method: 'POST', path: '/oidc-trust' })
 			.input(controlOidcTrustAddBodySchema)
+			.errors({
+				OIDC_TRUST_REPOSITORY_PIN_REQUIRED: { status: StatusCodes.BAD_REQUEST }
+			})
 			.output(oidcTrustSummarySchema),
 
 		remove: controlProcedure

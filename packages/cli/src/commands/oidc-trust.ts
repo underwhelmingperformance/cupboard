@@ -7,6 +7,7 @@ import { templateSchema, templateVariables } from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	controlOidcTrustAddBodySchema,
+	githubActionsIssuer,
 	type OidcTrustAddBodyInput,
 	oidcTrustAddBodySchema,
 	type OidcTrustListResponse,
@@ -37,7 +38,6 @@ import {
 } from '../errors.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
-import { githubActionsIssuer } from './github/claims.ts';
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,

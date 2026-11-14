@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { claimNameMaxLength, templateMaxLength } from './grants.ts';
 import {
 	controlOidcTrustAddBodySchema,
+	isUnpinnedGithubRule,
 	oidcTrustAddBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
@@ -507,5 +508,73 @@ describe('oidc trust schemas', () => {
 				permittedGrants: [{ type: 'cupboard_unknown' }]
 			}).success
 		).toBe(false);
+	});
+});
+
+describe('isUnpinnedGithubRule', () => {
+	const github = 'https://token.actions.githubusercontent.com';
+
+	it.each<{
+		name: string;
+		rule: Parameters<typeof isUnpinnedGithubRule>[0];
+		expected: boolean;
+	}>([
+		{
+			name: 'a GitHub rule with an exact repository ID',
+			rule: { issuer: github, claims: { repository_id: '1234' } },
+			expected: false
+		},
+		{
+			name: 'a GitHub rule with an exact owner ID',
+			rule: { issuer: github, claims: { repository_owner_id: '5678' } },
+			expected: false
+		},
+		{
+			name: 'a GitHub rule with an exact repository ID and a patterned owner ID',
+			rule: {
+				issuer: github,
+				claims: {
+					repository_id: '1234',
+					repository_owner_id: { pattern: '^[0-9]+$' }
+				}
+			},
+			expected: false
+		},
+		{
+			name: 'a GitHub rule that pins only the branch',
+			rule: { issuer: github, claims: { ref: 'refs/heads/main' } },
+			expected: true
+		},
+		{
+			name: 'a GitHub rule that pins only the subject',
+			rule: {
+				issuer: github,
+				claims: { sub: 'repo:acme/app:ref:refs/heads/main' }
+			},
+			expected: true
+		},
+		{
+			name: 'a GitHub rule with a patterned repository ID',
+			rule: {
+				issuer: github,
+				claims: { repository_id: { pattern: '^1234$' } }
+			},
+			expected: true
+		},
+		{
+			name: 'a GitHub rule with an empty repository ID',
+			rule: { issuer: github, claims: { repository_id: '' } },
+			expected: true
+		},
+		{
+			name: 'a rule for another issuer',
+			rule: {
+				issuer: 'https://gitlab.com',
+				claims: { ref: 'refs/heads/main' }
+			},
+			expected: false
+		}
+	])('reports $name as unpinned: $expected', ({ rule, expected }) => {
+		expect(isUnpinnedGithubRule(rule)).toBe(expected);
 	});
 });

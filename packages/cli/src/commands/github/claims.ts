@@ -1,7 +1,6 @@
-import { audienceSchema } from '../../audience.ts';
+import { githubActionsIssuer } from '@cupboard/protocol/oidc';
 
-export const githubActionsIssuer =
-	'https://token.actions.githubusercontent.com';
+import { audienceSchema } from '../../audience.ts';
 
 export type GithubActionsClaims = Readonly<Record<string, string>>;
 

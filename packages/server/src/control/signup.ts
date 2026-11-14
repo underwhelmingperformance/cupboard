@@ -1,4 +1,5 @@
 import {
+	githubActionsIssuer,
 	type OidcAudience,
 	oidcAudienceSchema,
 	type OidcIssuer,
@@ -19,6 +20,7 @@ import { z } from 'zod';
 import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
 import {
 	SignupForbiddenError,
+	SignupIssuerUnsupportedError,
 	SubjectTokenAudienceInvalidError,
 	SubjectTokenIssuerInvalidError,
 	SubjectTokenNotJwtError,
@@ -56,7 +58,8 @@ const localDevelopmentVerifier = new InboundTokenVerifier(
 // caller without it cannot make the Worker fetch anything.
 //
 // The token's `iss` and `sub` identify the principal, which becomes the global
-// admin. The seeded control trust rule pins `iss`, `sub` and the single `aud`,
+// admin. A GitHub Actions token is refused: every repository on GitHub can
+// obtain one, and the seeded rule could pin only its `sub`. The seeded control trust rule pins `iss`, `sub` and the single `aud`,
 // and lets the principal obtain admin tokens at `/token`. The response also
 // includes a control session issued through that rule, because a nonce-bound
 // ID token is consumed here and `/token` would refuse it.
@@ -78,6 +81,11 @@ export async function handleSignup(
 
 	const isLoopbackAllowed = canUseLoopbackHttp(env);
 	const issuer = tokenIssuer(claims, isLoopbackAllowed);
+
+	if (issuer === githubActionsIssuer) {
+		throw new SignupIssuerUnsupportedError();
+	}
+
 	const audience = tokenAudience(claims);
 	const verified = await verifySignupToken(
 		issuer,
