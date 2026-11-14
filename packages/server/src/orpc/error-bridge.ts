@@ -24,6 +24,7 @@ import {
 	CacheRetentionRuleLimitExceededError,
 	CacheRetirementTtlRequiredError,
 	ControlDatabaseMigrationPendingError,
+	OidcTrustRepositoryPinRequiredError,
 	OidcTrustRuleChangedError,
 	RootBatchLimitExceededError,
 	ServerHttpError,
@@ -32,6 +33,7 @@ import {
 	SigningKeyRotationInProgressError,
 	TenantMembershipUnpublishedError,
 	TenantOffboardingError,
+	TenantOwnerIssuerUnsupportedError,
 	TenantQuotaBelowUsageError,
 	UploadRequestLimitExceededError
 } from '../errors.ts';
@@ -92,6 +94,20 @@ export function bridgedError(
 
 	if (error instanceof OidcTrustRuleChangedError) {
 		return new ORPCError('OIDC_TRUST_RULE_CHANGED', {
+			status: error.status,
+			message: error.message
+		});
+	}
+
+	if (error instanceof OidcTrustRepositoryPinRequiredError) {
+		return new ORPCError('OIDC_TRUST_REPOSITORY_PIN_REQUIRED', {
+			status: error.status,
+			message: error.message
+		});
+	}
+
+	if (error instanceof TenantOwnerIssuerUnsupportedError) {
+		return new ORPCError('TENANT_OWNER_ISSUER_UNSUPPORTED', {
 			status: error.status,
 			message: error.message
 		});

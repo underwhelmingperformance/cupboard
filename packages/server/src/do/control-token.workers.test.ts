@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { startCapture } from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
@@ -51,6 +52,7 @@ import {
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
+import { unpinnedGithubRuleMatchedMessage } from '../oidc/unpinned-github-rule.ts';
 import {
 	controlFetch,
 	currentOrigin,
@@ -193,9 +195,15 @@ async function trustedControlIdentity(
 		token whose audience is the deployment URL never has it.
 		*/
 		readonly isNonceBound?: boolean;
+		/**
+		The issuer of the token and of the rule. By default a new issuer for
+		each identity.
+		*/
+		readonly issuer?: string;
 	} = {}
 ): Promise<TrustedControlIdentity> {
-	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
+	const issuer =
+		token.issuer ?? `https://idp-${crypto.randomUUID()}.example.test`;
 	const { publicKey, privateKey } = await generateKeyPair('RS256', {
 		extractable: true
 	});
@@ -1183,6 +1191,58 @@ describe('control plane refresh sessions', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => {
 		vi.unstubAllGlobals();
+	});
+
+	it('exchanges a token through a stored GitHub Actions control rule that pins only the subject, and logs the match', async () => {
+		const identity = await trustedControlIdentity(
+			'JWT',
+			[{ type: 'cupboard_wildcard' }],
+			[],
+			'cupboard-control',
+			{
+				issuer: 'https://token.actions.githubusercontent.com',
+				claims: { repository_id: '1234', repository_owner_id: '5678' }
+			}
+		);
+		const capture = startCapture();
+		let response: Response;
+
+		try {
+			response = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: identity.token,
+				subject_token_type: subjectTokenTypeIdToken
+			});
+		} finally {
+			capture.stop();
+		}
+
+		const records = capture.logs
+			.filter((entry) => entry.message === unpinnedGithubRuleMatchedMessage)
+			.map(({ level, properties: { requestId, ...properties } }) => ({
+				level,
+				requestId: typeof requestId,
+				properties
+			}));
+
+		expect({ status: response.status, records }).toStrictEqual({
+			status: StatusCodes.OK,
+			records: [
+				{
+					level: 'warning',
+					requestId: 'string',
+					properties: {
+						method: 'POST',
+						path: '/token',
+						plane: 'control',
+						rule: identity.rule,
+						issuer: 'https://token.actions.githubusercontent.com',
+						repositoryId: '1234',
+						repositoryOwnerId: '5678'
+					}
+				}
+			]
+		});
 	});
 
 	it('issues a session with an ID token exchange and rotates it', async () => {

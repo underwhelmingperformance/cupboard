@@ -1,3 +1,4 @@
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
@@ -35,7 +36,10 @@ export const oidcTrustContract = {
 		.meta({ requires: 'oidc-trust:add', workBound: 'time' })
 		.route({ method: 'POST', path: '/oidc-trust' })
 		.input(oidcTrustAddBodySchema)
-		.errors({ CACHE_GRANT_MIGRATION_PENDING: { status: 409 } })
+		.errors({
+			OIDC_TRUST_REPOSITORY_PIN_REQUIRED: { status: StatusCodes.BAD_REQUEST },
+			CACHE_GRANT_MIGRATION_PENDING: { status: 409 }
+		})
 		.output(oidcTrustSummarySchema),
 
 	extend: baseProcedure
@@ -43,6 +47,7 @@ export const oidcTrustContract = {
 		.route({ method: 'POST', path: '/oidc-trust/{id}/grants' })
 		.input(oidcTrustExtendBodySchema.extend({ id: trustRuleIdSchema }))
 		.errors({
+			OIDC_TRUST_REPOSITORY_PIN_REQUIRED: { status: StatusCodes.BAD_REQUEST },
 			OIDC_TRUST_RULE_CHANGED: { status: 409 },
 			CACHE_GRANT_MIGRATION_PENDING: { status: 409 }
 		})

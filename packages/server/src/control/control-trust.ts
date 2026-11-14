@@ -7,6 +7,7 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	claimMatchSchema,
+	isUnpinnedGithubRule,
 	oidcAudienceSchema,
 	oidcIssuerSchema,
 	type OidcTrustAddBody,
@@ -28,6 +29,7 @@ import { readRecordedTransitions } from '../db/deployment-transitions.ts';
 import {
 	ControlTrustSubjectRequiredError,
 	OidcIssuerTransportRequiredError,
+	OidcTrustRepositoryPinRequiredError,
 	OidcTrustRuleNotFoundError,
 	StoredControlTrustInvalidError
 } from '../errors.ts';
@@ -254,6 +256,10 @@ export async function addControlTrust(
 	// issuer membership alone.
 	if (body.claims.sub === undefined || body.claims.sub === '') {
 		throw new ControlTrustSubjectRequiredError();
+	}
+
+	if (isUnpinnedGithubRule(body)) {
+		throw new OidcTrustRepositoryPinRequiredError();
 	}
 
 	const id = trustRuleIdSchema.parse(crypto.randomUUID());

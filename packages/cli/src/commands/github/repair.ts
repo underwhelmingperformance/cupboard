@@ -8,6 +8,7 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
+	githubActionsIssuer,
 	type OidcTrustAddBodyInput,
 	type OidcTrustExtendBodyInput,
 	type OidcTrustSummary,
@@ -59,7 +60,6 @@ import {
 import { type ReuseViewClient } from '../reuse-view.ts';
 
 import { activeMatcherRules, type GithubCheckClient } from './check.ts';
-import { githubActionsIssuer } from './claims.ts';
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,

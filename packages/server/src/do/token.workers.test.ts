@@ -73,6 +73,7 @@ import {
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
+import { unpinnedGithubRuleMatchedMessage } from '../oidc/unpinned-github-rule.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	adminGrants,
@@ -682,6 +683,110 @@ describe('POST /token', () => {
 		const exchanged = await exchange(subjectToken);
 
 		expect(exchanged.status).toBe(StatusCodes.OK);
+	});
+
+	it.each<{
+		name: string;
+		scope: 'admin' | 'read';
+		form: Readonly<Record<string, string>>;
+	}>([
+		{
+			name: 'a token exchange',
+			scope: 'admin',
+			form: { grant_type: tokenExchangeGrantType }
+		},
+		{
+			name: 'a read acquisition',
+			scope: 'read',
+			form: {
+				grant_type: readAccessGrantType,
+				read_resources: JSON.stringify([
+					{
+						type: 'cupboard_cache',
+						cache: { kind: 'default' },
+						mode: 'content'
+					}
+				])
+			}
+		}
+	])(
+		'logs $name through a stored GitHub Actions rule without a repository pin',
+		async ({ scope, form }) => {
+			const subjectToken = await installTrustedIdp(scope, {
+				issuer: 'https://token.actions.githubusercontent.com',
+				claims: { repository_id: '1234', repository_owner_id: '5678' }
+			});
+			const capture = startCapture();
+			let response: Response;
+
+			try {
+				response = await postToken({
+					...form,
+					subject_token: subjectToken,
+					subject_token_type: subjectTokenTypeIdToken
+				});
+			} finally {
+				capture.stop();
+			}
+
+			const records = capture.logs
+				.filter((entry) => entry.message === unpinnedGithubRuleMatchedMessage)
+				.map((entry) => ({ level: entry.level, properties: entry.properties }));
+			const serialised = JSON.stringify(capture.logs);
+
+			expect({ status: response.status, records }).toStrictEqual({
+				status: StatusCodes.OK,
+				records: [
+					{
+						level: 'warning',
+						properties: {
+							method: 'POST',
+							path: '/token',
+							plane: 'tenant',
+							tenant: fixtureTenant,
+							rule: `${scope}-rule`,
+							issuer: 'https://token.actions.githubusercontent.com',
+							repositoryId: '1234',
+							repositoryOwnerId: '5678'
+						}
+					}
+				]
+			});
+			expect(serialised).not.toContain(subjectToken);
+		}
+	);
+
+	it('does not log a repository-pin warning for an exchange through a pinned GitHub Actions rule', async () => {
+		const subjectToken = await installTrustedIdp('admin', {
+			issuer: 'https://token.actions.githubusercontent.com',
+			claims: { repository_id: '1234', repository_owner_id: '5678' }
+		});
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				'UPDATE oidc_trust SET claims_json = ? WHERE id = ?',
+				JSON.stringify({ sub: 'alice', repository_id: '1234' }),
+				'admin-rule'
+			);
+		});
+
+		const capture = startCapture();
+		let exchanged: SuccessfulTokenExchange;
+
+		try {
+			exchanged = await exchange(subjectToken);
+		} finally {
+			capture.stop();
+		}
+
+		const records = capture.logs.filter(
+			(entry) => entry.message === unpinnedGithubRuleMatchedMessage
+		);
+
+		expect({ status: exchanged.status, records }).toStrictEqual({
+			status: StatusCodes.OK,
+			records: []
+		});
 	});
 
 	it('does not relabel an external access JWT as an ID token', async () => {

@@ -48,6 +48,48 @@ const claimPatternSchema = z.strictObject({
 export const claimMatchSchema = z.union([z.string(), claimPatternSchema]);
 export type ClaimMatch = z.infer<typeof claimMatchSchema>;
 
+/**
+The default issuer of GitHub Actions ID tokens. GitHub signs the tokens of
+every repository on github.com with this issuer, and each workflow chooses the
+audience of its token. A GitHub Enterprise Cloud enterprise can have an issuer
+of its own, and GitHub Enterprise Server uses its host's. Only that
+enterprise's or that server's repositories receive tokens from those issuers.
+*/
+export const githubActionsIssuer =
+	'https://token.actions.githubusercontent.com';
+
+// GitHub assigns these numeric IDs to a repository and to its owner. They do
+// not change when the repository or the owner is renamed, so a new repository
+// with an old name does not inherit trust.
+const githubRepositoryPinClaims = [
+	'repository_id',
+	'repository_owner_id'
+] as const;
+
+/**
+Whether a trust rule accepts GitHub Actions tokens without requiring an exact
+`repository_id` or an exact `repository_owner_id` claim. Any repository on
+GitHub can request a token with the rule's issuer and audience, so such a rule
+accepts the tokens of every repository that satisfy its other claims.
+
+An exact `repository_owner_id` on its own pins the rule to every repository of
+that owner. An organisation can choose this deliberately.
+*/
+export function isUnpinnedGithubRule(rule: {
+	readonly issuer: string;
+	readonly claims: Readonly<Record<string, ClaimMatch>>;
+}): boolean {
+	if (rule.issuer !== githubActionsIssuer) {
+		return false;
+	}
+
+	return githubRepositoryPinClaims.every((claim) => {
+		const match = rule.claims[claim];
+
+		return typeof match !== 'string' || match === '';
+	});
+}
+
 // RFC 8693 token exchange issues the first Cupboard token in a session from an
 // external OIDC ID token. The response reports it as an access token.
 export const tokenExchangeGrantType =

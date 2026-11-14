@@ -25,6 +25,7 @@ import { enforceClaimSecret, handleSignup } from '../control/signup.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	SignupForbiddenError,
+	SignupIssuerUnsupportedError,
 	SubjectTokenAudienceInvalidError,
 	SubjectTokenIssuerInvalidError,
 	SubjectTokenNotJwtError,
@@ -541,6 +542,38 @@ describe('control plane POST /signup', () => {
 			status: StatusCodes.BAD_REQUEST,
 			problem: 'subject-token-invalid',
 			isAudienceError: true,
+			fetched: [],
+			admin: undefined
+		});
+	});
+
+	it('refuses a GitHub Actions identity as the admin, before discovery', async () => {
+		const idp = await stubIssuer('https://token.actions.githubusercontent.com');
+		const form = {
+			subject_token: await idp.sign({
+				subject: 'repo:acme/infra:ref:refs/heads/main',
+				audience: currentOrigin(),
+				claims: { repository_id: '1234', repository_owner_id: '5678' }
+			}),
+			claim_secret: claimSecret
+		};
+		const response = await postSignup(form);
+		const body = oauthErrorShape(await response.json());
+		const { admin } = await seededAdmin();
+		const error = await signupError(form);
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem,
+			isIssuerRefusal: error instanceof SignupIssuerUnsupportedError,
+			fetched: idp.fetched,
+			admin
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem: 'signup-issuer-unsupported',
+			isIssuerRefusal: true,
 			fetched: [],
 			admin: undefined
 		});

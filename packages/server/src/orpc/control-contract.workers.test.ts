@@ -368,7 +368,11 @@ describe('control contract round trip', () => {
 		const added = await client.oidcTrust.add({
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cupboard.example/control',
-			claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+			claims: {
+				sub: 'repo:acme/provision:ref:refs/heads/main',
+				repository_id: '1234',
+				repository_owner_id: '5678'
+			},
 			permittedGrants: [
 				{
 					type: 'cupboard_tenant',
@@ -521,7 +525,11 @@ describe('control contract round trip', () => {
 				const added = await client.oidcTrust.add({
 					issuer: 'https://token.actions.githubusercontent.com',
 					audience: 'https://cupboard.example/control',
-					claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+					claims: {
+						sub: 'repo:acme/provision:ref:refs/heads/main',
+						repository_id: '1234',
+						repository_owner_id: '5678'
+					},
 					permittedGrants: controlRuleGrants
 				});
 				const row = await env.CUPBOARD_DB.prepare(
@@ -561,6 +569,31 @@ describe('control contract round trip', () => {
 
 		expect(error).toBeInstanceOf(ORPCError);
 		expect(error).toMatchObject({ status: StatusCodes.BAD_REQUEST });
+	});
+
+	it('refuses a GitHub Actions control rule that pins only the subject, without storing it', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const before = await client.oidcTrust.list();
+		const [error, , isDefined] = await safe(
+			client.oidcTrust.add({
+				issuer: 'https://token.actions.githubusercontent.com',
+				audience: 'https://cupboard.example/control',
+				claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+				permittedGrants: [{ type: 'cupboard_wildcard' }]
+			})
+		);
+		const after = await client.oidcTrust.list();
+		const refusal = isDefined
+			? { code: error.code, status: error.status }
+			: error;
+
+		expect({ refusal, after }).toStrictEqual({
+			refusal: {
+				code: 'OIDC_TRUST_REPOSITORY_PIN_REQUIRED',
+				status: StatusCodes.BAD_REQUEST
+			},
+			after: before
+		});
 	});
 
 	it('replaces a legacy-normalised control issuer through exact add and remove operations', async () => {
@@ -702,6 +735,34 @@ describe('control contract round trip', () => {
 		const [error] = await safe(client.tenants.list({ cursor: 'acme' }));
 
 		expect(error).toMatchObject({ code: 'BAD_REQUEST' });
+	});
+
+	it('refuses a tenant whose owner issuer is GitHub Actions, without creating it', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const [error, , isDefined] = await safe(
+			client.tenants.create({
+				id: 'acme',
+				defaultCacheAccess: 'private',
+				ownerIssuer: 'https://token.actions.githubusercontent.com',
+				ownerSubject: 'repo:acme/app:ref:refs/heads/main',
+				ownerAudience: 'https://cupboard.example/t/acme'
+			})
+		);
+		const listed = await client.tenants.list();
+		const refusal = isDefined
+			? { code: error.code, status: error.status }
+			: error;
+
+		expect({
+			refusal,
+			listed: listed.tenants.some((entry) => entry.id === 'acme')
+		}).toStrictEqual({
+			refusal: {
+				code: 'TENANT_OWNER_ISSUER_UNSUPPORTED',
+				status: StatusCodes.BAD_REQUEST
+			},
+			listed: false
+		});
 	});
 
 	it('returns TENANT_OFFBOARDING when suspending or resuming an offboarding tenant', async () => {

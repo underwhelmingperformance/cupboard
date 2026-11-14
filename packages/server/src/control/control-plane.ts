@@ -11,6 +11,7 @@ import {
 	type InstanceSummary
 } from '@cupboard/protocol/instance';
 import {
+	githubActionsIssuer,
 	issuedAccessTokenType,
 	type OidcAudience,
 	oidcAudienceSchema,
@@ -94,6 +95,7 @@ import {
 	SubjectTokenRequiredError,
 	SubjectTokenVerificationFailedError,
 	TenantMembershipUnpublishedError,
+	TenantOwnerIssuerUnsupportedError,
 	UnauthenticatedError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError,
@@ -116,6 +118,7 @@ import {
 	subjectBinding,
 	subjectTokenLimits
 } from '../oidc/subject-binding.ts';
+import { warnUnpinnedGithubMatches } from '../oidc/unpinned-github-rule.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 import {
@@ -320,14 +323,16 @@ export async function controlTokenExchange(
 		exchange
 	);
 
-	return oauthJsonResponse(
-		await issueControlSession(request, env, {
-			verified,
-			binding,
-			rules,
-			requested: parseRequestedGrants(exchange.authorization_details)
-		})
-	);
+	const session = await issueControlSession(request, env, {
+		verified,
+		binding,
+		rules,
+		requested: parseRequestedGrants(exchange.authorization_details)
+	});
+
+	warnUnpinnedGithubMatches(logger, rules, verified, { plane: 'control' });
+
+	return oauthJsonResponse(session);
 }
 
 interface ControlSessionRequest {
@@ -789,6 +794,10 @@ export async function controlTenantCreate(
 ): Promise<TenantSummary> {
 	if (!isAllowedIssuerTransport(body.ownerIssuer, canUseLoopbackHttp(env))) {
 		throw new OidcIssuerTransportRequiredError(body.ownerIssuer);
+	}
+
+	if (body.ownerIssuer === githubActionsIssuer) {
+		throw new TenantOwnerIssuerUnsupportedError(body.ownerIssuer);
 	}
 
 	const database = sharedDatabase(env);

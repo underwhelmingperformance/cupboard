@@ -1,6 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import { isDeepEqual } from '@cupboard/protocol/deep-equal';
 import {
+	isUnpinnedGithubRule,
 	type OidcAudience,
 	type OidcIssuer,
 	oidcIssuerSchema,
@@ -27,6 +28,7 @@ import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import {
 	OidcIssuerTransportRequiredError,
+	OidcTrustRepositoryPinRequiredError,
 	OidcTrustRuleChangedError,
 	OidcTrustRuleNotFoundError,
 	OwnerConfigurationInvalidError,
@@ -196,6 +198,10 @@ export class OidcTrustService {
 			throw new OidcIssuerTransportRequiredError(body.issuer);
 		}
 
+		if (isUnpinnedGithubRule(body)) {
+			throw new OidcTrustRepositoryPinRequiredError();
+		}
+
 		const id = trustRuleIdSchema.parse(crypto.randomUUID());
 		const createdAt = isoTimestamp(new Date());
 		const permittedGrantsJson = await this.grantSpelling.permittedGrantsJson(
@@ -234,6 +240,10 @@ export class OidcTrustService {
 	): Promise<OidcTrustSummary> {
 		if (id === ownerRuleId) {
 			throw new OwnerRuleImmutableError(id);
+		}
+
+		if (isUnpinnedGithubRule(body.expected)) {
+			throw new OidcTrustRepositoryPinRequiredError();
 		}
 
 		const grants = [...body.expected.permittedGrants];

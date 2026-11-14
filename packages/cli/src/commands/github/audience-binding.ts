@@ -1,4 +1,5 @@
 import { canonicalHref, withoutTrailingSlashes } from '@cupboard/nix-store/url';
+import { githubActionsIssuer } from '@cupboard/protocol/oidc';
 import {
 	isClaimSatisfied,
 	type OidcTrustRule
@@ -6,8 +7,6 @@ import {
 import { type Reporter } from '@cupboard/reporter';
 
 import { type RepositoryIdentity } from '../oidc-trust/github.ts';
-
-import { githubActionsIssuer } from './claims.ts';
 
 /**
 A tenant accepts a job token only when its audience is the tenant URL. A job
