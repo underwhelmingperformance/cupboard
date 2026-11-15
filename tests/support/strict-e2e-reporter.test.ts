@@ -2,12 +2,13 @@ import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 
 import { withTemporaryDirectory } from './filesystem.ts';
 
 const vitestEntry = path.resolve('node_modules/vitest/vitest.mjs');
 const reporterPath = path.resolve('tests/support/strict-e2e-reporter.ts');
+const hangLimitsPath = path.resolve('tests/support/hang-limits.ts');
 
 describe('strict end-to-end results', () => {
 	it.each([
@@ -44,16 +45,17 @@ describe('strict end-to-end results', () => {
 					);
 					await writeFile(
 						configPath,
-						`export default { test: { root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: ['default', ${JSON.stringify(reporterPath)}], maxWorkers: 1 } };\n`
+						`import { hangLimits } from ${JSON.stringify(hangLimitsPath)};\nexport default { test: { ...hangLimits, root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: ['default', ${JSON.stringify(reporterPath)}], maxWorkers: 1 } };\n`
 					);
 					const child = spawn(
 						process.execPath,
 						[vitestEntry, 'run', '--config', configPath],
-						{
-							stdio: ['ignore', 'pipe', 'pipe'],
-							signal: AbortSignal.timeout(30_000)
-						}
+						{ stdio: ['ignore', 'pipe', 'pipe'] }
 					);
+					// A child Vitest that hangs outlives the test unless it is killed.
+					onTestFinished(() => {
+						child.kill();
+					});
 					const output: Buffer[] = [];
 					child.stdout.on('data', (chunk: Buffer) => {
 						output.push(chunk);
