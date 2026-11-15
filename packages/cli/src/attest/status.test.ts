@@ -10,13 +10,13 @@ import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { getResponse, http, type HttpHandler, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
 	destroyAfterHeaders,
 	loopbackServer
 } from '../../../../tests/support/loopback-server.ts';
-import { StalledRequestTimers } from '../../../../tests/support/stalled-request.ts';
+import { ManualDeadlineTimer } from '../../../../tests/support/manual-deadline-timer.ts';
 import { cliExitCode } from '../cli.ts';
 import { CupboardHttpError } from '../errors.ts';
 
@@ -428,12 +428,13 @@ describe('attestation discovery client', () => {
 			storePathHashSchema.parse(index.toString(2).padStart(32, '0'))
 		);
 		const requests: unknown[] = [];
-		const timers = StalledRequestTimers.start();
+		const deadlines = new ManualDeadlineTimer(probeDeadlineMs);
+		const stalled = Promise.withResolvers<undefined>();
 		use(
 			http.post(`${url.href}/api/v1/attestation-info`, async ({ request }) => {
 				requests.push(await request.json());
 				if (requests.length === 2) {
-					timers.markStalled();
+					stalled.resolve(undefined);
 
 					return Promise.withResolvers<Response>().promise;
 				}
@@ -449,20 +450,21 @@ describe('attestation discovery client', () => {
 			})
 		);
 
-		try {
-			const pending = readAttestationInfo(
-				{ ...options, storePathHashes: hashes },
-				mockedFetch
-			);
-			const settled = expect(pending).resolves.toStrictEqual(
-				hashes.map((storePathHash) => ({ storePathHash, status: 'missing' }))
-			);
-			await timers.untilOnlyStalledRequestPending();
-			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
-			await settled;
-		} finally {
-			timers.stop();
-		}
+		const pending = readAttestationInfo(
+			{
+				...options,
+				storePathHashes: hashes,
+				random: () => 0,
+				deadlineTimer: deadlines.arm
+			},
+			mockedFetch
+		);
+		await Promise.race([stalled.promise, pending]);
+		deadlines.expireOnly();
+
+		expect(await pending).toStrictEqual(
+			hashes.map((storePathHash) => ({ storePathHash, status: 'missing' }))
+		);
 
 		const second = {
 			storePathHashes: hashes.slice(32),

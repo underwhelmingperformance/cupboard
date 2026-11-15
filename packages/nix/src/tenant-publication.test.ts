@@ -10,7 +10,8 @@ import { trace } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { StalledRequestTimers } from '../../../tests/support/stalled-request.ts';
+import { ManualDeadlineTimer } from '../../../tests/support/manual-deadline-timer.ts';
+import { stalledResponse } from '../../../tests/support/stalled-request.ts';
 
 import {
 	tenantDependencyReferences,
@@ -359,7 +360,8 @@ describe('tenantDependencyReferences', () => {
 		'sends a $mode request again after it hangs past the deadline and keeps the input order',
 		async ({ capability, stalledRequest }) => {
 			const requests: string[] = [];
-			const timers = StalledRequestTimers.start();
+			const deadlines = new ManualDeadlineTimer(probeDeadlineMs);
+			const stalled = Promise.withResolvers<AbortSignal | null | undefined>();
 			const headers = { 'x-cupboard-read-capabilities': capability };
 			const respond = (
 				request: string,
@@ -371,7 +373,9 @@ describe('tenantDependencyReferences', () => {
 					request === stalledRequest &&
 					requests.indexOf(request) === requests.length - 1
 				) {
-					return timers.stalledResponse(signal);
+					stalled.resolve(signal);
+
+					return stalledResponse(signal);
 				}
 				return Promise.resolve(response());
 			};
@@ -408,28 +412,29 @@ describe('tenantDependencyReferences', () => {
 				);
 			};
 
-			try {
-				const operation = tenantDependencyReferences(dependencies, {
-					sources: [{ url: destination, paths: [] }],
-					fetch: fetchMetadata
-				});
-				const settled = expect(operation).resolves.toStrictEqual(
-					dependencies
-						.filter((path) => heldDependencies.has(path))
-						.map((storePath) => ({
-							storePath,
-							source: destination.href,
-							narinfo: narinfo(storePath),
-							kind: 'intermediate'
-						}))
-				);
-				await timers.untilOnlyStalledRequestPending();
-				await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
-				await settled;
-			} finally {
-				timers.stop();
-			}
+			const operation = tenantDependencyReferences(dependencies, {
+				sources: [{ url: destination, paths: [] }],
+				fetch: fetchMetadata,
+				random: () => 0,
+				deadlineTimer: deadlines.arm
+			});
+			const finishedFirst = (async (): Promise<never> => {
+				await operation;
 
+				throw new Error('The operation finished before a request stalled');
+			})();
+			deadlines.expire(await Promise.race([stalled.promise, finishedFirst]));
+
+			expect(await operation).toStrictEqual(
+				dependencies
+					.filter((path) => heldDependencies.has(path))
+					.map((storePath) => ({
+						storePath,
+						source: destination.href,
+						narinfo: narinfo(storePath),
+						kind: 'intermediate'
+					}))
+			);
 			expect(
 				requests.filter((request) => request === stalledRequest)
 			).toStrictEqual([stalledRequest, stalledRequest]);

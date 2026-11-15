@@ -30,7 +30,8 @@ import {
 	destroyAfterHeaders,
 	loopbackServer
 } from '../../tests/support/loopback-server.ts';
-import { StalledRequestTimers } from '../../tests/support/stalled-request.ts';
+import { ManualDeadlineTimer } from '../../tests/support/manual-deadline-timer.ts';
+import { stalledResponse } from '../../tests/support/stalled-request.ts';
 
 import {
 	CacheAvailabilityQueryError,
@@ -1147,33 +1148,32 @@ describe('availableCachePaths', () => {
 
 	it('sends an availability request again after it hangs past the deadline', async () => {
 		const bodies: string[] = [];
-		const timers = StalledRequestTimers.start();
+		const deadlines = new ManualDeadlineTimer(probeDeadlineMs);
+		const stalled = Promise.withResolvers<undefined>();
 		const fetcher: typeof fetch = (_input, init) => {
 			bodies.push(typeof init?.body === 'string' ? init.body : '');
 			if (bodies.length === 1) {
-				return timers.stalledResponse(init?.signal);
+				stalled.resolve(undefined);
+
+				return stalledResponse(init?.signal);
 			}
 			return Promise.resolve(
 				Response.json({ missingStorePathHashes: [StorePath.hash(secondPath)] })
 			);
 		};
 
-		try {
-			const pending = availableCachePaths({
-				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache(),
-				paths: [firstPath, secondPath],
-				fetcher
-			});
-			const settled = expect(pending).resolves.toStrictEqual(
-				new Set([firstPath])
-			);
-			await timers.untilOnlyStalledRequestPending();
-			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
-			await settled;
-		} finally {
-			timers.stop();
-		}
+		const pending = availableCachePaths({
+			baseUrl: new URL('https://cupboard.example/t/acme'),
+			cache: namedCache(),
+			paths: [firstPath, secondPath],
+			fetcher,
+			random: () => 0,
+			deadlineTimer: deadlines.arm
+		});
+		await Promise.race([stalled.promise, pending]);
+		deadlines.expireOnly();
+
+		expect(await pending).toStrictEqual(new Set([firstPath]));
 
 		const body = JSON.stringify({
 			storePathHashes: [StorePath.hash(firstPath), StorePath.hash(secondPath)]

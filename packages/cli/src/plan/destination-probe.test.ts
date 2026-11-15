@@ -1,9 +1,10 @@
 import { cacheNameSchema, storePathSchema } from '@cupboard/nix-store/scalars';
 import { readUserSchema } from '@cupboard/shared/http';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { StalledRequestTimers } from '../../../../tests/support/stalled-request.ts';
+import { ManualDeadlineTimer } from '../../../../tests/support/manual-deadline-timer.ts';
+import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
 
 import { cacheReferenceSource, tenantProbesFor } from './destination-probe.ts';
 
@@ -194,30 +195,30 @@ it('sends an availability request again after it hangs past the deadline', async
 	const missingHash = 'zyxwvsrqpnmlkjihgfdcba9876543210';
 	const missingPath = storePathSchema.parse(`/nix/store/${missingHash}-gone`);
 	const bodies: string[] = [];
-	const timers = StalledRequestTimers.start();
+	const deadlines = new ManualDeadlineTimer(probeDeadlineMs);
+	const stalled = Promise.withResolvers<undefined>();
 	const probes = tenantProbesFor({
 		baseUrl,
 		cache: { kind: 'default' },
 		fetcher: (_input, init) => {
 			bodies.push(typeof init?.body === 'string' ? init.body : '');
 			if (bodies.length === 1) {
-				return timers.stalledResponse(init?.signal);
+				stalled.resolve(undefined);
+
+				return stalledResponse(init?.signal);
 			}
 			return Promise.resolve(
 				Response.json({ missingStorePathHashes: [missingHash] })
 			);
-		}
+		},
+		probe: { deadlineTimer: deadlines.arm, random: () => 0 }
 	});
 
-	try {
-		const pending = probes.destinationServed([appPath, missingPath]);
-		const settled = expect(pending).resolves.toStrictEqual(new Set([appPath]));
-		await timers.untilOnlyStalledRequestPending();
-		await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
-		await settled;
-	} finally {
-		timers.stop();
-	}
+	const pending = probes.destinationServed([appPath, missingPath]);
+	await Promise.race([stalled.promise, pending]);
+	deadlines.expireOnly();
+
+	expect(await pending).toStrictEqual(new Set([appPath]));
 
 	const body = JSON.stringify({ storePathHashes: [appHash, missingHash] });
 	expect(bodies).toStrictEqual([body, body]);
