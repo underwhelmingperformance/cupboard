@@ -250,6 +250,10 @@ export interface BuildPushDependencies {
 	readonly settledTargets?: (
 		targets: readonly StorePathString[]
 	) => Promise<void> | void;
+	/**
+	Called when the build has finished and the out-links of its targets exist.
+	*/
+	readonly buildFinished?: () => void;
 }
 
 /**
@@ -644,6 +648,7 @@ async function runProtectedStreamedBuildPush(
 				targetLinkDirectory
 			)
 		);
+		dependencies.buildFinished?.();
 		const exit = buildExit(childExit, attempts);
 
 		// Every helper has connected by the time the child exits, though its
@@ -1314,6 +1319,7 @@ async function runReconciledLocalBuildPush(
 				outLinkDirectory
 			)
 		);
+		dependencies.buildFinished?.();
 		const exit = buildExit(childExit, attempts);
 		const realised = await realisedOutputs(
 			outLinkDirectory,

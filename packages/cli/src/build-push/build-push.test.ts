@@ -498,6 +498,7 @@ interface FlowRun extends RecordedRun {
 		readonly body: Parameters<PushClient['setRoot']>[1];
 	}[];
 	readonly settledTargets: readonly StorePathString[];
+	readonly buildsFinished: number;
 	readonly batchSessions: number;
 	readonly protectionCalls: number;
 	readonly rootLinkDirectory: string;
@@ -682,6 +683,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		body: Parameters<PushClient['setRoot']>[1];
 	}[] = [];
 	let settledTargets: readonly StorePathString[] = [];
+	let buildsFinished = 0;
 	let attemptIdsIssued = 0;
 	let batchSessions = 0;
 	let protectionCalls = 0;
@@ -1039,6 +1041,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		}),
 		settledTargets: (targets) => {
 			settledTargets = targets;
+		},
+		buildFinished: () => {
+			buildsFinished += 1;
 		}
 	};
 
@@ -1116,6 +1121,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		rootSets,
 		rootRequests,
 		settledTargets,
+		buildsFinished,
 		batchSessions,
 		protectionCalls,
 		rootLinkDirectory
@@ -2870,6 +2876,25 @@ describe('runBuildPush', () => {
 			settledTargets: [pathB],
 			outcomes: [{ outcome: 'destination-served', storePath: pathB }]
 		});
+	});
+
+	it.each([
+		{ mode: 'streamed', config: { valid: [pathA, pathB], outPaths: [pathB] } },
+		{
+			mode: 'reconciled',
+			config: {
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
+				declaredOutputs: [pathA],
+				valid: [pathA]
+			}
+		}
+	])('reports that the $mode build finished', async ({ config }) => {
+		const run = await runFlow({ constructed: { succeedOn: 1 }, ...config });
+
+		expect({
+			error: run.error,
+			buildsFinished: run.buildsFinished
+		}).toStrictEqual({ error: undefined, buildsFinished: 1 });
 	});
 
 	it('accepts an event whose child exited before the endpoint read it', async () => {

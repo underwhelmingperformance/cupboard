@@ -28,7 +28,7 @@ import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { discoverNixStoreConfig, Nix } from '../../packages/nix/src/index.ts';
 import { defaultNixConfigEnvironment } from '../../packages/nix/src/store-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
-import { temporaryRoot, waitForFile } from '../support/filesystem.ts';
+import { temporaryRoot } from '../support/filesystem.ts';
 import { runCommand } from '../support/process.ts';
 
 /**
@@ -365,11 +365,15 @@ function daemonlessDependencies(options: {
 	readonly environment: Record<string, string>;
 	readonly invocationId: ReturnType<typeof invocationIdSchema.parse>;
 	readonly runtimeDirectory: string;
+	readonly buildFinished?: () => void;
 }): BuildPushDependencies {
 	const helperPath = store().helperPath;
 	const executablePath = path.join(path.dirname(helperPath), 'cupboard');
 
 	return {
+		...(options.buildFinished !== undefined && {
+			buildFinished: options.buildFinished
+		}),
 		client: options.client,
 		credential: 'cupboard-login',
 		store: options.nix,
@@ -566,24 +570,19 @@ describe('build-push without a Nix daemon', () => {
 		const nix = Nix.open(daemonlessStoreDependencies());
 		const config = discoverNixStoreConfig(daemonlessStoreDependencies());
 		const invocationId = invocationIdSchema.parse(`daemonless-gc-${seed}`);
-		const outLink = path.join(
-			'/tmp',
-			'cupboard',
-			`${invocationId}-targets`,
-			'result'
-		);
 		const record: RecordedCache = {
 			negotiated: [],
 			uploaded: [],
 			committed: []
 		};
 		const recorded = recordingClient(record);
+		const buildFinished = Promise.withResolvers<undefined>();
 		let isSurvivedCollection = false;
 		const client: PushClient = {
 			...recorded,
 			async uploadNar(r2Key, body) {
 				if (r2Key === `staging/${StorePath.hash(dependency)}`) {
-					await waitForFile(outLink, AbortSignal.timeout(30_000));
+					await buildFinished.promise;
 					await runCommand('nix-store', ['--gc'], { env: environment });
 					isSurvivedCollection = existsSync(dependency);
 				}
@@ -606,7 +605,10 @@ describe('build-push without a Nix daemon', () => {
 				config,
 				environment,
 				invocationId,
-				runtimeDirectory: '/tmp'
+				runtimeDirectory: '/tmp',
+				buildFinished: () => {
+					buildFinished.resolve(undefined);
+				}
 			})
 		);
 
