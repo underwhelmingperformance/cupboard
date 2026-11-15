@@ -113,6 +113,7 @@ it.each([
 				const reporter = path.resolve(
 					'tests/installer/required-tests-reporter.ts'
 				);
+				const hangLimits = path.resolve('tests/support/hang-limits.ts');
 				const reportPath = path.join(directory, 'results.xml');
 				await writeFile(
 					testPath,
@@ -120,7 +121,7 @@ it.each([
 				);
 				await writeFile(
 					configPath,
-					`import RequiredInstallerTestsReporter from ${JSON.stringify(reporter)};\nexport default { test: { root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: [['junit', { outputFile: ${JSON.stringify(reportPath)} }], new RequiredInstallerTestsReporter(${JSON.stringify(expectedTests)})], maxWorkers: 1 } };\n`
+					`import { hangLimits } from ${JSON.stringify(hangLimits)};\nimport RequiredInstallerTestsReporter from ${JSON.stringify(reporter)};\nexport default { test: { ...hangLimits, root: ${JSON.stringify(directory)}, include: ['fixture.test.ts'], reporters: [['junit', { outputFile: ${JSON.stringify(reportPath)} }], new RequiredInstallerTestsReporter(${JSON.stringify(expectedTests)})], maxWorkers: 1 } };\n`
 				);
 				let result = 0;
 				try {
@@ -133,7 +134,6 @@ it.each([
 							configPath
 						],
 						{
-							timeout: 30_000,
 							env: {
 								...process.env,
 								NODE_OPTIONS: '--no-experimental-transform-types'
