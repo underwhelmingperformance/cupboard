@@ -610,8 +610,7 @@ describe('confirm command', () => {
 				});
 				await rm(directory, { recursive: true, force: true });
 			}
-		},
-		30_000
+		}
 	);
 	it.each(['argument', 'file'] as const)(
 		'exits with usage status for an invalid %s store path before requesting OIDC authority',
@@ -705,8 +704,7 @@ describe('confirm command', () => {
 			} finally {
 				await rm(directory, { recursive: true, force: true });
 			}
-		},
-		30_000
+		}
 	);
 
 	it.each([

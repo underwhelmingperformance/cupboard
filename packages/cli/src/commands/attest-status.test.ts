@@ -220,8 +220,7 @@ describe('attest status subprocess', () => {
 			} finally {
 				await rm(directory, { recursive: true, force: true });
 			}
-		},
-		30_000
+		}
 	);
 
 	it('writes the coverage inside the reading group in GitHub mode', async () => {
@@ -279,7 +278,6 @@ describe('attest status subprocess', () => {
 				...arguments_
 			]);
 			expect(result.status).toBe(2);
-		},
-		30_000
+		}
 	);
 });

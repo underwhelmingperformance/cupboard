@@ -2005,7 +2005,7 @@ describe('NixDaemonStoreClient', () => {
 
 		expect(Buffer.concat(chunks)).toStrictEqual(Buffer.concat(frames));
 		expect(transport?.closed).toBe(true);
-	}, 30_000);
+	});
 
 	it('shares the connection limit across concurrent NAR streams', async () => {
 		const frames = [

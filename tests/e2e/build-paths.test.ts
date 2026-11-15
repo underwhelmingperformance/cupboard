@@ -184,7 +184,7 @@ beforeAll(async () => {
 			]);
 		}
 	});
-}, 240_000);
+});
 
 afterAll(async () => {
 	await fixture.store?.close();
@@ -453,8 +453,7 @@ describe('native build-paths action with real Nix', () => {
 				afterCold: intermediates,
 				afterWarm: sorted([paths.target, ...intermediates])
 			});
-		},
-		240_000
+		}
 	);
 
 	it.each(['daemon', 'daemonless'] as const)(
@@ -494,7 +493,6 @@ describe('native build-paths action with real Nix', () => {
 			expect(sorted(await invalidPaths(kind, intermediates))).toStrictEqual(
 				intermediates
 			);
-		},
-		240_000
+		}
 	);
 });

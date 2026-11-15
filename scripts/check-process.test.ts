@@ -151,8 +151,7 @@ it.skipIf(process.platform === 'win32')(
 			},
 			() => rm(directory, { recursive: true, force: true })
 		]);
-	},
-	10_000
+	}
 );
 
 it('passes the worker budget through the package-manager process', async () => {

@@ -318,7 +318,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 				storeKind: 'daemon'
 			});
 			isDaemonTrusted = (await daemon.daemonTrust()) === 'trusted';
-		}, 120_000);
+		});
 
 		afterAll(async () => {
 			await server.stop();

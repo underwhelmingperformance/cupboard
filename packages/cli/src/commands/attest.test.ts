@@ -645,51 +645,47 @@ describe('attest verify command', () => {
 				'--trust-cache-pubkey'
 			]
 		}
-	])(
-		'returns usage status from the actual CLI for $args',
-		async ({ args }) => {
-			const child = spawn(
-				process.execPath,
-				[
-					'--experimental-transform-types',
-					'--disable-warning=ExperimentalWarning',
-					path.resolve(import.meta.dirname, '../main.ts'),
-					'--output-mode',
-					'json',
-					'attest',
-					'verify',
-					'--predicate-type',
-					'https://slsa.dev/provenance/v1',
-					...args
-				],
-				{ env: { ...process.env, CI: 'true' } }
-			);
-			onTestFinished(async () => {
-				if (child.exitCode !== null || child.signalCode !== null) {
-					return;
-				}
-				const closed = new Promise<void>((resolve) => {
-					child.once('close', () => {
-						resolve();
-					});
+	])('returns usage status from the actual CLI for $args', async ({ args }) => {
+		const child = spawn(
+			process.execPath,
+			[
+				'--experimental-transform-types',
+				'--disable-warning=ExperimentalWarning',
+				path.resolve(import.meta.dirname, '../main.ts'),
+				'--output-mode',
+				'json',
+				'attest',
+				'verify',
+				'--predicate-type',
+				'https://slsa.dev/provenance/v1',
+				...args
+			],
+			{ env: { ...process.env, CI: 'true' } }
+		);
+		onTestFinished(async () => {
+			if (child.exitCode !== null || child.signalCode !== null) {
+				return;
+			}
+			const closed = new Promise<void>((resolve) => {
+				child.once('close', () => {
+					resolve();
 				});
-				child.kill('SIGKILL');
-				await closed;
 			});
-			let stdout = '';
-			child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
-				stdout += chunk;
-			});
-			child.stderr.resume();
-			const status = await new Promise<number | null>((resolve, reject) => {
-				child.once('error', reject);
-				child.once('close', resolve);
-			});
+			child.kill('SIGKILL');
+			await closed;
+		});
+		let stdout = '';
+		child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr.resume();
+		const status = await new Promise<number | null>((resolve, reject) => {
+			child.once('error', reject);
+			child.once('close', resolve);
+		});
 
-			expect({ status, stdout }).toStrictEqual({ status: 2, stdout: '' });
-		},
-		30_000
-	);
+		expect({ status, stdout }).toStrictEqual({ status: 2, stdout: '' });
+	});
 
 	it.each([
 		{

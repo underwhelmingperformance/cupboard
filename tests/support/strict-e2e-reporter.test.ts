@@ -77,7 +77,6 @@ describe('strict end-to-end results', () => {
 					});
 				}
 			);
-		},
-		60_000
+		}
 	);
 });

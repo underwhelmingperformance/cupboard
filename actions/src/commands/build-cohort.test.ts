@@ -6607,7 +6607,7 @@ if (args.includes('--help')) {
 			inlineTargets: [],
 			obsoleteFlags: []
 		});
-	}, 30_000);
+	});
 
 	interface PublicationRun {
 		readonly calls: readonly (readonly string[])[];

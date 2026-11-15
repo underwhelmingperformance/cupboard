@@ -1027,7 +1027,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			system: system(),
 			streams: await canStreamLocalBuild()
 		};
-	}, 600_000);
+	});
 
 	afterAll(async () => {
 		const hostEnvironment = state.hostEnvironment;
@@ -1047,7 +1047,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		await prepared.presetRunner.stop();
 		await prepared.server.stop();
 		await rm(prepared.workspace, { force: true, recursive: true });
-	}, 120_000);
+	});
 
 	it('publishes from the runner store, retains both targets on rerun, and rebuilds when requested', async () => {
 		const prepared = fixture();
@@ -1395,7 +1395,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				archivePath,
 				directory: path.join(prepared.workspace, 'release')
 			});
-		}, 600_000);
+		});
 
 		it('publishes a cohort the packaged executable builds and pushes', async () => {
 			const installation = installed.installation;
@@ -1534,12 +1534,12 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				// URI names the host alone, and the credentials travel in the
 				// environment every Nix process inherits.
 				process.env.NIX_SSHOPTS = store.environment.NIX_SSHOPTS;
-			}, 600_000);
+			});
 
 			afterAll(async () => {
 				Reflect.deleteProperty(process.env, 'NIX_SSHOPTS');
 				await remote.store?.close();
-			}, 120_000);
+			});
 
 			it('builds and publishes every target from the remote store', async () => {
 				const store = remote.store;
@@ -1814,7 +1814,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 					},
 					served: [200, 200]
 				});
-			}, 120_000);
+			});
 		}
 	);
 });

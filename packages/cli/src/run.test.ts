@@ -278,8 +278,7 @@ describe('runCli', () => {
 				);
 				await rm(directory, { recursive: true, force: true });
 			}
-		},
-		30_000
+		}
 	);
 
 	// The released binary sets `process.exitCode` to the value that `runCli`

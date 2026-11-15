@@ -244,7 +244,7 @@ describe('Nix fixture image preparation', () => {
 			builds: runtime.build.mock.calls,
 			inspections: runtime.inspect.mock.calls
 		}).toStrictEqual({ builds: [[image, false]], inspections: [] });
-	}, 1000);
+	});
 
 	it('propagates a failed build connection without retrying', async () => {
 		const runtime = fixture();

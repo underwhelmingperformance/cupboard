@@ -84,7 +84,7 @@ describe('local Wrangler development setup', () => {
 			},
 			async () => rm(directory, { recursive: true, force: true })
 		);
-	}, 120_000);
+	});
 	it('includes Wrangler diagnostics when a local command fails', async () => {
 		const directory = await mkdtemp(
 			path.join(os.tmpdir(), 'cupboard-local-setup-')
@@ -99,5 +99,5 @@ describe('local Wrangler development setup', () => {
 			},
 			async () => rm(directory, { recursive: true, force: true })
 		);
-	}, 30_000);
+	});
 });

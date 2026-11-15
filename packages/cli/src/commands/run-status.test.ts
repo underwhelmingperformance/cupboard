@@ -116,8 +116,7 @@ it.each([
 			stdout: expectedStdout,
 			childErrorForwarded: expectedStatus === 23
 		});
-	},
-	30_000
+	}
 );
 
 it.each([
@@ -281,8 +280,7 @@ it.each([
 				});
 			});
 		}
-	},
-	30_000
+	}
 );
 
 it.each([
@@ -440,6 +438,5 @@ it.each([
 				});
 			});
 		}
-	},
-	30_000
+	}
 );

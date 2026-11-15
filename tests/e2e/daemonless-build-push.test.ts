@@ -280,7 +280,7 @@ beforeAll(async () => {
 	fixture.server = await CupboardTestServer.start(
 		path.join(workspace, 'server')
 	);
-}, 120_000);
+});
 
 afterAll(async () => {
 	await fixture.server?.stop();
@@ -506,8 +506,7 @@ describe('build-push without a Nix daemon', () => {
 					childExitStatus: 0
 				}
 			});
-		},
-		120_000
+		}
 	);
 
 	// The first run built the path, so Nix marked it as ultimate. The second run
@@ -557,7 +556,7 @@ describe('build-push without a Nix daemon', () => {
 				childExitStatus: 0
 			}
 		});
-	}, 120_000);
+	});
 
 	it('protects an intermediate during collection after the target finishes', async () => {
 		const seed = randomUUID().replaceAll('-', '');
@@ -624,7 +623,7 @@ describe('build-push without a Nix daemon', () => {
 
 		await runCommand('nix-store', ['--gc'], { env: environment });
 		expect(existsSync(dependency)).toBe(false);
-	}, 120_000);
+	});
 
 	// The tenant serves paths under `/nix/store`, while the private fixture uses
 	// a different store directory. Build in the host store for this end-to-end
@@ -721,5 +720,5 @@ describe('build-push without a Nix daemon', () => {
 			},
 			served: 200
 		});
-	}, 180_000);
+	});
 });

@@ -65,7 +65,7 @@ describe.skipIf(process.platform !== 'linux' || !isNixPresent)(
 						})
 					)
 			};
-		}, 120_000);
+		});
 
 		afterAll(async () => {
 			await daemon.stop();

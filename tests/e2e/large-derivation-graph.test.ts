@@ -106,7 +106,7 @@ beforeAll(async () => {
 		installable: `path:${source}#packages.${system()}.default^out`,
 		storeUri: `local?root=${storeRoot}`
 	};
-}, 120_000);
+});
 
 afterAll(async () => {
 	const hostEnvironment = state.hostEnvironment;
@@ -123,7 +123,7 @@ afterAll(async () => {
 
 	await makeWritable(prepared.root);
 	await rm(prepared.root, { force: true, recursive: true });
-}, 120_000);
+});
 
 describe.skipIf(!isNixPresent)(
 	'a derivation graph larger than the capture limit',
@@ -134,7 +134,7 @@ describe.skipIf(!isNixPresent)(
 			await materialiseDerivationGraph([prepared.installable], undefined, {
 				evalStore: prepared.storeUri
 			});
-		}, 300_000);
+		});
 
 		// Proves the fixture is genuinely larger than the capture limit;
 		// the materialisation test above means nothing for a small graph.
@@ -146,6 +146,6 @@ describe.skipIf(!isNixPresent)(
 					evalStore: prepared.storeUri
 				})
 			).rejects.toMatchObject({ name: 'CommandOutputTooLargeError' });
-		}, 300_000);
+		});
 	}
 );

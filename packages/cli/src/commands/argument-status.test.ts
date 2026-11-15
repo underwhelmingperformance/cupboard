@@ -165,6 +165,5 @@ it.each([
 			stdout,
 			hasAdvice: stderr.includes(advice)
 		}).toStrictEqual({ status: 2, stdout: '', hasAdvice: true });
-	},
-	30_000
+	}
 );

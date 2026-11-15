@@ -48,7 +48,7 @@ describeConformance('what a store can obtain', (oracle) => {
 
 	beforeAll(async () => {
 		prepared.fixture = await createAvailabilityFixture(oracle);
-	}, 300_000);
+	});
 
 	afterAll(async () => {
 		const current = prepared.fixture;
