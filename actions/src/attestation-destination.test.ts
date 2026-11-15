@@ -11,10 +11,7 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
 import { currentHttpAttemptTraceHeaders } from '../../packages/shared/src/fetch-observation.ts';
-import {
-	stalledResponse,
-	untilOnlyStalledRequestPending
-} from '../../tests/support/stalled-request.ts';
+import { StalledRequestTimers } from '../../tests/support/stalled-request.ts';
 
 import {
 	requirePublishedSubjects,
@@ -164,7 +161,7 @@ describe('requirePublishedSubjects', () => {
 	it('reads a narinfo again after it hangs past the deadline', async () => {
 		const requests: string[] = [];
 
-		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const timers = StalledRequestTimers.start();
 		try {
 			const pending = requirePublishedSubjects(
 				subjects,
@@ -175,19 +172,19 @@ describe('requirePublishedSubjects', () => {
 						requests.push(requestUrl(input));
 
 						return requests.length === 1
-							? stalledResponse(init?.signal)
+							? timers.stalledResponse(init?.signal)
 							: Promise.resolve(new Response(publishedNarInfo(appName, 0xbb)));
 					}
 				}
 			);
 			const settled = expect(pending).resolves.toBeUndefined();
-			await untilOnlyStalledRequestPending(() => requests.length === 1);
+			await timers.untilOnlyStalledRequestPending();
 			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
 			await settled;
 
 			expect(requests).toStrictEqual([appNarInfoUrl, appNarInfoUrl]);
 		} finally {
-			vi.useRealTimers();
+			timers.stop();
 		}
 	});
 

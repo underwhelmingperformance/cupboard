@@ -10,10 +10,7 @@ import { trace } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import {
-	stalledResponse,
-	untilOnlyStalledRequestPending
-} from '../../../tests/support/stalled-request.ts';
+import { StalledRequestTimers } from '../../../tests/support/stalled-request.ts';
 
 import {
 	tenantDependencyReferences,
@@ -362,6 +359,7 @@ describe('tenantDependencyReferences', () => {
 		'sends a $mode request again after it hangs past the deadline and keeps the input order',
 		async ({ capability, stalledRequest }) => {
 			const requests: string[] = [];
+			const timers = StalledRequestTimers.start();
 			const headers = { 'x-cupboard-read-capabilities': capability };
 			const respond = (
 				request: string,
@@ -373,7 +371,7 @@ describe('tenantDependencyReferences', () => {
 					request === stalledRequest &&
 					requests.indexOf(request) === requests.length - 1
 				) {
-					return stalledResponse(signal);
+					return timers.stalledResponse(signal);
 				}
 				return Promise.resolve(response());
 			};
@@ -410,7 +408,6 @@ describe('tenantDependencyReferences', () => {
 				);
 			};
 
-			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 			try {
 				const operation = tenantDependencyReferences(dependencies, {
 					sources: [{ url: destination, paths: [] }],
@@ -426,13 +423,11 @@ describe('tenantDependencyReferences', () => {
 							kind: 'intermediate'
 						}))
 				);
-				await untilOnlyStalledRequestPending(() =>
-					requests.includes(stalledRequest)
-				);
+				await timers.untilOnlyStalledRequestPending();
 				await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
 				await settled;
 			} finally {
-				vi.useRealTimers();
+				timers.stop();
 			}
 
 			expect(

@@ -30,10 +30,7 @@ import {
 	destroyAfterHeaders,
 	loopbackServer
 } from '../../tests/support/loopback-server.ts';
-import {
-	stalledResponse,
-	untilOnlyStalledRequestPending
-} from '../../tests/support/stalled-request.ts';
+import { StalledRequestTimers } from '../../tests/support/stalled-request.ts';
 
 import {
 	CacheAvailabilityQueryError,
@@ -1150,17 +1147,17 @@ describe('availableCachePaths', () => {
 
 	it('sends an availability request again after it hangs past the deadline', async () => {
 		const bodies: string[] = [];
+		const timers = StalledRequestTimers.start();
 		const fetcher: typeof fetch = (_input, init) => {
 			bodies.push(typeof init?.body === 'string' ? init.body : '');
 			if (bodies.length === 1) {
-				return stalledResponse(init?.signal);
+				return timers.stalledResponse(init?.signal);
 			}
 			return Promise.resolve(
 				Response.json({ missingStorePathHashes: [StorePath.hash(secondPath)] })
 			);
 		};
 
-		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 		try {
 			const pending = availableCachePaths({
 				baseUrl: new URL('https://cupboard.example/t/acme'),
@@ -1171,11 +1168,11 @@ describe('availableCachePaths', () => {
 			const settled = expect(pending).resolves.toStrictEqual(
 				new Set([firstPath])
 			);
-			await untilOnlyStalledRequestPending(() => bodies.length === 1);
+			await timers.untilOnlyStalledRequestPending();
 			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
 			await settled;
 		} finally {
-			vi.useRealTimers();
+			timers.stop();
 		}
 
 		const body = JSON.stringify({

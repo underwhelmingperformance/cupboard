@@ -3,10 +3,7 @@ import { readUserSchema } from '@cupboard/shared/http';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-	stalledResponse,
-	untilOnlyStalledRequestPending
-} from '../../../../tests/support/stalled-request.ts';
+import { StalledRequestTimers } from '../../../../tests/support/stalled-request.ts';
 
 import { cacheReferenceSource, tenantProbesFor } from './destination-probe.ts';
 
@@ -197,13 +194,14 @@ it('sends an availability request again after it hangs past the deadline', async
 	const missingHash = 'zyxwvsrqpnmlkjihgfdcba9876543210';
 	const missingPath = storePathSchema.parse(`/nix/store/${missingHash}-gone`);
 	const bodies: string[] = [];
+	const timers = StalledRequestTimers.start();
 	const probes = tenantProbesFor({
 		baseUrl,
 		cache: { kind: 'default' },
 		fetcher: (_input, init) => {
 			bodies.push(typeof init?.body === 'string' ? init.body : '');
 			if (bodies.length === 1) {
-				return stalledResponse(init?.signal);
+				return timers.stalledResponse(init?.signal);
 			}
 			return Promise.resolve(
 				Response.json({ missingStorePathHashes: [missingHash] })
@@ -211,15 +209,14 @@ it('sends an availability request again after it hangs past the deadline', async
 		}
 	});
 
-	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 	try {
 		const pending = probes.destinationServed([appPath, missingPath]);
 		const settled = expect(pending).resolves.toStrictEqual(new Set([appPath]));
-		await untilOnlyStalledRequestPending(() => bodies.length === 1);
+		await timers.untilOnlyStalledRequestPending();
 		await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
 		await settled;
 	} finally {
-		vi.useRealTimers();
+		timers.stop();
 	}
 
 	const body = JSON.stringify({ storePathHashes: [appHash, missingHash] });

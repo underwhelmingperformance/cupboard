@@ -16,7 +16,7 @@ import {
 	destroyAfterHeaders,
 	loopbackServer
 } from '../../../../tests/support/loopback-server.ts';
-import { untilOnlyStalledRequestPending } from '../../../../tests/support/stalled-request.ts';
+import { StalledRequestTimers } from '../../../../tests/support/stalled-request.ts';
 import { cliExitCode } from '../cli.ts';
 import { CupboardHttpError } from '../errors.ts';
 
@@ -428,10 +428,13 @@ describe('attestation discovery client', () => {
 			storePathHashSchema.parse(index.toString(2).padStart(32, '0'))
 		);
 		const requests: unknown[] = [];
+		const timers = StalledRequestTimers.start();
 		use(
 			http.post(`${url.href}/api/v1/attestation-info`, async ({ request }) => {
 				requests.push(await request.json());
 				if (requests.length === 2) {
+					timers.markStalled();
+
 					return Promise.withResolvers<Response>().promise;
 				}
 				const group =
@@ -446,7 +449,6 @@ describe('attestation discovery client', () => {
 			})
 		);
 
-		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 		try {
 			const pending = readAttestationInfo(
 				{ ...options, storePathHashes: hashes },
@@ -455,11 +457,11 @@ describe('attestation discovery client', () => {
 			const settled = expect(pending).resolves.toStrictEqual(
 				hashes.map((storePathHash) => ({ storePathHash, status: 'missing' }))
 			);
-			await untilOnlyStalledRequestPending(() => requests.length === 2);
+			await timers.untilOnlyStalledRequestPending();
 			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
 			await settled;
 		} finally {
-			vi.useRealTimers();
+			timers.stop();
 		}
 
 		const second = {
