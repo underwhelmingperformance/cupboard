@@ -312,7 +312,8 @@ export default defineConfig(
 			'no-restricted-properties': [
 				'error',
 				{ object: 'vi', property: 'waitFor', message: timerWaitMessage },
-				{ object: 'vi', property: 'waitUntil', message: timerWaitMessage }
+				{ object: 'vi', property: 'waitUntil', message: timerWaitMessage },
+				{ object: 'expect', property: 'poll', message: timerWaitMessage }
 			]
 		}
 	},
