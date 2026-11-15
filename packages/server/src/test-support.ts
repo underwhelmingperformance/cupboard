@@ -95,7 +95,6 @@ import {
 import { withCleanup } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { readUserInputSchema } from '@cupboard/shared/http';
-import { withDeadline } from '@cupboard/shared/timeout';
 import {
 	abortAllDurableObjects,
 	createExecutionContext,
@@ -107,7 +106,7 @@ import { and, count, eq, isNull, type SQL, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
-import { expect, vi } from 'vitest';
+import { expect, onTestFinished, vi } from 'vitest';
 import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
@@ -771,23 +770,6 @@ export function commitPipelineOf(
 	return pipeline;
 }
 
-const fixtureWaitDeadlineMs = 10_000;
-
-/**
-Identifies a fixture wait that reached its deadline.
-*/
-export class FixtureWaitTimeoutError extends Error {
-	constructor(
-		public readonly awaited: string,
-		public readonly deadlineMs: number
-	) {
-		super(
-			`The fixture waited ${String(deadlineMs)} ms for ${awaited} without reaching it.`
-		);
-		this.name = 'FixtureWaitTimeoutError';
-	}
-}
-
 /**
 Identifies a fixture wait whose operation finished first, so the awaited
 point can no longer be reached.
@@ -804,10 +786,9 @@ export class FixtureOperationSettledError extends Error {
 
 /**
 Waits until `reached` resolves while `operation` runs. Rejects with
-{@link FixtureOperationSettledError} if `operation` finishes or fails first, and with
-{@link FixtureWaitTimeoutError} after {@link fixtureWaitDeadlineMs}.
+{@link FixtureOperationSettledError} if `operation` finishes or fails first.
 */
-export function waitUntilReached(
+export async function waitUntilReached(
 	reached: Promise<unknown>,
 	operation: Promise<unknown>,
 	awaited: string
@@ -822,13 +803,7 @@ export function waitUntilReached(
 		throw new FixtureOperationSettledError(awaited);
 	};
 
-	return withDeadline(
-		async () => {
-			await Promise.race([reached, settledFirst()]);
-		},
-		fixtureWaitDeadlineMs,
-		() => new FixtureWaitTimeoutError(awaited, fixtureWaitDeadlineMs)
-	);
+	await Promise.race([reached, settledFirst()]);
 }
 
 /**
@@ -3596,59 +3571,38 @@ export async function framesThroughProbe(
 	}
 }
 
-type CommitFixturePhase = 'initial frame' | 'verdict';
-
-export const commitFixturePhaseDeadlineMs = 20_000;
-
-/**
-Identifies the commit fixture phase that stopped progressing.
-*/
-export class CommitFixturePhaseTimeoutError extends Error {
-	constructor(
-		public readonly phase: CommitFixturePhase,
-		public readonly uploadId: UploadId,
-		public readonly server: string,
-		public readonly conversation: ReturnType<CommitConversation['diagnostics']>
-	) {
-		super(
-			`The commit fixture timed out during ${phase} for upload ${uploadId} on ${server}. Conversation state: ${JSON.stringify(conversation)}`
-		);
-		this.name = 'CommitFixturePhaseTimeoutError';
-	}
-}
-
 export class CommitFixturePassesExhaustedError extends Error {
 	constructor(
-		public readonly phase: CommitFixturePhase,
 		public readonly uploadId: UploadId,
 		public readonly server: string,
 		public readonly passes: number,
 		public readonly conversation: ReturnType<CommitConversation['diagnostics']>
 	) {
 		super(
-			`The commit fixture used all ${String(passes)} verification passes during ${phase} for upload ${uploadId} on ${server} without a verdict. Conversation state: ${JSON.stringify(conversation)}`
+			`The commit fixture used all ${String(passes)} verification passes for upload ${uploadId} on ${server} without a verdict. Conversation state: ${JSON.stringify(conversation)}`
 		);
 		this.name = 'CommitFixturePassesExhaustedError';
 	}
 }
 
-function waitForCommitFixturePhase<T>(
-	conversation: CommitConversation,
-	uploadId: UploadId,
-	phase: CommitFixturePhase,
-	operation: () => Promise<T>
-): Promise<T> {
-	return withDeadline(
-		operation,
-		commitFixturePhaseDeadlineMs,
-		() =>
-			new CommitFixturePhaseTimeoutError(
-				phase,
-				uploadId,
-				harness.serverName,
-				conversation.diagnostics()
-			)
-	);
+type CommitFixturePhase = 'initial frame' | 'verdict' | 'close';
+
+/**
+Identifies a commit fixture that was still waiting when its test ended, as
+happens when the Vitest hang limit stops a test that never gets a frame.
+*/
+export class CommitFixtureStalledError extends Error {
+	constructor(
+		public readonly phase: CommitFixturePhase,
+		public readonly uploadId: UploadId,
+		public readonly server: string,
+		public readonly conversation: ReturnType<CommitConversation['diagnostics']>
+	) {
+		super(
+			`The commit fixture was still waiting for ${phase} for upload ${uploadId} on ${server} when its test ended. Conversation state: ${JSON.stringify(conversation)}`
+		);
+		this.name = 'CommitFixtureStalledError';
+	}
 }
 
 export const maxVerificationPasses = 100;
@@ -3675,9 +3629,7 @@ async function verifyUploadPass(
 Concurrent promotion can leave an upload pending after verification. The
 test pool does not deliver verification queue messages, and alarm fences
 disable the backstop. This fixture therefore runs another pass while the
-stored verdict is pending. The phase deadline applies to each pass and to the
-wait for the frame after a completed pass, not to the whole loop, because
-passes that each finish in time can together take longer than one deadline.
+stored verdict is pending.
 */
 async function verifyUntilFrame(
 	conversation: CommitConversation,
@@ -3695,20 +3647,10 @@ async function verifyUntilFrame(
 			return frame;
 		}
 
-		const acknowledgement = await waitForCommitFixturePhase(
-			conversation,
-			uploadId,
-			'verdict',
-			runVerification
-		);
+		const acknowledgement = await runVerification();
 
 		if (acknowledgement === 'complete') {
-			return waitForCommitFixturePhase(
-				conversation,
-				uploadId,
-				'verdict',
-				() => frame
-			);
+			return frame;
 		}
 	}
 
@@ -3717,7 +3659,6 @@ async function verifyUntilFrame(
 	}
 
 	throw new CommitFixturePassesExhaustedError(
-		'verdict',
 		uploadId,
 		harness.serverName,
 		maxVerificationPasses,
@@ -3740,23 +3681,42 @@ async function frameArrival(frame: Promise<CommitSessionFrame>): Promise<void> {
 // Sends a commit operation and waits for its response. For a deferred upload,
 // the helper runs the verification passes that the queue runs in production and
 // waits for the verdict. With `wait: false`, it returns `pending` immediately.
-// The helper closes the session after every result or error.
+// The helper closes the session after every result or error. When Vitest ends
+// a test that never gets a frame, the cleanup that the helper registers closes
+// the session and fails with the phase that stalled. `registerCleanup` defaults
+// to `onTestFinished`.
 export async function completeCommitSession(
 	conversation: CommitConversation,
 	uploadId: UploadId,
 	runVerification: () => Promise<VerificationPassAcknowledgement>,
-	options: { readonly wait?: boolean }
+	options: {
+		readonly wait?: boolean;
+		readonly registerCleanup?: (cleanup: () => Promise<void>) => void;
+	}
 ): Promise<CommitResponseInput> {
 	const { socket, send, nextFrame } = conversation;
+	let stalledPhase: CommitFixturePhase | undefined = 'initial frame';
+	(options.registerCleanup ?? onTestFinished)(() => {
+		if (stalledPhase === undefined) {
+			return Promise.resolve();
+		}
+
+		const stalled = new CommitFixtureStalledError(
+			stalledPhase,
+			uploadId,
+			harness.serverName,
+			conversation.diagnostics()
+		);
+		// The tenant object that stalled the commit may not complete the close
+		// handshake either, so the cleanup starts the close and does not wait.
+		void closeSessionAndWait(socket);
+
+		return Promise.reject(stalled);
+	});
 
 	try {
 		send({ op: 'commit', uploadId });
-		const first = await waitForCommitFixturePhase(
-			conversation,
-			uploadId,
-			'initial frame',
-			nextFrame
-		);
+		const first = await nextFrame();
 
 		if (first.ev === 'settled') {
 			return first.response;
@@ -3780,6 +3740,7 @@ export async function completeCommitSession(
 			};
 		}
 
+		stalledPhase = 'verdict';
 		const verdict = await verifyUntilFrame(
 			conversation,
 			uploadId,
@@ -3800,7 +3761,9 @@ export async function completeCommitSession(
 			status: 'committed'
 		};
 	} finally {
+		stalledPhase = 'close';
 		await closeSessionAndWait(socket);
+		stalledPhase = undefined;
 	}
 }
 

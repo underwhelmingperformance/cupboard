@@ -232,10 +232,15 @@ that. `resetTestServer` and `restartTestServers` also tell the hook to stop
 waiting for the handlers of the objects that they abort, because they know about
 those aborts at once.
 
-`completeCommitSession` predates these rules and gives each phase a deadline of
-20 seconds. When it throws `CommitFixturePhaseTimeoutError` or
-`CommitFixturePassesExhaustedError`, start with the phase and the socket state
-in the error.
+`completeCommitSession` has no deadline of its own. It waits for the first
+frame, for each verification pass, and for the verdict frame after a pass
+reports that the upload is complete. A hang in any of them ends only at the hang
+limit of the Vitest configuration. The `finally` block does not run in that
+case, so the function registers an `onTestFinished` cleanup. The cleanup closes
+the commit socket and fails with `CommitFixtureStalledError`, which gives the
+phase that stalled (`initial frame` or `verdict`) and the socket state. When the
+verification passes end without a verdict, the function throws
+`CommitFixturePassesExhaustedError`. Start with the socket state in that error.
 
 `workerd` prints alarm and exception messages, but some tests cause failures on
 purpose and print the same messages. These messages only help once you've
