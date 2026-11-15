@@ -47,8 +47,8 @@ neighbouring code.
 
    Don't check a condition on a timer, or in a loop that checks again without
    waiting for an event. That rules out polling intervals, attempt-limited
-   retries, and `vi.waitFor` and `vi.waitUntil`. A loop that waits for an event
-   before each check is waiting on events, so it is allowed.
+   retries, and `vi.waitFor`, `vi.waitUntil` and `expect.poll`. A loop that
+   waits for an event before each check is waiting on events, so it is allowed.
    `ManualClock.waitForDelay` is such a loop. A check on a timer happens at
    moments that the test chooses, not when the outcome happens, so a loaded
    machine can make it run too late or give up too early.

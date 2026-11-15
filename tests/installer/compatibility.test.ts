@@ -77,6 +77,7 @@ class LoopbackSsh {
 	private child: ChildProcess | undefined;
 	private stopped: Promise<unknown> | undefined;
 	private stderr = '';
+	private readonly logListeners = new Set<() => void>();
 	private startError: Error | undefined;
 	readonly username = userInfo().username;
 	readonly identity: string;
@@ -100,6 +101,38 @@ class LoopbackSsh {
 		const file = path.join(this.directory, 'direct_known_hosts');
 		await writeFile(file, await this.knownHosts());
 		return file;
+	}
+
+	/**
+	Resolves when `isReached` returns true for the sshd log, which it checks
+	after each chunk of sshd output. Rejects if sshd exits first.
+	*/
+	private async untilLog(isReached: (log: string) => boolean): Promise<void> {
+		const stopped = this.stopped;
+		if (stopped === undefined) {
+			throw new Error('The loopback SSH server was not started');
+		}
+		if (isReached(this.stderr)) {
+			return;
+		}
+		const { promise, resolve } = Promise.withResolvers<undefined>();
+		const listener = (): void => {
+			if (isReached(this.stderr)) {
+				resolve(undefined);
+			}
+		};
+		const exitedFirst = async (): Promise<never> => {
+			await stopped;
+			throw new Error(
+				`The loopback SSH server exited before the expected log: ${this.stderr}`
+			);
+		};
+		this.logListeners.add(listener);
+		try {
+			await Promise.race([promise, exitedFirst()]);
+		} finally {
+			this.logListeners.delete(listener);
+		}
 	}
 
 	get builderUri(): string {
@@ -164,6 +197,9 @@ class LoopbackSsh {
 		});
 		this.child.stderr?.on('data', (chunk: Buffer) => {
 			this.stderr += chunk.toString();
+			for (const listener of this.logListeners) {
+				listener();
+			}
 		});
 		const child = this.child;
 		this.stopped = new Promise((resolve) => {
@@ -209,21 +245,17 @@ class LoopbackSsh {
 		before: string,
 		scenario: 'wrong key' | 'wrong host pin'
 	): Promise<void> {
-		await expect
-			.poll(() => {
-				const events = this.stderr.slice(before.length);
-				return {
-					connected: /^Connection from 127\.0\.0\.1 /mu.test(events),
-					refused:
-						scenario === 'wrong key'
-							? /^Failed publickey /mu.test(events)
-							: /^Connection closed by 127\.0\.0\.1 .*\[preauth\]/mu.test(
-									events
-								),
-					authenticated: /^Accepted publickey /mu.test(events)
-				};
-			})
-			.toStrictEqual({ connected: true, refused: true, authenticated: false });
+		const refusal =
+			scenario === 'wrong key'
+				? /^Failed publickey /mu
+				: /^Connection closed by 127\.0\.0\.1 .*\[preauth\]/mu;
+		await this.untilLog((log) => refusal.test(log.slice(before.length)));
+		const events = this.stderr.slice(before.length);
+		expect({
+			connected: /^Connection from 127\.0\.0\.1 /mu.test(events),
+			refused: refusal.test(events),
+			authenticated: /^Accepted publickey /mu.test(events)
+		}).toStrictEqual({ connected: true, refused: true, authenticated: false });
 	}
 
 	async knownHosts(key = this.hostKey): Promise<string> {
