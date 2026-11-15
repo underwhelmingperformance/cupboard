@@ -22,6 +22,7 @@ import {
 	type NixDerivedPathString,
 	type NixValidPathInfo,
 	parseSshNgStoreUri,
+	readActivityLog,
 	selectPublicationPaths,
 	tenantDependencyReferences,
 	tenantReferenceSources
@@ -6152,10 +6153,14 @@ export async function runNixBuild(
 	);
 
 	const paths = stdout.split(/\r?\n/u).filter((line) => line !== '');
-	const copiedFrom = await readCopySources(logFile);
+	// Nix creates the activity log when the build starts, so an invocation that
+	// failed before then leaves no file, and `readActivityLog` reads that as an
+	// empty log. Any other read failure throws, because an empty log would drop
+	// the copy evidence and the build activity without a trace.
+	const log = await readActivityLog(logFile);
 
 	if (status !== 0 || nix === undefined) {
-		return { paths, status, copiedFrom };
+		return { paths, status, copiedFrom: copySources([log]) };
 	}
 
 	const checkInstallables = await buildOnlyChecks(
@@ -6164,7 +6169,7 @@ export async function runNixBuild(
 		installables,
 		paths,
 		initiallyValid,
-		logFile
+		log
 	);
 
 	if (checkInstallables.length > 0) {
@@ -6187,15 +6192,7 @@ export async function runNixBuild(
 		}
 	}
 
-	const logs = await Promise.all(
-		[logFile, checkLogFile].map(async (file) => {
-			try {
-				return await readFile(file, 'utf8');
-			} catch {
-				return '';
-			}
-		})
-	);
+	const logs = [log, await readActivityLog(checkLogFile)];
 	const activities = logs.flatMap((log) => buildActivities(log));
 	const observed = new Set<string>(
 		activities
@@ -6264,16 +6261,8 @@ async function buildOnlyChecks(
 	installables: readonly string[],
 	paths: readonly string[],
 	initiallyValid: ReadonlySet<string>,
-	logFile: string
+	log: string
 ): Promise<readonly string[]> {
-	let log = '';
-
-	try {
-		log = await readFile(logFile, 'utf8');
-	} catch {
-		// Nix may reuse every output without creating an activity log.
-	}
-
 	const executed = new Set<string>(
 		buildActivities(log).map((activity) => activity.derivation)
 	);
@@ -6316,17 +6305,4 @@ async function buildOnlyChecks(
 	}
 
 	return [...checks].toSorted(byCodeUnit);
-}
-
-// Nix creates the activity log when the build starts, so an invocation that
-// failed before then leaves no file. Treat a log this process cannot read as a
-// run that copied nothing.
-async function readCopySources(
-	logFile: string
-): Promise<ReadonlyMap<StorePathString, readonly string[]>> {
-	try {
-		return copySources([await readFile(logFile, 'utf8')]);
-	} catch {
-		return new Map();
-	}
 }
