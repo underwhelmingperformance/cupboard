@@ -22,32 +22,67 @@ it.each([undefined, '0', '1'])(
 );
 
 it.each([false, true])(
-	'cancels the pending sample timer promptly after evaluation failure=%s',
+	'cancels the pending sample delay after evaluation failure=%s',
 	async (fails) => {
-		const sampled = Promise.withResolvers<undefined>();
+		const delayed = Promise.withResolvers<undefined>();
 		const failure = new Error('evaluation failed');
-		const sample = vi.fn(() => {
-			sampled.resolve(undefined);
-			return Promise.resolve();
-		});
+		const delays: {
+			readonly milliseconds: number;
+			readonly signal: AbortSignal | undefined;
+		}[] = [];
+		const sample = vi.fn(() => Promise.resolve());
+		// Like the delay from `node:timers/promises`, it never ends until its
+		// signal aborts.
+		const delay = vi.fn(
+			(
+				milliseconds: number,
+				_value: undefined,
+				options?: { readonly signal: AbortSignal }
+			) => {
+				delays.push({ milliseconds, signal: options?.signal });
+				delayed.resolve(undefined);
+
+				if (options === undefined) {
+					return Promise.reject(new Error('the delay received no signal'));
+				}
+
+				return new Promise<void>((_resolve, reject) => {
+					options.signal.addEventListener(
+						'abort',
+						() => {
+							reject(new Error('the delay was cancelled'));
+						},
+						{ once: true }
+					);
+				});
+			}
+		);
 		const result = withEvaluationMonitor(
 			{ RUNNER_DEBUG: '1' },
 			async () => {
-				await sampled.promise;
-				await setImmediate();
+				await delayed.promise;
 				if (fails) {
 					throw failure;
 				}
 				return 'manifest';
 			},
-			{ sample }
+			{ sample, delay }
 		);
 		if (fails) {
 			await expect(result).rejects.toBe(failure);
 		} else {
 			await expect(result).resolves.toBe('manifest');
 		}
-		expect(sample.mock.calls).toStrictEqual([[expect.any(AbortSignal)]]);
+		expect({
+			samples: sample.mock.calls.length,
+			delays: delays.map(({ milliseconds, signal }) => ({
+				milliseconds,
+				isCancelled: signal?.aborted
+			}))
+		}).toStrictEqual({
+			samples: 1,
+			delays: [{ milliseconds: 5000, isCancelled: true }]
+		});
 	}
 );
 
