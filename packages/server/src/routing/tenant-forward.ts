@@ -1,7 +1,13 @@
 import { type Context } from 'hono';
 
+import {
+	SharedDeadline,
+	type TenantWorkerRead,
+	withinTenantWorkerRead
+} from '../do/deadline.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
 import { forbidStoring } from '../http/bounded-body.ts';
+import { tenantNarReadBudgetMs } from '../policy/streaming.ts';
 
 import { canonicalCacheRequest } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
@@ -23,12 +29,39 @@ export function innerRequest(context: Context<WorkerHonoEnv>): Request {
 }
 
 /**
+Returns the deadline for the response headers of `read`. A narinfo GET and
+each narinfo read of a `path-info` probe get what admission left of the read
+budget, so that admission and the reads together end within the CLI's
+attempt; the rounds of a probe share it. A NAR gets
+{@link tenantNarReadBudgetMs} from the call.
+*/
+function tenantWorkerReadDeadline(
+	context: Context<WorkerHonoEnv>,
+	read: TenantWorkerRead
+): SharedDeadline {
+	switch (read) {
+		case 'narinfo':
+		case 'path-info-narinfo': {
+			return context.get('admissionDeadline');
+		}
+		case 'nar': {
+			return new SharedDeadline(
+				tenantNarReadBudgetMs,
+				context.get('clock').now
+			);
+		}
+	}
+}
+
+/**
 Sends a cacheable read to the cache-owning tenant Worker, which serves it
-through Workers Cache. The tenant Worker is a separate script in production
-and absent in development and tests, where the same read app runs in process.
+through Workers Cache. `read` chooses the deadline for the response headers.
+The tenant Worker is a separate script in production and absent in
+development and tests, where the same read app runs in process.
 */
 export async function cachedTenantRead(
 	context: Context<WorkerHonoEnv>,
+	read: TenantWorkerRead,
 	readRequest: Request = context.req.raw
 ): Promise<Response> {
 	// The in-process app takes the same canonical request as the service binding,
@@ -43,7 +76,10 @@ export async function cachedTenantRead(
 	>;
 
 	if (service !== undefined) {
-		return service.fetch(request);
+		return withinTenantWorkerRead(
+			{ read, deadline: tenantWorkerReadDeadline(context, read) },
+			() => service.fetch(request)
+		);
 	}
 
 	return tenantReadFetch(request, context.env, context.executionCtx);

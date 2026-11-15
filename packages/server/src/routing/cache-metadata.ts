@@ -75,6 +75,7 @@ async function publicEntry(
 	try {
 		response = await cachedTenantRead(
 			context,
+			'path-info-narinfo',
 			new Request(target, { headers })
 		);
 	} catch (error) {

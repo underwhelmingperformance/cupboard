@@ -1799,6 +1799,29 @@ export class SubrequestTimeoutError extends ServerHttpError {
 	}
 }
 
+// A fetch on the tenant Worker's service binding ran outside a scope that
+// specifies its read and deadline. The wrapper refuses it, so every read that
+// reaches the tenant Worker has the deadline chosen by its route.
+export class TenantWorkerReadUnspecifiedError extends Error {
+	constructor() {
+		super(
+			'A fetch on the tenant Worker binding must run within withinTenantWorkerRead'
+		);
+		this.name = 'TenantWorkerReadUnspecifiedError';
+	}
+}
+
+// A Worker forwarded a read to the tenant object or to the tenant Worker, and
+// the response headers did not arrive within the read's deadline. The read is
+// replay-safe, so the refusal is retryable like any timed-out read.
+export class ForwardedReadTimeoutError extends SubrequestTimeoutError {
+	constructor(subrequest: string) {
+		super(subrequest);
+		this.message = 'The tenant did not answer the read in time';
+		this.name = 'ForwardedReadTimeoutError';
+	}
+}
+
 // The tenant object did not return the response headers of a forwarded write
 // or admin request within the deadline. The object can still complete the
 // request, so the outcome is unknown and the response has no `Retry-After`.

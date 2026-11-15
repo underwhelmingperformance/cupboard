@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { getLogger } from '@cupboard/logger';
+import { abortableSleep } from '@cupboard/shared/retry';
 import { withDeadline } from '@cupboard/shared/timeout';
 
 import { SubrequestTimeoutError } from '../errors.ts';
@@ -12,9 +13,33 @@ export const criticalSectionBudgetMs = 25_000;
 
 export const perCallCapMs = 15_000;
 
+/**
+Waits `ms` milliseconds, or until `signal` aborts, and then resolves. Code
+that sets a deadline takes a `Delay`, so a test decides when the deadline
+passes.
+*/
+export type Delay = (ms: number, signal: AbortSignal) => Promise<void>;
+
+/**
+The clock of a deadline: `now` for its start and the time that remains of
+it, and `delay` to wait for its end. It drives the deadlines of the requests
+that a Worker forwards, the deadline scopes of this module, and the bounded
+subrequests within those scopes.
+*/
+export interface DeadlineClock {
+	readonly now: () => number;
+	readonly delay: Delay;
+}
+
+export const systemClock: DeadlineClock = {
+	now: () => Date.now(),
+	delay: abortableSleep
+};
+
 interface DeadlineScope {
 	readonly deadline: number;
 	readonly signal: AbortSignal;
+	readonly clock: DeadlineClock;
 }
 
 const deadlineScope = new AsyncLocalStorage<DeadlineScope>();
@@ -23,14 +48,22 @@ const logger = getLogger(['cupboard', 'storage']);
 
 /**
 Runs `body` within a deadline that cannot extend an enclosing deadline.
+
+`clock` starts and waits out the deadline of an outermost scope. A nested
+scope always uses the clock of the enclosing scope and ignores `clock`, so
+the deadlines of nested scopes and of the bounded subrequests within them
+are compared on one clock. Without a clock, an outermost scope uses the
+system clock.
 */
 export async function withDeadlineBudget<T>(
 	budgetMs: number,
 	body: () => Promise<T>,
-	subrequest = 'deadline.scope'
+	subrequest = 'deadline.scope',
+	clock?: DeadlineClock
 ): Promise<T> {
-	const proposed = Date.now() + budgetMs;
 	const outer = deadlineScope.getStore();
+	const scopeClock = outer?.clock ?? clock ?? systemClock;
+	const proposed = scopeClock.now() + budgetMs;
 
 	if (outer !== undefined && outer.deadline <= proposed) {
 		return deadlineScope.run(outer, body);
@@ -54,18 +87,24 @@ export async function withDeadlineBudget<T>(
 	const expire = (): void => {
 		controller.abort(deadlineExpired);
 	};
-	const remaining = deadline - Date.now();
-	const timer = remaining <= 0 ? undefined : setTimeout(expire, remaining);
+	const settled = new AbortController();
+	const remaining = deadline - scopeClock.now();
 
 	if (remaining <= 0) {
 		expire();
+	} else {
+		void scopeClock.delay(remaining, settled.signal).then(() => {
+			if (!settled.signal.aborted) {
+				expire();
+			}
+		});
 	}
 
 	let result: T;
 
 	try {
 		result = await deadlineScope.run(
-			{ deadline, signal: controller.signal },
+			{ deadline, signal: controller.signal, clock: scopeClock },
 			body
 		);
 	} catch (error) {
@@ -78,7 +117,7 @@ export async function withDeadlineBudget<T>(
 
 		throw error;
 	} finally {
-		clearTimeout(timer);
+		settled.abort();
 		outer?.signal.removeEventListener('abort', onOuterAbort);
 	}
 
@@ -162,6 +201,44 @@ export function currentForwardDeadline(): ForwardDeadline | undefined {
 }
 
 /**
+A read that the control Worker sends to the tenant Worker: a narinfo, one of
+the narinfo reads of a `path-info` probe, or a NAR.
+*/
+export type TenantWorkerRead = 'narinfo' | 'path-info-narinfo' | 'nar';
+
+/**
+The read that a fetch on the tenant Worker's service binding sends, and the
+deadline for its response headers.
+*/
+export interface TenantWorkerReadDeadline {
+	readonly read: TenantWorkerRead;
+	readonly deadline: SharedDeadline;
+}
+
+const tenantWorkerReadScope = new AsyncLocalStorage<TenantWorkerReadDeadline>();
+
+/**
+Runs `body` with `read` as the current read on the tenant Worker's service
+binding. A fetch on the binding that `body` sends must return its response
+headers within what remains of `read.deadline`.
+*/
+export function withinTenantWorkerRead<T>(
+	read: TenantWorkerReadDeadline,
+	body: () => Promise<T>
+): Promise<T> {
+	return tenantWorkerReadScope.run(read, body);
+}
+
+/**
+Returns the read that {@link withinTenantWorkerRead} set for the current
+scope, if any.
+*/
+export function currentTenantWorkerRead():
+	TenantWorkerReadDeadline | undefined {
+	return tenantWorkerReadScope.getStore();
+}
+
+/**
 Runs `body` outside every deadline scope.
 
 Work that continues after a handler returns, such as a response body, must
@@ -194,7 +271,7 @@ export function remainingDeadlineMs(): number | undefined {
 
 	return scope === undefined
 		? undefined
-		: Math.max(0, scope.deadline - Date.now());
+		: Math.max(0, scope.deadline - scope.clock.now());
 }
 
 export interface PendingSubrequestRecord {
@@ -283,7 +360,9 @@ export async function boundedSubrequest<T>(
 ): Promise<T> {
 	const deadline = deadlineScope.getStore();
 	const remaining =
-		deadline === undefined ? Infinity : deadline.deadline - Date.now();
+		deadline === undefined
+			? Infinity
+			: deadline.deadline - deadline.clock.now();
 	const ms = Math.min(remaining, capMs);
 	const started = performance.now();
 	const fields = {
