@@ -48,8 +48,7 @@ it.each([false, true])(
 			await expect(result).resolves.toBe('manifest');
 		}
 		expect(sample.mock.calls).toStrictEqual([[expect.any(AbortSignal)]]);
-	},
-	1000
+	}
 );
 
 it.each([false, true])(

@@ -10,7 +10,7 @@ import {
 	renderHookScript
 } from '@cupboard/nix/build-observation';
 import { type BuildEvent, invocationIdSchema } from '@cupboard/protocol/build';
-import { expect, it } from 'vitest';
+import { expect, it, onTestFinished } from 'vitest';
 import { z } from 'zod';
 
 import {
@@ -107,10 +107,15 @@ it('copies inputs and outputs through a separate builder while observing the com
 		const paths = evaluatedSchema.parse(JSON.parse(evaluated.stdout));
 		await remote.exec(['test', '!', '-e', paths.input]);
 		await remote.exec(['test', '!', '-e', paths.output]);
+		// A stalled build keeps running after the test ends unless it is aborted.
+		const build = new AbortController();
+		onTestFinished(() => {
+			build.abort();
+		});
 		await execute(
 			'nix',
 			['build', '--no-link', '--impure', '--expr', expression],
-			{ env: buildEnvironment, timeout: 120_000 }
+			{ env: buildEnvironment, signal: build.signal }
 		);
 		await listener.drain();
 		await remote.exec(['test', '-f', marker]);
@@ -142,4 +147,4 @@ it('copies inputs and outputs through a separate builder while observing the com
 		await remote.close();
 		await rm(directory, { recursive: true, force: true });
 	}
-}, 180_000);
+});

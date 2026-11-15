@@ -67,7 +67,6 @@ describe('renderHookScript', () => {
 		}
 	])(
 		'reports both outputs after $name',
-		{ timeout: 30_000 },
 		async ({
 			rootDirectoryExists,
 			failedPath = '',

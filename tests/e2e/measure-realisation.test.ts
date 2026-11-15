@@ -38,53 +38,49 @@ function target(attribute: string): PublishTarget {
 }
 
 describe.skipIf(!isNixPresent)('measure-realisation end to end', () => {
-	it(
-		'measures each target apart and both together against an empty store',
-		{ timeout: 600_000 },
-		async () => {
-			const divertedStore = await createDivertedStoreDirectory();
+	it('measures each target apart and both together against an empty store', async () => {
+		const divertedStore = await createDivertedStoreDirectory();
 
-			try {
-				const report = await measureRealisation({
+		try {
+			const report = await measureRealisation({
+				flake,
+				substituters: ['https://cache.nixos.org'],
+				targets: [target('hello'), target('cowsay')],
+				planner: createDivertedStorePlanner({
 					flake,
-					substituters: ['https://cache.nixos.org'],
-					targets: [target('hello'), target('cowsay')],
-					planner: createDivertedStorePlanner({
-						flake,
-						storeDirectory: discoverNixStoreConfig().storeDirectory,
-						directory: divertedStore.directory,
-						substituters: ['https://cache.nixos.org']
-					})
-				});
-				const combined = report.combined;
+					storeDirectory: discoverNixStoreConfig().storeDirectory,
+					directory: divertedStore.directory,
+					substituters: ['https://cache.nixos.org']
+				})
+			});
+			const combined = report.combined;
 
-				expect({
-					attrs: report.targets.map((measured) => measured.attr),
-					groups: report.groups.map((group) => group.key),
-					// Every target is substitutable from the public cache, so a cold
-					// runner fetches all of them and builds none.
-					builds: report.targets.map(
-						(measured) => measured.measurement.willBuild
-					),
-					fetchesSomething: report.targets.every(
-						(measured) => measured.measurement.willSubstitute > 0
-					),
-					// The two share their whole toolchain closure, so realising them
-					// together costs less than realising them one at a time.
-					groupedIsCheaper:
-						combined !== undefined &&
-						combined.comparison.together.narSize <
-							combined.comparison.apart.narSize
-				}).toStrictEqual({
-					attrs: ['hello', 'cowsay'],
-					groups: ['tools'],
-					builds: [0, 0],
-					fetchesSomething: true,
-					groupedIsCheaper: true
-				});
-			} finally {
-				await removeDivertedStore(divertedStore);
-			}
+			expect({
+				attrs: report.targets.map((measured) => measured.attr),
+				groups: report.groups.map((group) => group.key),
+				// Every target is substitutable from the public cache, so a cold
+				// runner fetches all of them and builds none.
+				builds: report.targets.map(
+					(measured) => measured.measurement.willBuild
+				),
+				fetchesSomething: report.targets.every(
+					(measured) => measured.measurement.willSubstitute > 0
+				),
+				// The two share their whole toolchain closure, so realising them
+				// together costs less than realising them one at a time.
+				groupedIsCheaper:
+					combined !== undefined &&
+					combined.comparison.together.narSize <
+						combined.comparison.apart.narSize
+			}).toStrictEqual({
+				attrs: ['hello', 'cowsay'],
+				groups: ['tools'],
+				builds: [0, 0],
+				fetchesSomething: true,
+				groupedIsCheaper: true
+			});
+		} finally {
+			await removeDivertedStore(divertedStore);
 		}
-	);
+	});
 });

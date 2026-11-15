@@ -112,7 +112,7 @@ beforeAll(async () => {
 		derivationPath: storePathSchema.parse(derivation.trim()),
 		offeredOutput
 	};
-}, 60_000);
+});
 
 afterAll(async () => {
 	try {

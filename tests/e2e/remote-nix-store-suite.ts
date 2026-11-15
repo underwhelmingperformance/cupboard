@@ -205,7 +205,7 @@ export function describeRemoteNixStore(): void {
 				NIX_REMOTE: `local?root=${storeRoot}`
 			};
 			replaceProcessEnvironment(fixture.nixEnvironment);
-		}, 300_000);
+		});
 
 		afterAll(async () => {
 			const hostEnvironment = fixture.hostEnvironment;
@@ -221,7 +221,7 @@ export function describeRemoteNixStore(): void {
 				],
 				'Remote Nix store fixture cleanup failed'
 			);
-		}, 60_000);
+		});
 
 		it('isolates every local Nix process in a temporary store and configuration', async () => {
 			const storeRoot = fixture.localStoreRoot;
@@ -426,7 +426,7 @@ export function describeRemoteNixStore(): void {
 					).rejects.toBeInstanceOf(CommandFailedError);
 				}
 			);
-		}, 300_000);
+		});
 
 		it('cancels one SSH daemon and reconnects with no remote process left behind', async () => {
 			const store = remoteStore();
@@ -515,23 +515,23 @@ export function describeRemoteNixStore(): void {
 
 		it('cancels an action-level remote cohort before publication', async () => {
 			await runCancelledBuildCohort(remoteStore());
-		}, 300_000);
+		});
 
 		it('publishes mixed already-valid and new outputs without inferring remote execution', async () => {
 			await runAlreadyValidPublication(remoteStore());
-		}, 300_000);
+		});
 
 		it('plans and publishes six cold derivations through a real SSH store', async () => {
 			await runSixTargetRemotePublication(remoteStore());
-		}, 300_000);
+		});
 
 		it('publishes remote outputs across copy-barrier GC and resolves attestation subjects after the store disappears', async () => {
 			await runAllSuccessPublicationAndSubjectResolution();
-		}, 300_000);
+		});
 
 		it('publishes a mixed remote build with a receipt and retention root', async () => {
 			await runRemotePublication(remoteStore());
-		}, 300_000);
+		});
 	});
 }
 

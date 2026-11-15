@@ -134,7 +134,7 @@ beforeAll(async () => {
 		planEnvironment,
 		cohortEnvironment
 	};
-}, 60_000);
+});
 
 afterAll(async () => {
 	const hostEnvironment = state.hostEnvironment;
@@ -151,7 +151,7 @@ afterAll(async () => {
 
 	await makeWritable(prepared.root);
 	await rm(prepared.root, { force: true, recursive: true });
-}, 60_000);
+});
 
 describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 	it('materialises the plan job derivation before querying a fresh cohort store', async () => {
@@ -257,5 +257,5 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 			wasMaterialisedWhenPlanned: true,
 			cohortDerivationExists: true
 		});
-	}, 60_000);
+	});
 });

@@ -446,8 +446,7 @@ it.each(
 			});
 			await rm(directory, { recursive: true, force: true });
 		}
-	},
-	30_000
+	}
 );
 
 it.each(['', 'https://cache.example.test/t/acme/cache/gh-1234-pr-42'])(
