@@ -30,6 +30,7 @@ import {
 	readResponseText
 } from '@cupboard/shared/response-body';
 import { loggedUrl, responseBodyFailureCode } from '@cupboard/shared/retry';
+import { type DeadlineTimer } from '@cupboard/shared/timeout';
 
 const narInfoConcurrency = 6;
 const utf8 = new TextEncoder();
@@ -73,12 +74,18 @@ export interface CachedClosureReaderOptions {
 	default is `Math.random`.
 	*/
 	readonly random?: RandomSource;
+	/**
+	The timer that arms the deadline of each probe. The default uses
+	`setTimeout`.
+	*/
+	readonly deadlineTimer?: DeadlineTimer;
 }
 
 interface SourceOfferOptions {
 	readonly signal?: AbortSignal | undefined;
 	readonly shouldDiscoverCapability?: boolean;
 	readonly random?: RandomSource | undefined;
+	readonly deadlineTimer?: DeadlineTimer | undefined;
 }
 
 export class CachedClosureSourceUnavailableError extends Error {
@@ -225,7 +232,12 @@ async function sourceOffer(
 	fetcher: typeof fetch,
 	options: SourceOfferOptions = {}
 ): Promise<{ readonly bulk: boolean; readonly offer?: CachedClosureOffer }> {
-	const { signal, shouldDiscoverCapability = false, random } = options;
+	const {
+		signal,
+		shouldDiscoverCapability = false,
+		random,
+		deadlineTimer
+	} = options;
 	const url = `${canonicalHref(source.url)}/${StorePath.hash(storePath)}.narinfo`;
 	const document = await fetchWithProbeRetries(
 		fetcher,
@@ -271,7 +283,7 @@ async function sourceOffer(
 				})
 			};
 		},
-		{ random }
+		{ random, deadlineTimer }
 	);
 	return {
 		bulk: document.bulk,
@@ -325,6 +337,7 @@ export class CachedClosureReader {
 	#mode: 'bulk' | 'legacy' | undefined;
 	#scopeVersion: string | undefined;
 	readonly #random: RandomSource | undefined;
+	readonly #deadlineTimer: DeadlineTimer | undefined;
 
 	readonly signal: AbortSignal | undefined;
 	readonly onProgress: ((progress: CachedClosureProgress) => void) | undefined;
@@ -337,6 +350,7 @@ export class CachedClosureReader {
 		this.signal = options.signal;
 		this.onProgress = options.onProgress;
 		this.#random = options.random;
+		this.#deadlineTimer = options.deadlineTimer;
 	}
 
 	async #legacy(
@@ -345,7 +359,8 @@ export class CachedClosureReader {
 		return mapWithConcurrency(paths, narInfoConcurrency, async (storePath) => {
 			const result = await sourceOffer(this.source, storePath, this.fetcher, {
 				signal: this.signal,
-				random: this.#random
+				random: this.#random,
+				deadlineTimer: this.#deadlineTimer
 			});
 			this.onProgress?.({
 				mode: 'legacy',
@@ -562,7 +577,8 @@ export class CachedClosureReader {
 			const discovery = await sourceOffer(this.source, first, this.fetcher, {
 				signal: this.signal,
 				shouldDiscoverCapability: true,
-				random: this.#random
+				random: this.#random,
+				deadlineTimer: this.#deadlineTimer
 			});
 			this.#mode = discovery.bulk ? 'bulk' : 'legacy';
 			if (!discovery.bulk) {
@@ -585,7 +601,8 @@ export class CachedClosureReader {
 				target: { url: loggedUrl(this.#pathInfoUrl()) },
 				replaySafety: 'replay-safe',
 				signal: this.signal,
-				random: this.#random
+				random: this.#random,
+				deadlineTimer: this.#deadlineTimer
 			},
 			isPageTooLarge: (error) =>
 				error instanceof CachedClosureMetadataBudgetError,

@@ -26,6 +26,7 @@ import {
 	readResponseText
 } from '@cupboard/shared/response-body';
 import { loggedUrl, responseBodyFailureCode } from '@cupboard/shared/retry';
+import { type DeadlineTimer } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
@@ -53,6 +54,11 @@ export interface AttestationDiscoveryOptions {
 	default is `Math.random`.
 	*/
 	readonly random?: RandomSource;
+	/**
+	The timer that arms the deadline of each read. The default uses
+	`setTimeout`.
+	*/
+	readonly deadlineTimer?: DeadlineTimer;
 }
 
 export class InvalidAttestationDiscoveryError extends CliError {
@@ -166,7 +172,7 @@ export async function readAttestationInfo(
 				await refuseUnexpected(path, 'GET', response);
 				return consume(response);
 			},
-			{ random: options.random }
+			{ random: options.random, deadlineTimer: options.deadlineTimer }
 		);
 	const capabilities = await read('nix-cache-info', async (response) => {
 		if (!response.ok) {
@@ -253,7 +259,8 @@ export async function readAttestationInfo(
 			target: { url: loggedUrl(target(pagePath)) },
 			replaySafety: 'replay-safe',
 			signal: options.signal,
-			random: options.random
+			random: options.random,
+			deadlineTimer: options.deadlineTimer
 		},
 		request: async (remaining, signal) => {
 			const response = await fetchRead(target(pagePath), {
