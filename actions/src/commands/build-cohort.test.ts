@@ -1,10 +1,18 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { env } from 'node:process';
 import { Writable } from 'node:stream';
 
 import {
+	ActivityLogReadError,
 	type DaemonCommandRunner,
 	Nix,
 	type NixBuildMode,
@@ -1079,6 +1087,105 @@ describe('runNixBuild rebuild policy', () => {
 						installables: [installable]
 					}))
 				]
+			});
+		} finally {
+			await rm(directory, { recursive: true });
+		}
+	});
+});
+
+describe('runNixBuild activity log', () => {
+	it('reports an activity log that exists but cannot be read', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-log-'));
+		let logFile = '';
+		const start = vi.fn((arguments_: readonly string[]) => {
+			const process = new ControlledNixProcess();
+
+			setImmediate(() => {
+				void (async () => {
+					logFile = argumentValue(arguments_, 'json-log-path') ?? '';
+					await mkdir(logFile);
+					process.emitClose(0);
+				})().catch((error: unknown) => {
+					process.emitError(
+						error instanceof Error ? error : new Error(String(error))
+					);
+				});
+			});
+
+			return process;
+		});
+
+		try {
+			const operation = runNixBuild(
+				[libraryQueryInstallable],
+				'',
+				'',
+				directory,
+				undefined,
+				{ start }
+			);
+
+			await expect(operation).rejects.toBeInstanceOf(ActivityLogReadError);
+			await expect(operation).rejects.toMatchObject({
+				logFile,
+				cause: { code: 'EISDIR' }
+			});
+		} finally {
+			await rm(directory, { recursive: true });
+		}
+	});
+
+	it('reports a rebuild activity log that exists but cannot be read', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-check-'));
+		const derivation = libraryQueryInstallable.slice(0, -4);
+		let checkLogFile = '';
+		const start = vi.fn((arguments_: readonly string[]) => {
+			const process = new ControlledNixProcess();
+
+			setImmediate(() => {
+				void (async () => {
+					if (arguments_.includes('--rebuild')) {
+						checkLogFile = argumentValue(arguments_, 'json-log-path') ?? '';
+						await mkdir(checkLogFile);
+					}
+
+					process.emitStdout(`${libraryBuiltPath}\n`);
+					process.emitClose(0);
+				})().catch((error: unknown) => {
+					process.emitError(
+						error instanceof Error ? error : new Error(String(error))
+					);
+				});
+			});
+
+			return process;
+		});
+		const nix = {
+			readDerivation: () =>
+				Promise.resolve(Derivation.parse(remoteDerivation(derivation))),
+			queryValidPaths: () => Promise.resolve([libraryBuiltPath]),
+			queryPathInfo: (storePath: string) =>
+				Promise.resolve({
+					...remotePathInfo(storePath),
+					deriver: derivation
+				})
+		};
+
+		try {
+			const operation = runNixBuild(
+				[libraryQueryInstallable],
+				'',
+				'',
+				directory,
+				undefined,
+				{ start, nix, evaluationNix: nix, rebuild: true }
+			);
+
+			await expect(operation).rejects.toBeInstanceOf(ActivityLogReadError);
+			await expect(operation).rejects.toMatchObject({
+				logFile: checkLogFile,
+				cause: { code: 'EISDIR' }
 			});
 		} finally {
 			await rm(directory, { recursive: true });
