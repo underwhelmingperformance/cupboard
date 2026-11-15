@@ -5,18 +5,33 @@ import type { Environment } from '../inputs.ts';
 
 import { EvaluationResourceMonitor } from './resources.ts';
 
+/**
+Waits for `milliseconds`. The wait rejects when `options.signal` aborts. The
+signature is that of `setTimeout` from `node:timers/promises`.
+*/
+type SampleDelay = (
+	milliseconds: number,
+	value: undefined,
+	options: { readonly signal: AbortSignal }
+) => Promise<void>;
+
 interface EvaluationMonitorDependencies {
 	readonly sample?: (signal: AbortSignal) => Promise<void>;
+	/**
+	The wait between samples. Defaults to `setTimeout` from `node:timers/promises`.
+	*/
+	readonly delay?: SampleDelay;
 }
 
 async function monitorResources(
 	sample: (signal: AbortSignal) => Promise<void>,
+	delay: SampleDelay,
 	signal: AbortSignal
 ): Promise<void> {
 	try {
 		while (!signal.aborted) {
 			await sample(signal);
-			await setTimeout(5000, undefined, { signal });
+			await delay(5000, undefined, { signal });
 		}
 	} catch (error) {
 		if (!signal.aborted) {
@@ -42,6 +57,7 @@ export async function withEvaluationMonitor<T>(
 	const controller = new AbortController();
 	const closed = monitorResources(
 		dependencies.sample ?? ((signal) => monitor.sample(signal)),
+		dependencies.delay ?? setTimeout,
 		controller.signal
 	);
 	try {
