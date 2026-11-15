@@ -52,6 +52,29 @@ export async function withDeadline<T>(
 export const probeDeadlineMs = 30_000;
 
 /**
+Arms a deadline. It calls `expire` after `milliseconds` and returns a
+function that cancels the deadline. `attempt` is the signal that the
+attempt's operation receives, so a test timer can tell which attempt a
+deadline belongs to. The default timer uses `setTimeout` and ignores it.
+*/
+export type DeadlineTimer = (
+	expire: () => void,
+	milliseconds: number,
+	attempt: AbortSignal
+) => () => void;
+
+/**
+The deadline timer of production code. It uses `setTimeout`.
+*/
+const realDeadlineTimer: DeadlineTimer = (expire, milliseconds) => {
+	const timer = setTimeout(expire, milliseconds);
+
+	return () => {
+		clearTimeout(timer);
+	};
+};
+
+/**
 Runs one attempt of `operation` with a deadline. `operation` receives a
 signal that aborts when the caller's `signal` aborts or the deadline passes.
 When the deadline passes first, the attempt rejects with the error from
@@ -59,12 +82,16 @@ When the deadline passes first, the attempt rejects with the error from
 it releases its connection. When the caller's signal aborts first, the
 attempt rejects at once with its reason, even if `operation` ignores the
 signal and never settles.
+
+`timer` arms the deadline, and defaults to {@link realDeadlineTimer}. If it
+throws, the attempt rejects with that error.
 */
 export async function attemptWithDeadline<T>(
 	operation: (signal: AbortSignal) => Promise<T>,
 	deadlineMs: number,
 	makeError: () => Error,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	timer: DeadlineTimer = realDeadlineTimer
 ): Promise<T> {
 	signal?.throwIfAborted();
 
@@ -75,15 +102,25 @@ export async function attemptWithDeadline<T>(
 			: AbortSignal.any([signal, deadlineController.signal]);
 
 	const pending = Promise.try(operation, attemptSignal);
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	let cancelDeadline: (() => void) | undefined;
 	let abandon: (() => void) | undefined;
 	const interruption = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => {
-			const error = makeError();
-			reject(error);
-			deadlineAborts.add(attemptSignal);
+		try {
+			cancelDeadline = timer(
+				() => {
+					const error = makeError();
+					reject(error);
+					deadlineAborts.add(attemptSignal);
+					deadlineController.abort(error);
+				},
+				deadlineMs,
+				attemptSignal
+			);
+		} catch (error) {
+			// The operation has started, so stop it.
 			deadlineController.abort(error);
-		}, deadlineMs);
+			throw error;
+		}
 		abandon = () => {
 			reject(abortError(signal));
 		};
@@ -93,7 +130,7 @@ export async function attemptWithDeadline<T>(
 	try {
 		return await Promise.race([pending, interruption]);
 	} finally {
-		clearTimeout(timer);
+		cancelDeadline?.();
 		if (abandon !== undefined) {
 			signal?.removeEventListener('abort', abandon);
 		}

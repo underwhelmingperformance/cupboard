@@ -13,6 +13,7 @@ import {
 } from './retry.ts';
 import {
 	attemptWithDeadline,
+	type DeadlineTimer,
 	probeDeadlineMs,
 	ProbeTimeoutError
 } from './timeout.ts';
@@ -66,6 +67,11 @@ export interface DeadlineOptions {
 	*/
 	readonly signal?: AbortSignal | undefined;
 	readonly deadlineMs?: number;
+	/**
+	The timer that arms the deadline of each attempt. The default uses
+	`setTimeout`.
+	*/
+	readonly deadlineTimer?: DeadlineTimer | undefined;
 	/**
 	The random source for the backoff between attempts. The default is
 	`Math.random`.
@@ -165,7 +171,8 @@ async function requestAttempts<T>(
 				request,
 				options.deadlineMs ?? probeDeadlineMs,
 				() => (expiry = new ProbeTimeoutError(describeTarget(options.target))),
-				options.signal
+				options.signal,
+				options.deadlineTimer
 			);
 			logger.debug('probe attempt finished', () => ({
 				...options.target,
@@ -212,6 +219,7 @@ async function requestAttempts<T>(
 
 export interface ProbeFetchOptions {
 	readonly deadlineMs?: number;
+	readonly deadlineTimer?: DeadlineTimer | undefined;
 	readonly random?: RandomSource | undefined;
 }
 
@@ -237,6 +245,7 @@ export async function fetchWithProbeRetries<Result>(
 			target: { url: loggedUrl(url) },
 			replaySafety: 'replay-safe',
 			signal: init?.signal ?? undefined,
+			deadlineTimer: options.deadlineTimer,
 			random: options.random,
 			...(options.deadlineMs !== undefined && {
 				deadlineMs: options.deadlineMs

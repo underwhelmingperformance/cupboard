@@ -19,7 +19,7 @@ import {
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
-import { lookupInPages } from '@cupboard/shared/paging';
+import { lookupInPages, type ProbeFetchOptions } from '@cupboard/shared/paging';
 import { readResponseJson } from '@cupboard/shared/response-body';
 import { loggedUrl } from '@cupboard/shared/retry';
 import { StatusCodes } from 'http-status-codes';
@@ -45,6 +45,10 @@ export interface DestinationProbeOptions {
 	readonly paths: readonly StorePathString[];
 	readonly credentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
+	/**
+	The deadline timer and backoff random source of each request.
+	*/
+	readonly probe?: ProbeFetchOptions;
 }
 
 export function destinationServedPaths(
@@ -113,6 +117,10 @@ export interface TenantProbeOptions {
 	*/
 	readonly viewCredentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
+	/**
+	The deadline timer and backoff random source of each request.
+	*/
+	readonly probe?: ProbeFetchOptions;
 }
 
 export function tenantProbesFor(
@@ -131,7 +139,8 @@ export function tenantProbesFor(
 		...(options.credentials !== undefined && {
 			credentials: options.credentials
 		}),
-		...(options.fetcher !== undefined && { fetcher: options.fetcher })
+		...(options.fetcher !== undefined && { fetcher: options.fetcher }),
+		...(options.probe !== undefined && { probe: options.probe })
 	};
 	const source =
 		options.referenceSource ??
@@ -152,7 +161,8 @@ export function tenantProbesFor(
 				...(options.viewCredentials !== undefined && {
 					credentials: options.viewCredentials
 				}),
-				...(options.fetcher !== undefined && { fetcher: options.fetcher })
+				...(options.fetcher !== undefined && { fetcher: options.fetcher }),
+				...(options.probe !== undefined && { probe: options.probe })
 			};
 			if (source.kind === 'view') {
 				return viewServedPaths({ ...reference, view: source.view });
@@ -229,7 +239,8 @@ async function availablePathsAt(
 		concurrency: maximumConcurrentProbes,
 		deadline: {
 			target: { url: loggedUrl(target) },
-			replaySafety: 'replay-safe'
+			replaySafety: 'replay-safe',
+			...options.probe
 		},
 		request: async (batch, signal) => {
 			const missing = new Set(

@@ -1,7 +1,9 @@
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
+import { type RandomSource } from '@cupboard/shared/backoff';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { retryingFetcher } from '@cupboard/shared/retry';
+import { type DeadlineTimer } from '@cupboard/shared/timeout';
 import {
 	context,
 	defaultTextMapSetter,
@@ -36,6 +38,16 @@ export interface TenantDependencyReferenceOptions {
 	readonly signal?: AbortSignal;
 	readonly tenantUrl?: URL;
 	readonly onProgress?: (progress: TenantDependencyProgress) => void;
+	/**
+	The random source for the backoff before a probe is sent again. The
+	default is `Math.random`.
+	*/
+	readonly random?: RandomSource;
+	/**
+	The timer that arms the deadline of each probe. The default uses
+	`setTimeout`.
+	*/
+	readonly deadlineTimer?: DeadlineTimer;
 }
 
 /**
@@ -247,6 +259,10 @@ async function discoverDependencyReferences(
 			retryingFetcher(observedFetch, 'replay-safe'),
 			{
 				signal: options.signal,
+				...(options.random !== undefined && { random: options.random }),
+				...(options.deadlineTimer !== undefined && {
+					deadlineTimer: options.deadlineTimer
+				}),
 				onProgress: (progress) => {
 					mode = progress.mode;
 					checked += progress.checked;

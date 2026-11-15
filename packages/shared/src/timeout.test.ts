@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { withDeadline } from './timeout.ts';
+import {
+	attemptWithDeadline,
+	type DeadlineTimer,
+	withDeadline
+} from './timeout.ts';
 
 class TestTimeoutError extends Error {
 	constructor() {
@@ -128,4 +132,107 @@ describe('withDeadline', () => {
 			}
 		}
 	);
+});
+
+interface ArmedDeadline {
+	readonly expire: () => void;
+	readonly milliseconds: number;
+	readonly attempt: AbortSignal;
+}
+
+function recordingTimer(): {
+	readonly timer: DeadlineTimer;
+	readonly armed: ArmedDeadline[];
+	readonly cancellations: number[];
+} {
+	const armed: ArmedDeadline[] = [];
+	const cancellations: number[] = [];
+	const cancel = (): void => {
+		cancellations.push(armed.length);
+	};
+
+	return {
+		armed,
+		cancellations,
+		timer: (expire, milliseconds, attempt) => {
+			armed.push({ expire, milliseconds, attempt });
+
+			return cancel;
+		}
+	};
+}
+
+describe('attemptWithDeadline with an injected timer', () => {
+	it('rejects and aborts the operation signal when the timer expires the deadline', async () => {
+		const { timer, armed, cancellations } = recordingTimer();
+		let received: AbortSignal | undefined;
+		const pending = attemptWithDeadline(
+			(signal) => {
+				received = signal;
+
+				return Promise.withResolvers<never>().promise;
+			},
+			1000,
+			() => new TestTimeoutError(),
+			undefined,
+			timer
+		);
+		armed[0]?.expire();
+
+		await expect(pending).rejects.toBeInstanceOf(TestTimeoutError);
+		expect({
+			armed: armed.map(({ milliseconds, attempt }) => ({
+				milliseconds,
+				isOperationSignal: attempt === received
+			})),
+			isAborted: received?.aborted,
+			cancellations
+		}).toStrictEqual({
+			armed: [{ milliseconds: 1000, isOperationSignal: true }],
+			isAborted: true,
+			cancellations: [1]
+		});
+	});
+
+	it('aborts the operation signal and rejects when the timer throws', async () => {
+		const failure = new Error('the timer refused the deadline');
+		let received: AbortSignal | undefined;
+		const pending = attemptWithDeadline(
+			(signal) => {
+				received = signal;
+
+				return Promise.withResolvers<never>().promise;
+			},
+			1000,
+			() => new TestTimeoutError(),
+			undefined,
+			() => {
+				throw failure;
+			}
+		);
+
+		await expect(pending).rejects.toBe(failure);
+		const reason: unknown = received?.reason;
+		expect({
+			isAborted: received?.aborted,
+			reason
+		}).toStrictEqual({ isAborted: true, reason: failure });
+	});
+
+	it('cancels the deadline when the operation settles first', async () => {
+		const { timer, armed, cancellations } = recordingTimer();
+
+		await attemptWithDeadline(
+			() => Promise.resolve('ok'),
+			1000,
+			() => new TestTimeoutError(),
+			undefined,
+			timer
+		);
+
+		expect({ armed: armed.length, cancellations }).toStrictEqual({
+			armed: 1,
+			cancellations: [1]
+		});
+	});
 });

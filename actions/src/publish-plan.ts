@@ -34,6 +34,7 @@ import {
 	responseBodyFailureCode,
 	retryingFetcher
 } from '@cupboard/shared/retry';
+import { type DeadlineTimer } from '@cupboard/shared/timeout';
 import { z } from 'zod';
 
 import {
@@ -464,6 +465,11 @@ interface ProbeOptions {
 	`Math.random`.
 	*/
 	readonly random?: RandomSource;
+	/**
+	The timer that arms the deadline of each request. The default uses
+	`setTimeout`.
+	*/
+	readonly deadlineTimer?: DeadlineTimer;
 }
 
 export function availableCachePaths(
@@ -515,7 +521,8 @@ async function availablePathsAt(
 		deadline: {
 			target: { url: loggedUrl(target) },
 			replaySafety: 'replay-safe',
-			random: options.random
+			random: options.random,
+			deadlineTimer: options.deadlineTimer
 		},
 		request: async (batch, signal) => {
 			const missing = new Set(

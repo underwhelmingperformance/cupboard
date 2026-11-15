@@ -11,7 +11,10 @@ import {
 	type BasicCredential,
 	type ReadUser
 } from '@cupboard/shared/http';
-import { fetchWithProbeRetries } from '@cupboard/shared/paging';
+import {
+	fetchWithProbeRetries,
+	type ProbeFetchOptions
+} from '@cupboard/shared/paging';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 
@@ -47,6 +50,10 @@ export interface AttestationDestination {
 
 export interface AttestationDestinationDependencies {
 	readonly fetch?: typeof fetch;
+	/**
+	The deadline timer and backoff random source of each narinfo read.
+	*/
+	readonly probe?: ProbeFetchOptions;
 }
 
 export function resolveAttestationDestination(
@@ -129,7 +136,8 @@ export async function requirePublishedSubjects(
 						fetcher,
 						base,
 						subject.storePath,
-						credential
+						credential,
+						dependencies.probe
 					);
 					const held = narInfo.narHash.digestHex();
 
@@ -159,7 +167,8 @@ async function fetchCommittedNarInfo(
 	fetcher: typeof fetch,
 	base: string,
 	storePath: StorePathString,
-	credential: BasicCredential | undefined
+	credential: BasicCredential | undefined,
+	probe: ProbeFetchOptions | undefined
 ): Promise<NarInfo> {
 	const target = `${base}/${StorePath.hash(storePath)}.narinfo`;
 	const source = await fetchWithProbeRetries(
@@ -182,7 +191,8 @@ async function fetchCommittedNarInfo(
 				maximumBytes: maximumNarInfoBytes,
 				ignoreBOM: true
 			});
-		}
+		},
+		probe
 	);
 	let narInfo: NarInfo;
 
