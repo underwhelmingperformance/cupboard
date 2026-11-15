@@ -16,7 +16,6 @@ import { createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { setTimeout } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -48,7 +47,6 @@ async function run(
 ) {
 	return execute(command, arguments_, {
 		env: environment,
-		timeout: 120_000,
 		maxBuffer: 4 * 1024 * 1024
 	});
 }
@@ -97,12 +95,6 @@ class LoopbackSsh {
 		this.outputLock = path.join(directory, 'output-lock');
 	}
 
-	private async directKnownHosts(): Promise<string> {
-		const file = path.join(this.directory, 'direct_known_hosts');
-		await writeFile(file, await this.knownHosts());
-		return file;
-	}
-
 	/**
 	Resolves when `isReached` returns true for the sshd log, which it checks
 	after each chunk of sshd output. Rejects if sshd exits first.
@@ -124,7 +116,8 @@ class LoopbackSsh {
 		const exitedFirst = async (): Promise<never> => {
 			await stopped;
 			throw new Error(
-				`The loopback SSH server exited before the expected log: ${this.stderr}`
+				`The loopback SSH server exited before the expected log: ${this.stderr}`,
+				{ cause: this.startError }
 			);
 		};
 		this.logListeners.add(listener);
@@ -204,36 +197,10 @@ class LoopbackSsh {
 		const child = this.child;
 		this.stopped = new Promise((resolve) => {
 			child.once('close', resolve);
+			child.once('error', resolve);
 		});
-		for (let attempt = 0; attempt < 50; attempt += 1) {
-			if (this.startError !== undefined || this.child.exitCode !== null) {
-				throw new Error(`The loopback SSH server failed: ${this.stderr}`, {
-					cause: this.startError
-				});
-			}
-			try {
-				await run('ssh', [
-					'-F',
-					'/dev/null',
-					'-oBatchMode=yes',
-					'-oIdentitiesOnly=yes',
-					'-oStrictHostKeyChecking=yes',
-					`-oUserKnownHostsFile=${await this.directKnownHosts()}`,
-					'-oConnectTimeout=1',
-					'-i',
-					this.identity,
-					'-p',
-					String(this.port),
-					`${this.username}@127.0.0.1`,
-					'true'
-				]);
-				return;
-			} catch {
-				await setTimeout(100);
-			}
-		}
-		throw new Error(
-			`The loopback SSH server did not become ready: ${this.stderr}`
+		await this.untilLog((log) =>
+			/^Server listening on 127\.0\.0\.1 /mu.test(log)
 		);
 	}
 
@@ -479,7 +446,7 @@ describe('NixOS installer compatibility', () => {
 				'-m',
 				'Create the private input fixture'
 			]);
-		}, 120_000);
+		});
 
 		afterAll(async () => {
 			await state.ssh?.close();
