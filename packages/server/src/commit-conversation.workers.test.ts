@@ -3,15 +3,21 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
 	CommitFixturePassesExhaustedError,
-	commitFixturePhaseDeadlineMs,
-	CommitFixturePhaseTimeoutError,
+	CommitFixtureStalledError,
 	commitSessionFromResponse,
 	completeCommitSession,
-	maxVerificationPasses,
-	testBase
+	maxVerificationPasses
 } from './test-support.ts';
 
 const uploadId = uploadIdSchema.parse('f18ba531-f2d0-4acd-a2f1-cea79bc090b8');
+
+async function failureOf(operation: Promise<unknown>): Promise<unknown> {
+	try {
+		return await operation;
+	} catch (error) {
+		return error;
+	}
+}
 
 function openConversation() {
 	const pair = new WebSocketPair();
@@ -35,14 +41,6 @@ function openConversation() {
 	});
 
 	return { server, conversation, closed };
-}
-
-async function failureOf(operation: Promise<unknown>): Promise<unknown> {
-	try {
-		return await operation;
-	} catch (error) {
-		return error;
-	}
 }
 
 describe('commit conversation frame reader', () => {
@@ -158,111 +156,48 @@ describe('commit conversation frame reader', () => {
 	});
 
 	it('fails as soon as the verification passes are exhausted without a verdict', async () => {
-		vi.useFakeTimers();
-
-		try {
-			const { server, conversation } = openConversation();
-			server.addEventListener('message', () => {
-				server.send(
-					JSON.stringify({
-						ev: 'deferred',
-						uploadId,
-						storePathHash: 'a'.repeat(32),
-						narHash:
-							'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
-					})
-				);
-			});
-			let passes = 0;
-			const pending = completeCommitSession(
-				conversation,
-				uploadId,
-				() => {
-					passes += 1;
-					return Promise.resolve('pending');
-				},
-				{}
-			);
-
-			await expect(pending).rejects.toStrictEqual(
-				new CommitFixturePassesExhaustedError(
-					'verdict',
+		const { server, conversation } = openConversation();
+		server.addEventListener('message', () => {
+			server.send(
+				JSON.stringify({
+					ev: 'deferred',
 					uploadId,
-					'initial',
-					maxVerificationPasses,
-					{
-						socketState: WebSocket.READY_STATE_OPEN,
-						queuedFrames: 0,
-						pendingReaders: 1,
-						closed: false
-					}
-				)
+					storePathHash: 'a'.repeat(32),
+					narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+				})
 			);
-			expect({
-				passes,
-				socketState: conversation.socket.readyState
-			}).toStrictEqual({
-				passes: maxVerificationPasses,
-				socketState: WebSocket.READY_STATE_CLOSED
-			});
-		} finally {
-			vi.useRealTimers();
-			vi.useFakeTimers({ toFake: ['Date'] });
-			vi.setSystemTime(testBase);
-		}
-	});
+		});
+		let passes = 0;
+		const pending = completeCommitSession(
+			conversation,
+			uploadId,
+			() => {
+				passes += 1;
+				return Promise.resolve('pending');
+			},
+			{}
+		);
 
-	it('reports a verification pass that does not finish as a phase timeout', async () => {
-		vi.useFakeTimers();
-
-		try {
-			const { server, conversation } = openConversation();
-			server.addEventListener('message', () => {
-				server.send(
-					JSON.stringify({
-						ev: 'deferred',
-						uploadId,
-						storePathHash: 'a'.repeat(32),
-						narHash:
-							'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
-					})
-				);
-			});
-			const started = Promise.withResolvers<undefined>();
-			const pending = completeCommitSession(
-				conversation,
+		await expect(pending).rejects.toStrictEqual(
+			new CommitFixturePassesExhaustedError(
 				uploadId,
-				() => {
-					started.resolve(undefined);
-					return Promise.withResolvers<never>().promise;
-				},
-				{}
-			);
-			const failure = failureOf(pending);
-			await started.promise;
-			await vi.advanceTimersByTimeAsync(commitFixturePhaseDeadlineMs);
-			const error = await failure;
-
-			expect(
-				error instanceof CommitFixturePhaseTimeoutError
-					? {
-							name: error.name,
-							phase: error.phase,
-							uploadId: error.uploadId,
-							socketState: conversation.socket.readyState
-						}
-					: error
-			).toStrictEqual({
-				name: 'CommitFixturePhaseTimeoutError',
-				phase: 'verdict',
-				uploadId,
-				socketState: WebSocket.READY_STATE_CLOSED
-			});
-		} finally {
-			vi.useRealTimers();
-			vi.useFakeTimers({ toFake: ['Date'] });
-			vi.setSystemTime(testBase);
-		}
+				'initial',
+				maxVerificationPasses,
+				{
+					socketState: WebSocket.READY_STATE_OPEN,
+					queuedFrames: 0,
+					pendingReaders: 1,
+					closed: false
+				}
+			)
+		);
+		expect({
+			passes,
+			socketState: conversation.socket.readyState
+		}).toStrictEqual({
+			passes: maxVerificationPasses,
+			socketState: WebSocket.READY_STATE_CLOSED
+		});
 	});
 
 	it('rejects a frame read started after the socket has closed', async () => {
@@ -306,37 +241,174 @@ describe('commit conversation frame reader', () => {
 		).rejects.toThrow('the socket closed before the frame');
 	});
 
-	it('reports the stalled commit phase and closes its socket before teardown', async () => {
-		vi.useFakeTimers();
-
-		try {
-			const { conversation } = openConversation();
+	it.each(['initial frame', 'verdict'] as const)(
+		'closes the socket and reports the %s phase when the test ends before the session completes',
+		async (phase) => {
+			const { server, conversation, closed } = openConversation();
+			if (phase === 'verdict') {
+				server.addEventListener('message', () => {
+					server.send(
+						JSON.stringify({
+							ev: 'deferred',
+							uploadId,
+							storePathHash: 'a'.repeat(32),
+							narHash:
+								'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+						})
+					);
+				});
+			}
+			const verificationStarted = Promise.withResolvers<undefined>();
+			const cleanups: (() => Promise<void>)[] = [];
 			const pending = completeCommitSession(
 				conversation,
 				uploadId,
-				() => Promise.resolve('pending'),
-				{}
-			);
-			const rejected = expect(pending).rejects.toMatchObject({
-				name: 'CommitFixturePhaseTimeoutError',
-				phase: 'initial frame',
-				uploadId,
-				server: 'initial',
-				conversation: {
-					socketState: WebSocket.READY_STATE_OPEN,
-					queuedFrames: 0,
-					pendingReaders: 1,
-					closed: false
-				}
-			});
+				() => {
+					verificationStarted.resolve(undefined);
 
-			await vi.advanceTimersByTimeAsync(commitFixturePhaseDeadlineMs);
-			await rejected;
-			expect(conversation.socket.readyState).toBe(WebSocket.READY_STATE_CLOSED);
-		} finally {
-			vi.useRealTimers();
-			vi.useFakeTimers({ toFake: ['Date'] });
-			vi.setSystemTime(testBase);
+					return Promise.withResolvers<never>().promise;
+				},
+				{
+					registerCleanup: (cleanup) => {
+						cleanups.push(cleanup);
+					}
+				}
+			);
+			void failureOf(pending);
+			if (phase === 'verdict') {
+				await verificationStarted.promise;
+			}
+			const [cleanup] = cleanups;
+			if (cleanup === undefined) {
+				throw new Error('completeCommitSession registered no cleanup');
+			}
+			const failure = await failureOf(cleanup());
+			await closed;
+
+			expect({
+				failure:
+					failure instanceof CommitFixtureStalledError
+						? {
+								name: failure.name,
+								phase: failure.phase,
+								uploadId: failure.uploadId,
+								server: failure.server,
+								conversation: failure.conversation
+							}
+						: failure,
+				socketState: conversation.socket.readyState
+			}).toStrictEqual({
+				failure: {
+					name: 'CommitFixtureStalledError',
+					phase,
+					uploadId,
+					server: 'initial',
+					conversation: {
+						socketState: WebSocket.READY_STATE_OPEN,
+						queuedFrames: 0,
+						pendingReaders: 1,
+						closed: false
+					}
+				},
+				socketState: WebSocket.READY_STATE_CLOSED
+			});
 		}
+	);
+
+	it('reports the stalled phase without waiting for the close handshake', async () => {
+		const { conversation, closed } = openConversation();
+		// A tenant object that stalled the commit may not answer the close.
+		const close = vi
+			.spyOn(conversation.socket, 'close')
+			.mockImplementation(vi.fn());
+		const cleanups: (() => Promise<void>)[] = [];
+		void failureOf(
+			completeCommitSession(
+				conversation,
+				uploadId,
+				() => Promise.resolve('pending'),
+				{
+					registerCleanup: (cleanup) => {
+						cleanups.push(cleanup);
+					}
+				}
+			)
+		);
+		const [cleanup] = cleanups;
+		if (cleanup === undefined) {
+			throw new Error('completeCommitSession registered no cleanup');
+		}
+		const failure = await failureOf(cleanup());
+		const closeCalls = close.mock.calls.length;
+		close.mockRestore();
+		conversation.socket.close();
+		await closed;
+
+		expect({
+			failure:
+				failure instanceof CommitFixtureStalledError
+					? { name: failure.name, phase: failure.phase }
+					: failure,
+			closeCalls
+		}).toStrictEqual({
+			failure: { name: 'CommitFixtureStalledError', phase: 'initial frame' },
+			closeCalls: 1
+		});
+	});
+
+	it('reports the close phase while the peer has not completed the close handshake', async () => {
+		const { server, conversation, closed } = openConversation();
+		server.addEventListener('message', () => {
+			server.send(
+				JSON.stringify({
+					ev: 'deferred',
+					uploadId,
+					storePathHash: 'a'.repeat(32),
+					narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+				})
+			);
+		});
+		const closeRequested = Promise.withResolvers<undefined>();
+		const close = vi
+			.spyOn(conversation.socket, 'close')
+			.mockImplementation(() => {
+				closeRequested.resolve(undefined);
+			});
+		const cleanups: (() => Promise<void>)[] = [];
+		const completed = completeCommitSession(
+			conversation,
+			uploadId,
+			() => Promise.resolve('pending'),
+			{
+				wait: false,
+				registerCleanup: (cleanup) => {
+					cleanups.push(cleanup);
+				}
+			}
+		);
+		await closeRequested.promise;
+		const [cleanup] = cleanups;
+		if (cleanup === undefined) {
+			throw new Error('completeCommitSession registered no cleanup');
+		}
+		const failure = await failureOf(cleanup());
+		close.mockRestore();
+		conversation.socket.close();
+		await closed;
+
+		expect({
+			failure:
+				failure instanceof CommitFixtureStalledError
+					? { name: failure.name, phase: failure.phase }
+					: failure,
+			result: await completed
+		}).toStrictEqual({
+			failure: { name: 'CommitFixtureStalledError', phase: 'close' },
+			result: {
+				storePathHash: 'a'.repeat(32),
+				narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347',
+				status: 'pending'
+			}
+		});
 	});
 });
