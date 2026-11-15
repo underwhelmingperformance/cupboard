@@ -11,7 +11,8 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
 import { currentHttpAttemptTraceHeaders } from '../../packages/shared/src/fetch-observation.ts';
-import { StalledRequestTimers } from '../../tests/support/stalled-request.ts';
+import { ManualDeadlineTimer } from '../../tests/support/manual-deadline-timer.ts';
+import { stalledResponse } from '../../tests/support/stalled-request.ts';
 
 import {
 	requirePublishedSubjects,
@@ -160,32 +161,33 @@ describe('requirePublishedSubjects', () => {
 
 	it('reads a narinfo again after it hangs past the deadline', async () => {
 		const requests: string[] = [];
+		const deadlines = new ManualDeadlineTimer(probeDeadlineMs);
+		const stalled = Promise.withResolvers<undefined>();
+		const pending = requirePublishedSubjects(
+			subjects,
+			destination,
+			createGithubReporter(),
+			{
+				fetch: (input, init) => {
+					requests.push(requestUrl(input));
 
-		const timers = StalledRequestTimers.start();
-		try {
-			const pending = requirePublishedSubjects(
-				subjects,
-				destination,
-				createGithubReporter(),
-				{
-					fetch: (input, init) => {
-						requests.push(requestUrl(input));
+					if (requests.length === 1) {
+						stalled.resolve(undefined);
 
-						return requests.length === 1
-							? timers.stalledResponse(init?.signal)
-							: Promise.resolve(new Response(publishedNarInfo(appName, 0xbb)));
+						return stalledResponse(init?.signal);
 					}
-				}
-			);
-			const settled = expect(pending).resolves.toBeUndefined();
-			await timers.untilOnlyStalledRequestPending();
-			await vi.advanceTimersByTimeAsync(probeDeadlineMs + 5000);
-			await settled;
 
-			expect(requests).toStrictEqual([appNarInfoUrl, appNarInfoUrl]);
-		} finally {
-			timers.stop();
-		}
+					return Promise.resolve(new Response(publishedNarInfo(appName, 0xbb)));
+				},
+				probe: { deadlineTimer: deadlines.arm, random: () => 0 }
+			}
+		);
+
+		await Promise.race([stalled.promise, pending]);
+		deadlines.expireOnly();
+		await pending;
+
+		expect(requests).toStrictEqual([appNarInfoUrl, appNarInfoUrl]);
 	});
 
 	it('uses the read-session credential from the Nix netrc file', async () => {
