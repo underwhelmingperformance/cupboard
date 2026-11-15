@@ -1,33 +1,22 @@
 import { getLogger } from '@cupboard/logger';
-import { abortableSleep } from '@cupboard/shared/retry';
 
-import { SubrequestTimeoutError, TenantObjectTimeoutError } from '../errors.ts';
+import {
+	ForwardedReadTimeoutError,
+	SubrequestTimeoutError,
+	TenantObjectTimeoutError,
+	TenantWorkerReadUnspecifiedError
+} from '../errors.ts';
 import { tenantOperationBudgetMs } from '../policy/streaming.ts';
 
-import { currentForwardDeadline } from './deadline.ts';
+import {
+	currentForwardDeadline,
+	currentTenantWorkerRead,
+	type Delay
+} from './deadline.ts';
 import { passThrough } from './pass-through.ts';
 
-/**
-Waits `ms` milliseconds, or until `signal` aborts. Code that sets a deadline
-takes a `Delay`, so a test decides when the deadline passes.
-*/
-export type Delay = (ms: number, signal: AbortSignal) => Promise<void>;
-
-/**
-The clock that the deadlines of forwarded requests use: `now` for the
-start of a deadline and `delay` to wait for its end.
-*/
-export interface DeadlineClock {
-	readonly now: () => number;
-	readonly delay: Delay;
-}
-
-export const systemClock: DeadlineClock = {
-	now: () => Date.now(),
-	delay: abortableSleep
-};
-
 const logger = getLogger(['cupboard', 'tenant-object']);
+const tenantWorkerLogger = getLogger(['cupboard', 'tenant-worker']);
 const expiry = Symbol('expiry');
 
 /**
@@ -133,9 +122,40 @@ async function fetchWithinDeadline(
 
 	if (deadlineMs <= 0) {
 		logger.warn('tenant object response deadline passed', fields);
-		throw new SubrequestTimeoutError('tenant-object.fetch');
+		throw new ForwardedReadTimeoutError('tenant-object.fetch');
 	}
 
+	const response = await headersWithin(
+		send,
+		deadlineMs,
+		delay,
+		'tenant-object.fetch'
+	);
+
+	if (response !== expiry) {
+		return response;
+	}
+
+	logger.warn('tenant object response deadline passed', fields);
+
+	if (read === undefined) {
+		throw new TenantObjectTimeoutError();
+	}
+
+	throw new ForwardedReadTimeoutError('tenant-object.fetch');
+}
+
+/**
+Sends a request with `send` and waits up to `deadlineMs`, which `delay`
+waits out, for its response headers. Returns {@link expiry} when the
+deadline passes first.
+*/
+async function headersWithin(
+	send: (signal: AbortSignal) => Promise<Response>,
+	deadlineMs: number,
+	delay: Delay,
+	subrequest: string
+): Promise<Response | typeof expiry> {
 	const settled = new AbortController();
 	const cancel = new AbortController();
 	const expired = async (): Promise<typeof expiry> => {
@@ -152,21 +172,90 @@ async function fetchWithinDeadline(
 		settled.abort();
 	}
 
-	if (result !== expiry) {
-		return result;
+	if (result === expiry) {
+		// Aborting the signal cancels the subrequest, and the runtime rejects
+		// `pending`, so the Worker never receives an answer that arrives later.
+		// The receiver can still complete the request. A response that arrives
+		// between the deadline and this abort is dropped unread, and the runtime
+		// releases it when the invocation ends.
+		cancel.abort(new SubrequestTimeoutError(subrequest));
 	}
 
-	// Aborting the signal cancels the subrequest, and the runtime rejects
-	// `pending`, so the Worker never receives an answer that the object sends
-	// later. The object can still complete the request. A response that
-	// arrives between the deadline and this abort is dropped unread, and the
-	// runtime releases it when the invocation ends.
-	logger.warn('tenant object response deadline passed', fields);
-	cancel.abort(new SubrequestTimeoutError('tenant-object.fetch'));
+	return result;
+}
+
+/**
+Wraps the tenant Worker's service binding so that every `fetch` has a
+deadline for its response headers, which `delay` waits out. A fetch must run
+within `withinTenantWorkerRead`, which specifies the read and its deadline.
+Any other fetch is refused without being sent. A fetch that misses its deadline
+fails with the retryable 503 of a timed-out read. The deadline ends when the
+headers arrive, so it does not cover a streamed NAR body.
+
+Only `fetch` changes. The native `connect` is bound to the binding, and RPC
+methods are returned unchanged.
+*/
+export function boundedTenantService<T extends Fetcher>(
+	service: T,
+	delay: Delay
+): T {
+	return new Proxy(service, {
+		get(target, property) {
+			// workerd rejects a call of a native method whose receiver is the proxy.
+			if (property === 'connect') {
+				return target.connect.bind(target);
+			}
+
+			// The binding's RPC methods are stubs too, so return them unbound, as
+			// `boundedStub` does.
+			if (property !== 'fetch') {
+				const value: unknown = Reflect.get(target, property, target);
+
+				return value;
+			}
+
+			return (input: RequestInfo | URL, init?: RequestInit) =>
+				tenantWorkerFetchWithinDeadline(
+					(signal) =>
+						target.fetch(input, {
+							...init,
+							signal: withCallerSignal(signal, input, init)
+						}),
+					delay
+				);
+		}
+	});
+}
+
+async function tenantWorkerFetchWithinDeadline(
+	send: (signal: AbortSignal) => Promise<Response>,
+	delay: Delay
+): Promise<Response> {
+	const read = currentTenantWorkerRead();
 
 	if (read === undefined) {
-		throw new TenantObjectTimeoutError();
+		throw new TenantWorkerReadUnspecifiedError();
 	}
 
-	throw new SubrequestTimeoutError('tenant-object.fetch');
+	const deadlineMs = read.deadline.remainingMs();
+	const fields = { kind: read.read, deadlineMs };
+
+	if (deadlineMs <= 0) {
+		tenantWorkerLogger.warn('tenant Worker response deadline passed', fields);
+		throw new ForwardedReadTimeoutError('tenant-worker.fetch');
+	}
+
+	const response = await headersWithin(
+		send,
+		deadlineMs,
+		delay,
+		'tenant-worker.fetch'
+	);
+
+	if (response !== expiry) {
+		return response;
+	}
+
+	tenantWorkerLogger.warn('tenant Worker response deadline passed', fields);
+	throw new ForwardedReadTimeoutError('tenant-worker.fetch');
 }

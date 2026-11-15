@@ -363,6 +363,20 @@ request, discards any answer that the object sends later, and logs the warning
 `deadlineMs`. The deadline ends when the headers arrive, so it does not limit a
 streamed body or an open WebSocket.
 
+The control Worker sends a public narinfo or NAR read to the tenant Worker,
+which must return the response headers within a deadline. A narinfo GET, and the
+narinfo reads of a public `path-info` probe, get what remains of admission's
+20-second budget, so they end within the CLI's 30-second attempt; the rounds of
+a probe share it. The tenant Worker runs its work for a public NAR up to the
+response headers within a budget of 60 seconds. When that budget passes, the
+tenant Worker returns 503 with `Retry-After` and logs the warning
+`tenant Worker NAR budget passed` with `budgetMs`. The control Worker waits for
+a NAR's headers for that budget plus a 10-second margin. A read that misses the
+control Worker's deadline returns 503 with `Retry-After`, and the control Worker
+logs the warning `tenant Worker response deadline passed` with `kind`
+(`narinfo`, `path-info-narinfo` or `nar`) and `deadlineMs`. Neither deadline
+limits a NAR body that is streaming.
+
 The native binding has no abort option for `get`. A timed-out operation can
 continue after the server returns 503. The server observes late rejection and
 cancels a late unused body once, best-effort within the invocation's lifetime.

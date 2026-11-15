@@ -3,7 +3,16 @@ import { type RandomSource } from '@cupboard/shared/backoff';
 import { UnboundableIoError } from '../errors.ts';
 import type { withSpan } from '../observability/span.ts';
 
-import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
+import {
+	boundedSubrequest,
+	type Delay,
+	systemClock,
+	unboundedCapMs
+} from './deadline.ts';
+import {
+	boundedTenantObjects,
+	boundedTenantService
+} from './forward-deadline.ts';
 import {
 	currentOperationCost,
 	type OperationCost,
@@ -13,11 +22,6 @@ import { passThrough } from './pass-through.ts';
 import { getR2Object } from './r2-read.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { spendSubrequests } from './subrequest-slice.ts';
-import {
-	boundedTenantObjects,
-	type Delay,
-	systemClock
-} from './tenant-object-fetch.ts';
 
 interface CallCost<R> {
 	readonly start: (cost: OperationCost) => void;
@@ -128,8 +132,8 @@ function unboundable(member: string): () => never {
 Wraps a Worker's D1 and R2 bindings with deadlines and subrequest accounting.
 R2 reads bound the wait for `get()` to return separately from body streaming.
 Uploads use only an enclosing deadline. A fetch from the tenant object
-namespace has a deadline for its response headers, which `delay` waits out.
-Other bindings receive no wrapper.
+namespace or the tenant Worker's service binding has a deadline for its
+response headers, which `delay` waits out. Other bindings receive no wrapper.
 */
 export function boundedWorkerEnv<
 	T extends {
@@ -139,6 +143,7 @@ export function boundedWorkerEnv<
 		readonly CUPBOARD_DO?: DurableObjectNamespace<
 			Rpc.DurableObjectBranded | undefined
 		>;
+		readonly CUPBOARD_TENANT?: Fetcher;
 	}
 >(env: T, observeRead?: typeof withSpan, delay: Delay = systemClock.delay): T {
 	// A proxy, not a spread: tests supply a service binding through a `get`
@@ -161,6 +166,11 @@ export function boundedWorkerEnv<
 					return target.CUPBOARD_DO === undefined
 						? undefined
 						: boundedTenantObjects(target.CUPBOARD_DO, delay);
+				}
+				case 'CUPBOARD_TENANT': {
+					return target.CUPBOARD_TENANT === undefined
+						? undefined
+						: boundedTenantService(target.CUPBOARD_TENANT, delay);
 				}
 				default: {
 					return passThrough(target, property);

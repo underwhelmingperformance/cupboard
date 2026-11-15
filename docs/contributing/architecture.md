@@ -1135,8 +1135,10 @@ The control Worker starts one for every narinfo read of a default or named cache
 before admission, so admission's waits share it: the Cache API, KV and D1 reads,
 a migration of the tenant's cache catalogue, and the check of a read token. When
 the deadline passes during admission, the read returns a retryable 503. For a
-public cache, the control Worker's call to the tenant Worker has no deadline.
-The narinfo handler in the tenant Worker starts a deadline of its own, and that
+public cache, the control Worker's call to the tenant Worker has a deadline for
+the response headers only, described in
+[Deadlines for forwarded requests](#deadlines-for-forwarded-requests). The
+narinfo handler in the tenant Worker starts a deadline of its own, and that
 deadline ends a stalled body. The tenant object starts one for GET requests for
 an attestation list or bundle; the attestation write procedures, which have the
 same path prefixes, keep their own budgets. The handler's D1 reads, its R2
@@ -1293,12 +1295,58 @@ it when the invocation ends. The deadlines start and wait on the `DeadlineClock`
 that `controlWorker` and `cachedTenantReadFetch` receive, which tests replace to
 decide when a deadline passes.
 
-The server does not bound NAR bodies. Nix ends a transfer that receives no data
-for 300 seconds and retries it. When it has already received bytes, it resumes
-with `Range`, and the control Worker serves a range after byte 0 from R2, not
-through Workers Cache. A public NAR that stalls before its first byte is a known
-gap: Nix retries it with a plain GET, which can join the same stuck Workers
-Cache fill again, up to Nix's `download-attempts`.
+The control Worker sends public narinfo and NAR reads, and the narinfo reads of
+a public cache's `path-info` probe, to the tenant Worker over the
+`CUPBOARD_TENANT` service binding. `boundedWorkerEnv` wraps that binding too, so
+every `fetch` on it has a deadline for the response headers. The route chooses
+the read and its deadline through the required argument of `cachedTenantRead`,
+and the wrapper refuses a fetch that does not specify them, without sending it.
+The deadlines are in `policy/streaming.ts`:
+
+- A narinfo GET (`narinfo`) gets what admission left of the 20-second read
+  budget, like the reads that the Worker forwards to the tenant object. The read
+  then ends within the CLI's 30-second attempt. The tenant Worker's own narinfo
+  deadline of 20 seconds starts later, when the read arrives, so the control
+  Worker's deadline usually passes first.
+- Each narinfo read of a public `path-info` probe (`path-info-narinfo`) gets
+  what remains of the same 20-second read deadline. The probe reads up to 32
+  narinfos in sequential rounds of six, and the rounds share that deadline with
+  the probe's own D1 reads, because the probe's route deadline already bounds
+  the whole probe.
+- A NAR read (`nar`) gets the tenant Worker's NAR budget,
+  `tenantWorkerNarBudgetMs` (60 seconds), plus a 10-second margin for the
+  dispatch over the binding and the Workers Cache lookup
+  (`tenantNarReadBudgetMs`). The tenant Worker runs its work for a public NAR,
+  up to the response headers, within that budget: the D1 read of the NAR's
+  references and each R2 call get at most what remains of it. A call after the
+  budget has passed fails, the tenant Worker returns the retryable 503 of a
+  timed-out read, and it logs `tenant Worker NAR budget passed` with `budgetMs`.
+  Nix has no 30-second attempt, so these deadlines do not need to fit one.
+
+When the control Worker's deadline passes, the read returns the retryable 503 of
+a timed-out read, and the control Worker logs
+`tenant Worker response deadline passed` with the read as `kind` (`narinfo`,
+`path-info-narinfo` or `nar`) and `deadlineMs`. The control Worker's deadline
+and the tenant Worker's NAR budget run on a `DeadlineClock`: the control
+Worker's on the clock that `controlWorker` receives, and the tenant Worker's on
+the clock that `cachedTenantReadFetch` receives. The wrapper changes only
+`fetch` and leaves the binding's other members unchanged.
+
+The server does not bound NAR bodies, and neither the control Worker's deadline
+nor the tenant Worker's NAR budget covers them. Nix ends a transfer that
+receives no data for 300 seconds and retries it. When it has already received
+bytes, it resumes with `Range`, and the control Worker serves a range after byte
+0 from R2, not through Workers Cache.
+
+A Workers Cache fill for a public NAR is the tenant Worker's own read. When one
+of its storage calls stalls, the tenant Worker's NAR budget ends the fill with a
+`no-store` 503, and the requests that joined the fill fail with it. A fill that
+is stuck before the tenant Worker starts its calls, in the dispatch or the cache
+layer, stays stuck. A request that joins it ends at the control Worker's NAR
+deadline with a retryable 503, and a retry that arrives while the fill is still
+stuck joins it again. A fill that has sent its headers and then stalls before
+the first byte of the body is a known gap: Nix retries it with a plain GET,
+which can join the same stuck fill again, up to Nix's `download-attempts`.
 
 Public narinfo and NAR reads, and private reads authenticated by static
 credentials, do not wake the tenant's Durable Object. Token-authenticated

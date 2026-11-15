@@ -108,7 +108,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 					const response: Response =
 						denied ??
 						(isCacheableRead(context)
-							? await cachedTenantRead(context)
+							? await cachedTenantRead(context, 'narinfo')
 							: await serveNarInfo(
 									context.req.raw,
 									context.env,
@@ -174,7 +174,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		}
 
 		if (isPublic) {
-			return acceptingRanges(await cachedTenantRead(context));
+			return acceptingRanges(await cachedTenantRead(context, 'nar'));
 		}
 
 		return serveNar(

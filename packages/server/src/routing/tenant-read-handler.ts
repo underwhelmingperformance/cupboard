@@ -8,9 +8,13 @@ import { type Context, Hono } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
-import { SharedDeadline, withinReadDeadline } from '../do/deadline.ts';
+import {
+	type DeadlineClock,
+	SharedDeadline,
+	systemClock,
+	withinReadDeadline
+} from '../do/deadline.ts';
 import { withSubrequestSlice } from '../do/subrequest-slice.ts';
-import { type DeadlineClock, systemClock } from '../do/tenant-object-fetch.ts';
 import { forbidStoring, keepAliveIn } from '../http/bounded-body.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
@@ -19,7 +23,7 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
-import { readDeadline } from '../http/read-deadline.ts';
+import { narReadDeadline, readDeadline } from '../http/read-deadline.ts';
 import {
 	loggerMiddleware,
 	requestCostMiddleware
@@ -108,7 +112,7 @@ admitted the tenant and resolved the selected cache as public.
 Hono answers HEAD by re-dispatching the request to the GET handler with the
 body stripped, so a separate HEAD registration would never match.
 */
-function buildCachedReadApp(now: () => number): Hono<TenantReadHonoEnv> {
+function buildCachedReadApp(clock: DeadlineClock): Hono<TenantReadHonoEnv> {
 	const app = new Hono<TenantReadHonoEnv>();
 
 	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, readDeadline, (context) => {
@@ -129,7 +133,7 @@ function buildCachedReadApp(now: () => number): Hono<TenantReadHonoEnv> {
 		);
 	});
 
-	app.get('/nar/:name', (context) => {
+	app.get('/nar/:name', narReadDeadline(clock), (context) => {
 		const nar = parseNarName(context.req.param('name'));
 
 		if (nar === undefined) {
@@ -151,14 +155,14 @@ function buildCachedReadApp(now: () => number): Hono<TenantReadHonoEnv> {
 			return next();
 		}
 
-		return noStore(await forwardRead(context, now));
+		return noStore(await forwardRead(context, clock.now));
 	});
 
 	return app;
 }
 
-function buildTenantReadApp(now: () => number): Hono<TenantReadHonoEnv> {
-	const cachedReadApp = buildCachedReadApp(now);
+function buildTenantReadApp(clock: DeadlineClock): Hono<TenantReadHonoEnv> {
+	const cachedReadApp = buildCachedReadApp(clock);
 	const app = new Hono<TenantReadHonoEnv>();
 
 	app.onError(serverErrorHandler);
@@ -226,7 +230,7 @@ function buildTenantReadApp(now: () => number): Hono<TenantReadHonoEnv> {
 
 	app.get(
 		'/t/:tenant/.well-known/oauth-authorization-server',
-		async (context) => noStore(await forwardRead(context, now))
+		async (context) => noStore(await forwardRead(context, clock.now))
 	);
 
 	app.route('/t/:tenant', cachedReadApp);
@@ -246,7 +250,7 @@ function tenantReadAppFor(clock: DeadlineClock): Hono<TenantReadHonoEnv> {
 		return existing;
 	}
 
-	const app = buildTenantReadApp(clock.now);
+	const app = buildTenantReadApp(clock);
 	tenantReadApps.set(clock, app);
 
 	return app;
@@ -270,7 +274,7 @@ export async function tenantReadFetch(
 Serves one read for the tenant Worker's `CachedTenantReads` entrypoint. It
 bounds the bindings of `env` and runs the read within the invocation's
 subrequest slice. `clock` starts and waits out the deadlines of the reads
-that the tenant Worker forwards to the tenant object.
+that the tenant Worker forwards to the tenant object, and the NAR budget.
 */
 export function cachedTenantReadFetch(
 	request: Request,

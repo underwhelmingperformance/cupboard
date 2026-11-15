@@ -6,6 +6,8 @@ import { SubrequestTimeoutError } from '../errors.ts';
 import {
 	boundedSubrequest,
 	criticalSectionBudgetMs,
+	type DeadlineClock,
+	remainingDeadlineMs,
 	unboundedCapMs,
 	withDeadlineBudget,
 	withoutDeadline
@@ -369,5 +371,54 @@ describe('boundedSubrequest', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+/**
+A clock that reads `nowMs` and records each delay that a scope requests. The
+delays never pass.
+*/
+function recordingClock(nowMs: number): {
+	readonly clock: DeadlineClock;
+	readonly requested: number[];
+} {
+	const requested: number[] = [];
+
+	return {
+		requested,
+		clock: {
+			now: () => nowMs,
+			delay: (ms) => {
+				requested.push(ms);
+
+				return never();
+			}
+		}
+	};
+}
+
+describe('withDeadlineBudget', () => {
+	it('measures a nested scope on the clock of the enclosing scope', async () => {
+		const outer = recordingClock(0);
+		const inner = recordingClock(1_000_000);
+
+		const remainingMs = await withDeadlineBudget(
+			100,
+			() =>
+				withDeadlineBudget(
+					50,
+					() => Promise.resolve(remainingDeadlineMs()),
+					'inner',
+					inner.clock
+				),
+			'outer',
+			outer.clock
+		);
+
+		expect({
+			remainingMs,
+			outer: outer.requested,
+			inner: inner.requested
+		}).toStrictEqual({ remainingMs: 50, outer: [100, 50], inner: [] });
 	});
 });

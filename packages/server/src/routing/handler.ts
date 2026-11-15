@@ -28,7 +28,9 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import {
+	type DeadlineClock,
 	SharedDeadline,
+	systemClock,
 	withinReadDeadline,
 	withoutForwardDeadline
 } from '../do/deadline.ts';
@@ -38,7 +40,6 @@ import {
 	subrequestsAvailable,
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
-import { type DeadlineClock, systemClock } from '../do/tenant-object-fetch.ts';
 import {
 	InsecureTransportError,
 	MetadataScopeChangedError,
@@ -289,6 +290,7 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 
 		context.set('tenant', route.tenant);
 		context.set('admissionDeadline', admissionDeadline);
+		context.set('clock', clock);
 		context.set('tenantEntry', entry);
 		context.set('tenantEntryFresh', fresh);
 		context.set('tenantRest', route.rest);

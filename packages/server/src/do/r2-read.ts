@@ -15,7 +15,7 @@ import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 type R2ReadResult = R2ObjectBody | R2Object | null;
 
-const r2GetBudgetMs = 15_000;
+export const r2GetBudgetMs = 15_000;
 const maximumAttempts = 3;
 const logger = getLogger(['cupboard', 'storage', 'read']);
 

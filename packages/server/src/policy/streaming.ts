@@ -33,6 +33,36 @@ it. The deadline does not cover the response body or an upgraded WebSocket.
 export const tenantOperationBudgetMs = 110_000;
 
 /**
+The time that a read sent to the tenant Worker over the service binding can
+spend before the tenant Worker starts its own calls: the dispatch over the
+binding and the Workers Cache lookup.
+*/
+export const tenantWorkerDispatchMarginMs = 10_000;
+
+/**
+The budget for the tenant Worker's work on a public NAR read, up to the
+response headers. The D1 read of the NAR's references and the R2 calls share
+it, so each call gets at most what remains, and a call after the budget has
+passed fails with the retryable 503 of a timed-out read. The budget does not
+cover the response body, so it never ends a NAR that is streaming.
+
+The budget allows the capped calls of the slowest path before the headers. On
+a Workers Cache miss, a range read reads the NAR's references from D1, may
+retry that read once after a short pause, makes an R2 `head` and waits for the
+ranged R2 `get()`. When every one of those calls takes its whole cap, the last
+call gets slightly less than its cap.
+*/
+export const tenantWorkerNarBudgetMs = 60_000;
+
+/**
+The deadline for the tenant Worker to return the response headers of a public
+NAR read that the control Worker sends over the service binding: the tenant
+Worker's NAR budget plus the dispatch margin.
+*/
+export const tenantNarReadBudgetMs =
+	tenantWorkerNarBudgetMs + tenantWorkerDispatchMarginMs;
+
+/**
 The least time that must remain of the read's deadline when a bounded body
 starts. A read with less time left is refused with a retryable 503 before its
 headers. A narinfo, attestation list or bundle is typically a few KiB, and one
