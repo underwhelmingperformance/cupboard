@@ -25,6 +25,7 @@ import type {
 	RootSetBodyInput,
 	RootSetResponse,
 	RootTarget,
+	RootTargetListings,
 	RootTargetsPage
 } from '@cupboard/protocol/retention';
 import {
@@ -45,7 +46,8 @@ import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails,
-	rootSetAuthorizationDetails
+	rootSetAuthorizationDetails,
+	rootTargetsAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
@@ -104,6 +106,24 @@ interface RootOptions {
 interface RootListingOptions extends RootOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
+}
+
+interface RootTargetsOptions extends RootListingOptions {
+	readonly plan?: string;
+}
+
+/**
+`root targets` takes either a root name, or `--plan`.
+*/
+export class RootTargetsArgumentsError extends CliUsageError {
+	constructor(readonly reason: 'plan-with-root' | 'root-required') {
+		super(
+			reason === 'plan-with-root'
+				? '--plan cannot be combined with a root name'
+				: 'give a root name, or --plan'
+		);
+		this.name = 'RootTargetsArgumentsError';
+	}
 }
 
 /**
@@ -215,6 +235,45 @@ export function registerRootCommands(
 			reporter,
 			rpc.roots
 		);
+	};
+
+	const listPlanRootTargets = async (
+		url: URL,
+		planFile: string,
+		options: RootTargetsOptions
+	): Promise<void> => {
+		const roots = retainedRoots(
+			parsePublishPlan(await readFile(planFile, 'utf8'))
+		).map((entry) => entry.name);
+		const target = cacheTargetFromUrl(url);
+		const reporter = commandUi(program, programOptions).reporter();
+
+		// A token exchange must request at least one grant.
+		if (roots.length === 0) {
+			reportRootTargetListings(reporter, []);
+			return;
+		}
+
+		const credential = await authenticateForPush(
+			CupboardClient.fromUrl(target.tenantUrl, {
+				cache: target.cache,
+				signal: programOptions.signal
+			}),
+			{
+				githubOidc: options.githubOidc,
+				audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
+				authorizationDetails: rootTargetsAuthorizationDetails({
+					cache: target.cache,
+					roots
+				})
+			}
+		);
+		const rpc = tenantRpc(target.tenantUrl, {
+			credential,
+			signal: programOptions.signal
+		});
+
+		await runRootTargetsPlan(target.cache, roots, reporter, rpc.roots);
 	};
 
 	root
@@ -414,7 +473,11 @@ export function registerRootCommands(
 			"List a retention root's targets, and show which of them the cache is missing."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name (e.g. github:acme/app/main)', parseRootName)
+		.argument('[name]', 'root name (e.g. github:acme/app/main)', parseRootName)
+		.option(
+			'--plan <file>',
+			"list the targets of the root of every retained target in this publish plan, which the publish workflow's plan step writes, instead of one named root"
+		)
 		.option(
 			'--github-oidc',
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
@@ -424,30 +487,50 @@ export function registerRootCommands(
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
 		)
-		.action(async (url: URL, name: RootName, options: RootListingOptions) => {
-			const target = cacheTargetFromUrl(url);
-			const reporter = commandUi(program, programOptions).reporter();
-			const credential = await authenticateForPush(
-				CupboardClient.fromUrl(target.tenantUrl, {
-					cache: target.cache,
-					signal: programOptions.signal
-				}),
-				{
-					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
-					authorizationDetails: rootListingAuthorizationDetails(
-						target.cache,
-						name
-					)
-				}
-			);
-			const rpc = tenantRpc(target.tenantUrl, {
-				credential,
-				signal: programOptions.signal
-			});
+		.action(
+			async (
+				url: URL,
+				name: RootName | undefined,
+				options: RootTargetsOptions
+			) => {
+				if (options.plan !== undefined) {
+					if (name !== undefined) {
+						throw new RootTargetsArgumentsError('plan-with-root');
+					}
 
-			await runRootTargets(target.cache, name, reporter, rpc.roots);
-		});
+					await listPlanRootTargets(url, options.plan, options);
+					return;
+				}
+
+				if (name === undefined) {
+					throw new RootTargetsArgumentsError('root-required');
+				}
+
+				const target = cacheTargetFromUrl(url);
+				const reporter = commandUi(program, programOptions).reporter();
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: rootListingAuthorizationDetails(
+							target.cache,
+							name
+						)
+					}
+				);
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
+					signal: programOptions.signal
+				});
+
+				await runRootTargets(target.cache, name, reporter, rpc.roots);
+			}
+		);
 
 	root
 		.command('remove')
@@ -670,34 +753,86 @@ export async function runRootList(
 	});
 }
 
+// A run root can accumulate attached paths without bound, so the targets are
+// read page by page.
+async function listRootTargets(
+	cache: CacheScope,
+	name: RootName,
+	client: Pick<RootClient, 'targets'>
+): Promise<readonly RootTarget[]> {
+	return collectProgressively(
+		await cursorPages<RootTarget, string>(
+			async (cursor, signal) => {
+				const page = await callInCache(
+					client.targets,
+					cache,
+					{ name, ...(cursor !== undefined && { cursor }) },
+					{ signal }
+				);
+
+				return { items: page.targets, next: page.cursor };
+			},
+			procedureDeadline(
+				'roots.targets',
+				tenantContract.roots.targets.inDefaultCache
+			)
+		),
+		listingLimits('The root target listing')
+	);
+}
+
+/**
+Reads the targets of each root in one process and reports one listing per
+root, in the order of `roots`. The server has no batched read, so each root
+costs its own requests, at most `separateRootRequestConcurrency` at a time.
+*/
+export async function runRootTargetsPlan(
+	cache: CacheScope,
+	roots: readonly RootName[],
+	reporter: Reporter,
+	client: Pick<RootClient, 'targets'>
+): Promise<void> {
+	const listings: RootTargetListings =
+		roots.length === 0
+			? []
+			: await reporter.phase('Listing root targets', () =>
+					mapWithConcurrency(
+						roots,
+						separateRootRequestConcurrency,
+						async (name) => ({
+							name,
+							targets: [...(await listRootTargets(cache, name, client))]
+						})
+					)
+				);
+
+	reportRootTargetListings(reporter, listings);
+}
+
+function reportRootTargetListings(
+	reporter: Reporter,
+	listings: RootTargetListings
+): void {
+	reporter.result({
+		kind: 'root-target-listings',
+		title: 'Root targets',
+		data: listings,
+		rows: listings.map((listing) => ({
+			label: listing.name,
+			value: `${String(listing.targets.length)} store ${listing.targets.length === 1 ? 'path' : 'paths'}`
+		})),
+		empty: 'The plan has no roots.'
+	});
+}
+
 export async function runRootTargets(
 	cache: CacheScope,
 	name: RootName,
 	reporter: Reporter,
 	client: Pick<RootClient, 'targets'>
 ): Promise<void> {
-	// A run root can accumulate attached paths without bound, so the targets are
-	// read page by page.
-	const targets = await reporter.phase('Listing root targets', async () =>
-		collectProgressively(
-			await cursorPages<RootTarget, string>(
-				async (cursor, signal) => {
-					const page = await callInCache(
-						client.targets,
-						cache,
-						{ name, ...(cursor !== undefined && { cursor }) },
-						{ signal }
-					);
-
-					return { items: page.targets, next: page.cursor };
-				},
-				procedureDeadline(
-					'roots.targets',
-					tenantContract.roots.targets.inDefaultCache
-				)
-			),
-			listingLimits('The root target listing')
-		)
+	const targets = await reporter.phase('Listing root targets', () =>
+		listRootTargets(cache, name, client)
 	);
 
 	reporter.result({

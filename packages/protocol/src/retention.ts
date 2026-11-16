@@ -229,6 +229,16 @@ export const rootTargetsPageSchema = z.strictObject({
 });
 export type RootTargetsPage = z.output<typeof rootTargetsPageSchema>;
 
+// The result of `root targets --plan`: every target of each root that the
+// plan lists, from all pages of that root.
+export const rootTargetListingsSchema = z.array(
+	z.strictObject({
+		name: rootNameSchema,
+		targets: z.array(rootTargetSchema)
+	})
+);
+export type RootTargetListings = z.output<typeof rootTargetListingsSchema>;
+
 // A client sends this capability in `x-cupboard-accept-capabilities` to
 // receive `releasedLeftoverTargets` from a root removal. An older client's
 // strict schema rejects a field that it does not know.

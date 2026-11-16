@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -29,11 +29,13 @@ import {
 	type RootTargetsPage,
 	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
-import type { ResultRow } from '@cupboard/reporter';
+import type { ResultPayload, ResultRow } from '@cupboard/reporter';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
-import { describe, expect, it, vi } from 'vitest';
+import { http, HttpResponse } from 'msw';
+import { setupServer } from 'msw/node';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { z } from 'zod';
 
 import { stalledResponse } from '../../../../tests/support/stalled-request.ts';
@@ -43,6 +45,7 @@ import {
 	recordingCacheScopedClient
 } from '../client/cache-scoped.test-support.ts';
 import { type CallOptions } from '../client/orpc.ts';
+import { separateRootRequestConcurrency } from '../client/root-batches.ts';
 
 import {
 	describeExpiry,
@@ -54,7 +57,8 @@ import {
 	runRootList,
 	runRootRemove,
 	runRootSet,
-	runRootTargets
+	runRootTargets,
+	runRootTargetsPlan
 } from './root.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
@@ -708,6 +712,235 @@ describe('runRootTargets', () => {
 					{ label: missingTarget, value: 'missing' }
 				]
 			]
+		});
+	});
+});
+
+describe('runRootTargetsPlan', () => {
+	const secondPath = `/nix/store/${'b'.repeat(32)}-tool`;
+	const secondTarget = {
+		storePathHash: 'b'.repeat(32),
+		storePath: secondPath,
+		present: false
+	};
+
+	it('reads the targets of every plan root and reports one listing per root', async () => {
+		const payloads: ResultPayload[] = [];
+		const pages = new Map([
+			[
+				'github:acme/app/main/app',
+				[
+					rootTargetsPageSchema.parse({
+						targets: [presentTarget()],
+						cursor: presentTarget().storePathHash
+					}),
+					rootTargetsPageSchema.parse({ targets: [secondTarget] })
+				]
+			],
+			[
+				'github:acme/app/main/tool',
+				[rootTargetsPageSchema.parse({ targets: [] })]
+			]
+		]);
+		const targets = recordingCacheScopedClient(
+			(input: ListPage & { name: string }) => {
+				const page = pages.get(input.name)?.shift();
+
+				if (page === undefined) {
+					throw new Error(`listed past the final page of ${input.name}`);
+				}
+
+				return Promise.resolve(page);
+			}
+		);
+
+		await runRootTargetsPlan(
+			defaultCache,
+			[
+				rootName('github:acme/app/main/app'),
+				rootName('github:acme/app/main/tool')
+			],
+			{
+				...reporter([]),
+				result: (payload) => {
+					payloads.push(payload);
+				}
+			},
+			{ targets }
+		);
+
+		expect({ calls: targets.calls, payloads }).toStrictEqual({
+			calls: [
+				{ cache: defaultCache, input: { name: 'github:acme/app/main/app' } },
+				{ cache: defaultCache, input: { name: 'github:acme/app/main/tool' } },
+				{
+					cache: defaultCache,
+					input: {
+						name: 'github:acme/app/main/app',
+						cursor: presentTarget().storePathHash
+					}
+				}
+			],
+			payloads: [
+				{
+					kind: 'root-target-listings',
+					title: 'Root targets',
+					data: [
+						{
+							name: 'github:acme/app/main/app',
+							targets: [presentTarget(), secondTarget]
+						},
+						{ name: 'github:acme/app/main/tool', targets: [] }
+					],
+					rows: [
+						{ label: 'github:acme/app/main/app', value: '2 store paths' },
+						{ label: 'github:acme/app/main/tool', value: '0 store paths' }
+					],
+					empty: 'The plan has no roots.'
+				}
+			]
+		});
+	});
+
+	it('reads at most separateRootRequestConcurrency roots at a time', async () => {
+		const names = Array.from(
+			{ length: separateRootRequestConcurrency + 1 },
+			(_, index) => rootName(`github:acme/app/main/target-${String(index)}`)
+		);
+		let active = 0;
+		let peak = 0;
+		const reachedLimit = Promise.withResolvers<true>();
+		const gate = Promise.withResolvers<true>();
+		// Every read waits at the gate. The gate opens once the reads in progress
+		// reach the limit, so a read beyond the limit can only start after one of
+		// them finishes.
+		const targets = recordingCacheScopedClient(
+			async (_input: { name: string }) => {
+				active += 1;
+				peak = Math.max(peak, active);
+
+				if (active === separateRootRequestConcurrency) {
+					reachedLimit.resolve(true);
+				}
+
+				await gate.promise;
+				active -= 1;
+
+				return rootTargetsPageSchema.parse({ targets: [] });
+			}
+		);
+
+		const run = runRootTargetsPlan(defaultCache, names, reporter([]), {
+			targets
+		});
+		await reachedLimit.promise;
+		gate.resolve(true);
+		await run;
+
+		expect({ peak, calls: targets.calls.length }).toStrictEqual({
+			peak: separateRootRequestConcurrency,
+			calls: names.length
+		});
+	});
+
+	it('sends one request per root for a plan of many roots', async () => {
+		const names = Array.from({ length: 100 }, (_, index) =>
+			rootName(`github:acme/app/main/target-${String(index)}`)
+		);
+		const targets = recordingCacheScopedClient((_input: { name: string }) =>
+			Promise.resolve(rootTargetsPageSchema.parse({ targets: [] }))
+		);
+
+		await runRootTargetsPlan(defaultCache, names, reporter([]), { targets });
+
+		expect(targets.calls.map((call) => call.input.name)).toStrictEqual(names);
+	});
+});
+
+describe('root targets arguments', () => {
+	it.each([
+		{
+			name: 'a plan with a root name',
+			arguments_: async () => ['main', '--plan', await planFile(2)],
+			expected: 'RootTargetsArgumentsError'
+		},
+		{
+			name: 'neither a plan nor a root',
+			arguments_: () => Promise.resolve([]),
+			expected: 'RootTargetsArgumentsError'
+		},
+		{
+			name: 'a plan of another version',
+			arguments_: async () => ['--plan', await planFile(1)],
+			expected: 'PublishPlanVersionError'
+		}
+	])(
+		'refuses $name before authentication',
+		async ({ arguments_, expected }) => {
+			const program = new Command().exitOverride();
+			registerRootCommands(program);
+			let failure: unknown;
+
+			try {
+				await program.parseAsync(
+					[
+						'root',
+						'targets',
+						'http://127.0.0.1:1/t/acme',
+						...(await arguments_()),
+						'--github-oidc'
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status: cliExitCode(failure, 130)
+			}).toStrictEqual({ name: expected, status: 2 });
+		}
+	);
+
+	it('reports an empty listing for a plan without retained targets and sends no request', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-root-plan-'));
+		const resultFile = path.join(directory, 'results.jsonl');
+		const requests: string[] = [];
+		const server = setupServer(
+			http.all('*', ({ request }) => {
+				requests.push(request.url);
+
+				return HttpResponse.error();
+			})
+		);
+		const program = new Command().exitOverride().option('--result-file <path>');
+		registerRootCommands(program);
+		server.listen({ onUnhandledFrame: 'error' });
+		onTestFinished(() => {
+			server.close();
+		});
+
+		await program.parseAsync(
+			[
+				'--result-file',
+				resultFile,
+				'root',
+				'targets',
+				'https://cupboard.example.workers.dev/t/acme',
+				'--plan',
+				await planFile(2),
+				'--github-oidc'
+			],
+			{ from: 'user' }
+		);
+
+		expect({
+			requests,
+			results: await readFile(resultFile, 'utf8')
+		}).toStrictEqual({
+			requests: [],
+			results: `${JSON.stringify({ kind: 'root-target-listings', data: [] })}\n`
 		});
 	});
 });
