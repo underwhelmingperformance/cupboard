@@ -26,5 +26,17 @@
 		commands: ['pnpm fix:format', 'pnpm update:flake-deps'],
 		fileFilters: ['**'],
 		executionMode: 'branch'
-	}
+	},
+
+	// The cache-publish and release-cache workflows call cupboard-publish.yml
+	// at `@main`, and the tenant's trust rules match their `job_workflow_ref`
+	// on `refs/heads/main`. A reference pinned to a commit would no longer
+	// match those rules.
+	packageRules: [
+		{
+			matchManagers: ['github-actions'],
+			matchDepNames: ['underwhelmingperformance/cupboard'],
+			pinDigests: false
+		}
+	]
 }
