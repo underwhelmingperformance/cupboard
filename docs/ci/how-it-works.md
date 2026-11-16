@@ -89,6 +89,15 @@ presence does not decide whether to build. With `build: rebuild`, each requested
 output is built again on the configured builder, even if it is already
 available. Nix may still substitute dependencies.
 
+To decide whether a cohort can be omitted, the plan job checks the root of each
+of the cohort's targets. A single `cupboard root targets --plan` command reads
+the reconciled targets of every root, and a single `cupboard root ensure --plan`
+command then ensures the roots that have targets, so the number of processes
+does not grow with the number of targets. A cupboard release without
+`root targets --plan`, or one that reads a different plan version, runs one
+`root targets` command and one `root ensure` command per target instead. A
+failed check keeps the cohorts that depended on it, and the plan still succeeds.
+
 With `build: missing` and `publish: outputs` or `publish: built`, the plan job
 asks the destination cache which target outputs it already serves. It ensures
 the roots of those targets with a single `cupboard root ensure --plan` command,

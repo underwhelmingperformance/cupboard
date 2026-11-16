@@ -13,7 +13,8 @@ import {
 	type DocumentVersions,
 	joinRoot,
 	publishPlanDocumentSchema,
-	publishTargetsSchema
+	publishTargetsSchema,
+	retainedRoots
 } from '@cupboard/protocol/publish-plan';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { type Reporter, type ResultPayload } from '@cupboard/reporter';
@@ -1997,6 +1998,447 @@ describe('cohortPreFilter', () => {
 	});
 });
 
+interface TargetsEvent {
+	readonly kind: string;
+	readonly data: readonly unknown[];
+}
+
+interface BatchedRootCall {
+	readonly command: 'root targets --plan' | 'root ensure --plan';
+	readonly roots: readonly {
+		readonly name: string;
+		readonly paths: readonly StorePathString[];
+	}[];
+}
+
+// Answers `root targets --plan` and `root ensure --plan` for the roots of the
+// plan file that each invocation reads, and records what the file listed.
+function batchedPreFilterRunner(
+	options: {
+		readonly reconciledByRoot?: ReadonlyMap<string, readonly StorePathString[]>;
+		readonly retainedRoots?: ReadonlySet<string>;
+		readonly failTargets?: boolean;
+		readonly failEnsure?: boolean;
+		// Replaces the event that `root targets --plan` records.
+		readonly targetsEvent?: (event: TargetsEvent) => unknown;
+	} = {}
+): { readonly runner: EnsureRunner; readonly calls: BatchedRootCall[] } {
+	const calls: BatchedRootCall[] = [];
+	const runner: EnsureRunner = async (_command, arguments_) => {
+		const planFile = arguments_.at(arguments_.indexOf('--plan') + 1);
+
+		if (planFile === undefined) {
+			throw new Error('the command did not include a plan file argument');
+		}
+
+		const planDocument: unknown = JSON.parse(await readFile(planFile, 'utf8'));
+		const roots = retainedRoots(publishPlanDocumentSchema.parse(planDocument));
+		const isTargets = arguments_.includes('targets');
+
+		calls.push({
+			command: isTargets ? 'root targets --plan' : 'root ensure --plan',
+			roots: roots.map((root) => ({ name: root.name, paths: root.targets }))
+		});
+
+		if (isTargets ? options.failTargets : options.failEnsure) {
+			throw new Error('batched command failed');
+		}
+
+		const targetsEvent = {
+			kind: 'root-target-listings',
+			data: roots.map((root) => ({
+				name: root.name,
+				targets: (options.reconciledByRoot?.get(root.name) ?? root.targets).map(
+					(storePathValue, index) => ({
+						storePathHash: String(index % 10).repeat(32),
+						storePath: storePathValue,
+						present: true
+					})
+				)
+			}))
+		};
+
+		await writeFile(
+			resultFileArgument(arguments_),
+			`${JSON.stringify(
+				isTargets
+					? (options.targetsEvent?.(targetsEvent) ?? targetsEvent)
+					: {
+							kind: 'root-ensures',
+							data: roots.map((root) =>
+								options.retainedRoots === undefined ||
+								options.retainedRoots.has(root.name)
+									? {
+											name: root.name,
+											status: 'retained',
+											root: {
+												name: root.name,
+												expired: false,
+												createdAt: '2026-01-01T00:00:00.000Z',
+												updatedAt: '2026-01-01T00:00:00.000Z',
+												targets: []
+											}
+										}
+									: {
+											name: root.name,
+											status: 'build-required',
+											unavailable: [`/nix/store/${'9'.repeat(32)}-unavailable`]
+										}
+							)
+						}
+			)}\n`
+		);
+
+		return { stdout: '', stderr: '' };
+	};
+
+	return { runner, calls };
+}
+
+// Counts the invocations of each root subcommand form.
+function countingRunner(
+	runner: EnsureRunner,
+	counts: Record<string, number>
+): EnsureRunner {
+	return (command, arguments_, signal, environment) => {
+		const form = [
+			'root',
+			arguments_.includes('targets') ? 'targets' : 'ensure',
+			...(arguments_.includes('--plan') ? ['--plan'] : [])
+		].join(' ');
+
+		counts[form] = (counts[form] ?? 0) + 1;
+
+		return runner(command, arguments_, signal, environment);
+	};
+}
+
+function rootOf(entry: TargetEvaluation): string {
+	return joinRoot('github:owner/repo/main', entry.target.rootSuffix);
+}
+
+function cohortOf(entry: TargetEvaluation): Cohort {
+	return {
+		...singleCohort([entry]),
+		key: `cohort-${entry.target.rootSuffix}`
+	};
+}
+
+describe('cohortPreFilter processes', () => {
+	let directory: string;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-cohort-prefilter-')
+		);
+	});
+
+	const members = Array.from({ length: 100 }, (_, index) =>
+		evaluation(
+			`app-${String(index)}`,
+			storePath(`/nix/store/${String(index).padStart(32, '0')}-app`)
+		)
+	);
+	it.each([
+		{
+			name: 'starts two processes for each member of a cohort of 100',
+			mode: 'per-target' as const,
+			expected: { 'root targets': 100, 'root ensure': 100 }
+		},
+		{
+			name: 'starts two processes for the whole cohort of 100',
+			mode: 'batched' as const,
+			expected: { 'root targets --plan': 1, 'root ensure --plan': 1 }
+		}
+	])('$name', async ({ mode, expected }) => {
+		const counts: Record<string, number> = {};
+		const inner =
+			mode === 'batched'
+				? batchedPreFilterRunner().runner
+				: preFilterRunner({
+						targetsByRoot: new Map(
+							members.map((entry) => [rootOf(entry), entry.targetPaths])
+						),
+						ensureRetainedRoots: new Set(members.map((entry) => rootOf(entry)))
+					});
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort(members)] },
+			members,
+			countingRunner(inner, counts),
+			undefined,
+			() => Promise.resolve(mode)
+		);
+
+		expect({ decisions, counts }).toStrictEqual({
+			decisions: [{ key: 'cohort-first', pruned: true }],
+			counts: expected
+		});
+	});
+
+	const firstPath = storePath(`/nix/store/${'1'.repeat(32)}-a`);
+	const secondPath = storePath(`/nix/store/${'2'.repeat(32)}-b`);
+	const first = evaluation('first', firstPath);
+	const second = evaluation('second', secondPath);
+	const third = evaluation(
+		'third',
+		storePath(`/nix/store/${'3'.repeat(32)}-c`)
+	);
+	const cohorts = [first, second, third].map((entry) => cohortOf(entry));
+	const evaluations = [first, second, third];
+
+	it('prunes only the cohorts whose roots are retained and complete, and ensures only non-empty roots', async () => {
+		const { runner, calls } = batchedPreFilterRunner({
+			reconciledByRoot: new Map([
+				[rootOf(first), first.targetPaths],
+				[rootOf(second), first.targetPaths],
+				[rootOf(third), []]
+			])
+		});
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts },
+			evaluations,
+			runner,
+			undefined,
+			() => Promise.resolve('batched')
+		);
+
+		expect({ decisions, calls }).toStrictEqual({
+			decisions: [
+				{ key: 'cohort-first', pruned: true },
+				{ key: 'cohort-second', pruned: false },
+				{ key: 'cohort-third', pruned: false }
+			],
+			calls: [
+				{
+					command: 'root targets --plan',
+					roots: [
+						{ name: rootOf(first), paths: first.targetPaths },
+						{ name: rootOf(second), paths: second.targetPaths },
+						{ name: rootOf(third), paths: third.targetPaths }
+					]
+				},
+				{
+					command: 'root ensure --plan',
+					roots: [
+						{ name: rootOf(first), paths: first.targetPaths },
+						{ name: rootOf(second), paths: first.targetPaths }
+					]
+				}
+			]
+		});
+	});
+
+	it('does not prune a cohort whose root the cache cannot serve', async () => {
+		const { runner } = batchedPreFilterRunner({
+			retainedRoots: new Set([rootOf(first)])
+		});
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts },
+			evaluations,
+			runner,
+			undefined,
+			() => Promise.resolve('batched')
+		);
+
+		expect(decisions).toStrictEqual([
+			{ key: 'cohort-first', pruned: true },
+			{ key: 'cohort-second', pruned: false },
+			{ key: 'cohort-third', pruned: false }
+		]);
+	});
+
+	it('reads and ensures a root shared by components once', async () => {
+		const componentA = evaluation('system', firstPath);
+		const componentB: TargetEvaluation = {
+			...evaluation('system', secondPath),
+			target: { ...componentA.target, attr: '.#component-b' }
+		};
+		const { runner, calls } = batchedPreFilterRunner({
+			reconciledByRoot: new Map([
+				[
+					rootOf(componentA),
+					[...componentA.targetPaths, ...componentB.targetPaths]
+				]
+			])
+		});
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([componentA, componentB])] },
+			[componentA, componentB],
+			runner,
+			undefined,
+			() => Promise.resolve('batched')
+		);
+
+		expect({ decisions, calls }).toStrictEqual({
+			decisions: [{ key: 'cohort-first', pruned: true }],
+			calls: [
+				{
+					command: 'root targets --plan',
+					roots: [
+						{
+							name: rootOf(componentA),
+							paths: [...componentA.targetPaths, ...componentB.targetPaths]
+						}
+					]
+				},
+				{
+					command: 'root ensure --plan',
+					roots: [
+						{
+							name: rootOf(componentA),
+							paths: [...componentA.targetPaths, ...componentB.targetPaths]
+						}
+					]
+				}
+			]
+		});
+	});
+
+	it('starts no process for a target whose outputs are not all known', async () => {
+		const partial: TargetEvaluation = {
+			...first,
+			target: { ...first.target, outputs: ['out', 'dev'] }
+		};
+		const { runner, calls } = batchedPreFilterRunner();
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([partial])] },
+			[partial],
+			runner,
+			undefined,
+			() => Promise.resolve('batched')
+		);
+
+		expect({ decisions, calls }).toStrictEqual({
+			decisions: [{ key: 'cohort-first', pruned: false }],
+			calls: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'reading the reconciled lists fails',
+			options: { failTargets: true },
+			reason: (entry: TargetEvaluation) =>
+				`${entry.target.attr}: Could not read the reconciled targets of ${rootOf(first)}, ${rootOf(second)}, ${rootOf(third)}`
+		},
+		{
+			name: 'ensuring the roots fails',
+			options: { failEnsure: true },
+			reason: (entry: TargetEvaluation) =>
+				`${entry.target.attr}: Could not ensure retention root ${rootOf(first)}, ${rootOf(second)}, ${rootOf(third)}`
+		}
+	])(
+		'does not prune, and records a reason for every cohort, when $name',
+		async ({ options, reason }) => {
+			const { runner } = batchedPreFilterRunner(options);
+
+			const decisions = await cohortPreFilter(
+				planInputs({ temporaryDirectory: directory }),
+				{ cohorts },
+				evaluations,
+				runner,
+				undefined,
+				() => Promise.resolve('batched')
+			);
+
+			expect(decisions).toStrictEqual(
+				evaluations.map((entry) => ({
+					key: `cohort-${entry.target.rootSuffix}`,
+					pruned: false,
+					reason: reason(entry)
+				}))
+			);
+		}
+	);
+
+	const rootDescription = `${rootOf(first)}, ${rootOf(second)}, ${rootOf(third)}`;
+
+	it.each([
+		{
+			name: 'omits a root',
+			targetsEvent: (event: TargetsEvent) => ({
+				...event,
+				data: event.data.slice(0, 2)
+			}),
+			reason: `Cupboard recorded no result while reading the targets of ${rootOf(third)}`
+		},
+		{
+			name: 'is not a list of listings',
+			targetsEvent: (event: TargetsEvent) => ({
+				...event,
+				data: 'unreadable'
+			}),
+			reason: `Cupboard recorded an invalid result while reading the targets of ${rootDescription}`
+		},
+		{
+			name: 'has no root-target-listings event',
+			targetsEvent: (event: TargetsEvent) => ({
+				...event,
+				kind: 'root-targets'
+			}),
+			reason: `Cupboard recorded no result while reading the targets of ${rootDescription}`
+		}
+	])(
+		'does not prune, and records a reason for every cohort, when the result of root targets --plan $name',
+		async ({ targetsEvent, reason }) => {
+			const { runner, calls } = batchedPreFilterRunner({ targetsEvent });
+
+			const decisions = await cohortPreFilter(
+				planInputs({ temporaryDirectory: directory }),
+				{ cohorts },
+				evaluations,
+				runner,
+				undefined,
+				() => Promise.resolve('batched')
+			);
+
+			expect({
+				decisions,
+				commands: calls.map((call) => call.command)
+			}).toStrictEqual({
+				decisions: evaluations.map((entry) => ({
+					key: `cohort-${entry.target.rootSuffix}`,
+					pruned: false,
+					reason: `${entry.target.attr}: ${reason}`
+				})),
+				commands: ['root targets --plan']
+			});
+		}
+	);
+
+	it('propagates cancellation from a batched command', async () => {
+		const controller = new AbortController();
+		const reason = new Error('cancel cohort pre-filter');
+		const runner: EnsureRunner = (_command, _arguments, signal) => {
+			expect(signal).toBe(controller.signal);
+			controller.abort(reason);
+
+			return Promise.reject(reason);
+		};
+
+		await expect(
+			cohortPreFilter(
+				planInputs({ temporaryDirectory: directory }),
+				{ cohorts },
+				evaluations,
+				runner,
+				controller.signal,
+				() => Promise.resolve('batched')
+			)
+		).rejects.toBe(reason);
+	});
+});
+
 describe('cohort-matrix output', () => {
 	it('plans 260 targets in three cohort jobs', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
@@ -2895,15 +3337,18 @@ async function plannedCohorts(
 			command: readonly string[]
 		) => Promise<ReadonlySet<string>>;
 		readonly inspectDocumentVersions?: () => Promise<DocumentVersions>;
+		readonly signal?: AbortSignal;
 	}
 ): Promise<{
 	readonly matrix: unknown;
 	readonly summary: unknown;
 	readonly warnings: readonly string[];
+	readonly infos: readonly string[];
 }> {
 	const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 	const output = path.join(planDirectory, 'output');
 	const warnings: string[] = [];
+	const infos: string[] = [];
 	const results: ResultPayload[] = [];
 
 	await planAction(
@@ -2915,6 +3360,9 @@ async function plannedCohorts(
 		},
 		{
 			...warningReporter(warnings),
+			info: (message: string) => {
+				infos.push(message);
+			},
 			result: (payload: ResultPayload) => {
 				results.push(payload);
 			}
@@ -2940,7 +3388,8 @@ async function plannedCohorts(
 	return {
 		matrix,
 		summary: results.find((result) => result.kind === 'publication-plan')?.data,
-		warnings
+		warnings,
+		infos
 	};
 }
 
@@ -3014,6 +3463,176 @@ describe('root ensure mode', () => {
 			expect(forms).toStrictEqual(expected);
 		}
 	);
+});
+
+const fallbackInfo = (reason: string): string =>
+	`Checking the retention root of each cohort target with its own root targets and root ensure commands, because ${reason}`;
+
+const planVersion2 = (): Promise<DocumentVersions> =>
+	Promise.resolve({ publishPlan: 2 });
+
+// The destination does not serve the first target's output, so the target's
+// cohort stays in the plan and the pre-filter checks its root. It serves every
+// other output.
+const firstOutputMissing = (): Promise<Response> =>
+	Promise.resolve(Response.json({ missingStorePathHashes: ['1'.repeat(32)] }));
+
+describe('cohort pre-filter mode', () => {
+	const outputPath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+	const root = 'github:owner/repo/main/x86_64-linux/app';
+	const batchedCounts = { 'root targets --plan': 1, 'root ensure --plan': 1 };
+	const perTargetCounts = { 'root targets': 1, 'root ensure': 1 };
+	const withPlanOption = ['--complete-targets', '--plan'];
+	const outputDerivations = {
+		[target.rootDrvPath]: {
+			env: { out: outputPath },
+			inputs: { drvs: {} },
+			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+		}
+	};
+
+	function dispatchingRunner(counts: Record<string, number>): EnsureRunner {
+		const batched = batchedPreFilterRunner().runner;
+		const perTarget = preFilterRunner({
+			targetsByRoot: new Map([[root, [outputPath]]]),
+			ensureRetainedRoots: new Set([root])
+		});
+
+		return countingRunner(
+			(command, arguments_, signal, environment) =>
+				arguments_.includes('--plan')
+					? batched(command, arguments_, signal, environment)
+					: perTarget(command, arguments_, signal, environment),
+			counts
+		);
+	}
+
+	it.each([
+		{
+			name: 'two batched commands when the installed cupboard reads the plan version and has root targets --plan',
+			versions: planVersion2,
+			options: () => Promise.resolve(new Set(withPlanOption)),
+			expected: { counts: batchedCounts, infos: [] }
+		},
+		{
+			name: 'a command pair per target when the installed cupboard has no root targets --plan',
+			versions: planVersion2,
+			options: () => Promise.resolve(new Set(['--complete-targets'])),
+			expected: {
+				counts: perTargetCounts,
+				infos: [
+					fallbackInfo('the installed cupboard has no root targets --plan')
+				]
+			}
+		},
+		{
+			name: 'a command pair per target when the installed cupboard reads another plan version',
+			versions: () => Promise.resolve({ publishPlan: 3 }),
+			options: () => Promise.resolve(new Set(withPlanOption)),
+			expected: {
+				counts: perTargetCounts,
+				infos: [fallbackInfo('cupboard reads publish plan version 3, not 2')]
+			}
+		},
+		{
+			name: 'a command pair per target when the installed cupboard cannot report its document versions',
+			versions: () => Promise.reject(new Error('no document-versions')),
+			options: () => Promise.resolve(new Set(withPlanOption)),
+			expected: {
+				counts: perTargetCounts,
+				infos: [
+					fallbackInfo(
+						'cupboard could not report the document versions that it reads: no document-versions'
+					)
+				]
+			}
+		},
+		{
+			name: 'a command pair per target when the installed cupboard cannot report the options of root targets',
+			versions: planVersion2,
+			options: (command: readonly string[]) =>
+				command.includes('targets')
+					? Promise.reject(new Error('no root targets help'))
+					: Promise.resolve(new Set(withPlanOption)),
+			expected: {
+				counts: perTargetCounts,
+				infos: [
+					fallbackInfo(
+						'cupboard could not report the options of root targets: no root targets help'
+					)
+				]
+			}
+		}
+	])('starts $name', async ({ versions, options, expected }) => {
+		const counts: Record<string, number> = {};
+
+		const { infos } = await plannedCohorts({}, outputDerivations, {
+			fetcher: firstOutputMissing,
+			runner: dispatchingRunner(counts),
+			inspectCommandOptions: (_binaryPath, command) => options(command),
+			inspectDocumentVersions: versions
+		});
+
+		expect({ counts, infos }).toStrictEqual(expected);
+	});
+
+	it('stops the plan when the options of root targets cannot be read because of a cancellation', async () => {
+		const controller = new AbortController();
+		const reason = new Error('cancel the plan');
+
+		await expect(
+			plannedCohorts({}, outputDerivations, {
+				fetcher: firstOutputMissing,
+				runner: dispatchingRunner({}),
+				inspectCommandOptions: (_binaryPath, command) => {
+					if (!command.includes('targets')) {
+						return Promise.resolve(new Set(withPlanOption));
+					}
+
+					controller.abort(reason);
+
+					return Promise.reject(new Error('no root targets help'));
+				},
+				inspectDocumentVersions: planVersion2,
+				signal: controller.signal
+			})
+		).rejects.toBe(reason);
+	});
+
+	it('reads the document versions once for the ensure of served roots and the pre-filter', async () => {
+		const counts: Record<string, number> = {};
+		const documentVersionReads: number[] = [];
+		const servedPath = storePath(`/nix/store/${'2'.repeat(32)}-app-b`);
+
+		await plannedCohorts(
+			{ targets: JSON.stringify([target, secondTarget]) },
+			{
+				...outputDerivations,
+				[secondTarget.rootDrvPath]: {
+					env: { out: servedPath },
+					inputs: { drvs: {} },
+					outputs: { out: { path: `${'2'.repeat(32)}-app-b` } }
+				}
+			},
+			{
+				// The destination serves the second target, so its root is ensured,
+				// and not the first, so the pre-filter checks the first one.
+				fetcher: firstOutputMissing,
+				runner: countingRunner(batchedPreFilterRunner().runner, counts),
+				inspectCommandOptions: () => Promise.resolve(new Set(withPlanOption)),
+				inspectDocumentVersions: () => {
+					documentVersionReads.push(documentVersionReads.length);
+
+					return planVersion2();
+				}
+			}
+		);
+
+		expect({ counts, documentVersionReads }).toStrictEqual({
+			counts: { 'root ensure --plan': 2, 'root targets --plan': 1 },
+			documentVersionReads: [0]
+		});
+	});
 });
 
 describe('cohort packing', () => {
