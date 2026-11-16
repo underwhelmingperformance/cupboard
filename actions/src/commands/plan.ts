@@ -27,7 +27,8 @@ import {
 	type PublishPlanDocument,
 	publishPlanVersion,
 	type PublishTarget,
-	publishTargetsSchema
+	publishTargetsSchema,
+	type RetainedTarget
 } from '@cupboard/protocol/publish-plan';
 import {
 	type RootBatchResult,
@@ -36,6 +37,8 @@ import {
 	rootEnsureResponseSchema,
 	rootSetMaxTargets,
 	type RootTarget,
+	type RootTargetListings,
+	rootTargetListingsSchema,
 	rootTargetSchema
 } from '@cupboard/protocol/retention';
 import {
@@ -783,9 +786,12 @@ async function planResolved(
 	reporter: Reporter,
 	dependencies: PlanDependencies
 ): Promise<void> {
+	// The ensure of served roots and the pre-filter both depend on the version
+	// of the installed cupboard, which one `document-versions` run reports.
+	const ensureChoice = memoised(() => rootEnsureChoice(inputs, dependencies));
 	const { plan, evaluations, referencePublications, availability } =
 		inputs.optimise
-			? await optimisedPlan(inputs, reporter, dependencies)
+			? await optimisedPlan(inputs, reporter, dependencies, ensureChoice)
 			: {
 					plan: unoptimisedPlan(inputs.targets),
 					evaluations: [],
@@ -809,7 +815,8 @@ async function planResolved(
 			{ cohorts: plan.cohorts },
 			evaluations,
 			dependencies.runner,
-			dependencies.signal
+			dependencies.signal,
+			() => preFilterMode(inputs, dependencies, reporter, ensureChoice)
 		);
 		const byKey = new Map(checked.map((decision) => [decision.key, decision]));
 		cohortDecisions = plan.cohorts.map(
@@ -967,11 +974,10 @@ an older release has no `--plan`, or reads another plan version, and gets one
 ensure per root, which every release accepts. A cupboard that cannot report
 its document versions is treated the same way.
 */
-async function rootEnsureMode(
+async function rootEnsureChoice(
 	inputs: PlanInputs,
-	dependencies: PlanDependencies,
-	reporter: Reporter
-): Promise<RootEnsureMode> {
+	dependencies: PlanDependencies
+): Promise<RootEnsureChoice> {
 	let versions: DocumentVersions;
 
 	try {
@@ -980,28 +986,86 @@ async function rootEnsureMode(
 		)(inputs.cupboardPath, dependencies.signal);
 	} catch (error) {
 		dependencies.signal?.throwIfAborted();
-		reporter.info(
-			`Ensuring each served root separately, because cupboard could not report the document versions that it reads: ${error instanceof Error ? error.message : String(error)}`
-		);
 
-		return 'per-root';
+		return {
+			mode: 'per-root',
+			reason: `cupboard could not report the document versions that it reads: ${error instanceof Error ? error.message : String(error)}`
+		};
 	}
 
 	if (versions.publishPlan !== publishPlanVersion) {
-		reporter.info(
-			`Ensuring each served root separately, because cupboard reads publish plan version ${String(versions.publishPlan ?? 'none')}, not ${String(publishPlanVersion)}.`
-		);
-
-		return 'per-root';
+		return {
+			mode: 'per-root',
+			reason: `cupboard reads publish plan version ${String(versions.publishPlan ?? 'none')}, not ${String(publishPlanVersion)}`
+		};
 	}
 
-	return 'plan';
+	return { mode: 'plan' };
+}
+
+/**
+The outcome of `rootEnsureChoice`. A `per-root` choice includes the reason, so
+each caller can log what it does instead.
+*/
+type RootEnsureChoice =
+	| { readonly mode: 'plan' }
+	| { readonly mode: 'per-root'; readonly reason: string };
+
+function memoised<T>(compute: () => Promise<T>): () => Promise<T> {
+	let pending: Promise<T> | undefined;
+
+	return () => (pending ??= compute());
+}
+
+/**
+Uses the batched pre-filter only when `root ensure --plan` is usable
+(`rootEnsureChoice`) and the installed cupboard also has `root targets --plan`.
+Otherwise the pre-filter starts one `root targets` and one `root ensure`
+command for each target, and this function logs why.
+*/
+async function preFilterMode(
+	inputs: PlanInputs,
+	dependencies: PlanDependencies,
+	reporter: Reporter,
+	ensureChoice: () => Promise<RootEnsureChoice>
+): Promise<PreFilterMode> {
+	const perTarget = (reason: string): PreFilterMode => {
+		reporter.info(
+			`Checking the retention root of each cohort target with its own root targets and root ensure commands, because ${reason}`
+		);
+
+		return 'per-target';
+	};
+	const choice = await ensureChoice();
+
+	if (choice.mode === 'per-root') {
+		return perTarget(choice.reason);
+	}
+
+	let options: ReadonlySet<string>;
+
+	try {
+		options = await (
+			dependencies.inspectCommandOptions ?? inspectCommandOptions
+		)(inputs.cupboardPath, ['root', 'targets'], dependencies.signal);
+	} catch (error) {
+		dependencies.signal?.throwIfAborted();
+
+		return perTarget(
+			`cupboard could not report the options of root targets: ${error instanceof Error ? error.message : String(error)}`
+		);
+	}
+
+	return options.has('--plan')
+		? 'batched'
+		: perTarget('the installed cupboard has no root targets --plan');
 }
 
 async function optimisedPlan(
 	inputs: PlanInputs,
 	reporter: Reporter,
-	dependencies: PlanDependencies
+	dependencies: PlanDependencies,
+	ensureChoice: () => Promise<RootEnsureChoice>
 ): Promise<{
 	readonly plan: PublishPlan;
 	readonly evaluations: readonly TargetEvaluation[];
@@ -1039,7 +1103,17 @@ async function optimisedPlan(
 			destinationPaths,
 			dependencies.runner,
 			dependencies.signal,
-			() => rootEnsureMode(inputs, dependencies, reporter)
+			async () => {
+				const choice = await ensureChoice();
+
+				if (choice.mode === 'per-root') {
+					reporter.info(
+						`Ensuring each served root separately, because ${choice.reason}`
+					);
+				}
+
+				return choice.mode;
+			}
 		),
 		checkReferenceForCohorts(inputs, evaluations, destinationPaths, {
 			...(dependencies.fetcher !== undefined && {
@@ -1418,7 +1492,18 @@ export async function ensureAvailableTargets(
 	}
 
 	if ((await ensureMode()) === 'plan') {
-		return ensureRootsFromPlan(inputs, cached, runner, signal);
+		return ensureRootsFromPlan(
+			inputs,
+			cached.map(({ rootSuffix, evaluations }) => ({
+				rootSuffix,
+				retained: evaluations.map((evaluation) => ({
+					...evaluation.target,
+					paths: evaluation.targetPaths
+				}))
+			})),
+			runner,
+			signal
+		);
 	}
 
 	const results = await mapWithConcurrency(
@@ -1467,42 +1552,62 @@ function describedRoots(names: readonly string[]): string {
 	return hidden > 0 ? `${shown} and ${String(hidden)} more` : shown;
 }
 
-// The provisional plan lists the served targets as retained, so a single
-// `root ensure --plan` invocation ensures each of their roots in batches.
-async function ensureRootsFromPlan(
+/**
+The retained targets of one root, as a provisional plan lists them. The
+components of an aggregate target share their root.
+*/
+interface PlanRoot {
+	readonly rootSuffix: string;
+	readonly retained: readonly RetainedTarget[];
+}
+
+// A provisional plan lists the targets whose roots a command reads, so one
+// `root ensure --plan` or `root targets --plan` invocation covers every root.
+async function writeProvisionalPlan(
 	inputs: PlanInputs,
-	cached: readonly CachedRoot[],
-	runner: EnsureRunner,
-	signal?: AbortSignal
-): Promise<Set<string>> {
-	const roots = cached.map((root) => ({
-		rootSuffix: root.rootSuffix,
-		name: joinRoot(inputs.rootPrefix, root.rootSuffix)
-	}));
-	const description = describedRoots(roots.map((root) => root.name));
+	roots: readonly PlanRoot[],
+	fileKind: 'root-ensure-plan' | 'root-targets-plan'
+): Promise<string> {
 	const planFile = path.join(
 		inputs.temporaryDirectory,
-		`cupboard-root-ensure-plan-${randomUUID()}.json`
-	);
-	const resultFile = path.join(
-		inputs.temporaryDirectory,
-		`cupboard-root-ensure-${randomUUID()}.jsonl`
+		`cupboard-${fileKind}-${randomUUID()}.json`
 	);
 	const provisional: PublishPlanDocument = {
 		version: publishPlanVersion,
 		rootPrefix: inputs.rootPrefix,
-		retained: cached.flatMap((root) =>
-			root.evaluations.map((evaluation) => ({
-				...evaluation.target,
-				paths: evaluation.targetPaths
-			}))
-		),
+		retained: roots.flatMap((root) => root.retained),
 		targets: [],
 		cohorts: [],
 		cohortPreFilter: []
 	};
 
 	await writeFile(planFile, `${JSON.stringify(provisional, undefined, 2)}\n`);
+
+	return planFile;
+}
+
+// A single `root ensure --plan` invocation ensures the root of each target of
+// the provisional plan in batches.
+async function ensureRootsFromPlan(
+	inputs: PlanInputs,
+	planRoots: readonly PlanRoot[],
+	runner: EnsureRunner,
+	signal?: AbortSignal
+): Promise<Set<string>> {
+	const roots = planRoots.map((root) => ({
+		rootSuffix: root.rootSuffix,
+		name: joinRoot(inputs.rootPrefix, root.rootSuffix)
+	}));
+	const description = describedRoots(roots.map((root) => root.name));
+	const planFile = await writeProvisionalPlan(
+		inputs,
+		planRoots,
+		'root-ensure-plan'
+	);
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-root-ensure-${randomUUID()}.jsonl`
+	);
 
 	try {
 		await runner(
@@ -1817,6 +1922,110 @@ function rootTargetsResponse(
 	throw new RootTargetsResultMissingError(root);
 }
 
+// A single `root targets --plan` invocation reads the reconciled targets of
+// every root of the provisional plan. A root that the result omits is an
+// error, because the pre-filter treats a missing list as an empty one.
+async function readRootTargetsFromPlan(
+	inputs: PlanInputs,
+	planRoots: readonly PlanRoot[],
+	runner: EnsureRunner,
+	signal?: AbortSignal
+): Promise<ReadonlyMap<string, ReadonlySet<StorePathString>>> {
+	const names = planRoots.map((root) =>
+		joinRoot(inputs.rootPrefix, root.rootSuffix)
+	);
+	const description = describedRoots(names);
+	const planFile = await writeProvisionalPlan(
+		inputs,
+		planRoots,
+		'root-targets-plan'
+	);
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-root-targets-${randomUUID()}.jsonl`
+	);
+
+	try {
+		await runner(
+			inputs.cupboardPath,
+			[
+				'--output-mode',
+				'github',
+				'--no-colour',
+				'--result-file',
+				resultFile,
+				'root',
+				'targets',
+				canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
+				'--plan',
+				planFile,
+				'--github-oidc',
+				...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+			],
+			signal
+		);
+	} catch (error) {
+		signal?.throwIfAborted();
+
+		const replayed = replayCapturedCommandOutput(error);
+
+		throw new RootTargetsCommandError(description, {
+			cause: error,
+			wasReported: replayed.wasReported
+		});
+	}
+
+	const listings = rootTargetListingsResponse(
+		description,
+		await readRootTargetsResults(description, resultFile)
+	);
+	const targetsByRoot = new Map<string, ReadonlySet<StorePathString>>(
+		listings.map((listing) => [
+			listing.name,
+			new Set(listing.targets.map((target) => target.storePath))
+		])
+	);
+
+	for (const name of names) {
+		if (!targetsByRoot.has(name)) {
+			throw new RootTargetsResultMissingError(name);
+		}
+	}
+
+	return targetsByRoot;
+}
+
+function rootTargetListingsResponse(
+	description: string,
+	recorded: string
+): RootTargetListings {
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch (error) {
+		throw new RootTargetsResultInvalidError(description, { cause: error });
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'root-target-listings') {
+			continue;
+		}
+
+		const listings = rootTargetListingsSchema.safeParse(event.data);
+
+		if (!listings.success) {
+			throw new RootTargetsResultInvalidError(description, {
+				cause: listings.error
+			});
+		}
+
+		return listings.data;
+	}
+
+	throw new RootTargetsResultMissingError(description);
+}
+
 async function targetCoverageOutcome(
 	target: PublishTarget,
 	evaluationByTarget: ReadonlyMap<string, TargetEvaluation>,
@@ -1874,6 +2083,175 @@ async function targetCoverageOutcome(
 }
 
 /**
+How the pre-filter checks the roots of the cohort targets: through one
+`cupboard root targets --plan` and one `cupboard root ensure --plan`
+invocation for the whole plan, or, for a released cupboard without those
+options, through one `root targets` and one `root ensure` invocation for each
+target.
+*/
+export type PreFilterMode = 'batched' | 'per-target';
+
+function failedCoverage(target: PublishTarget, error: unknown): TargetCoverage {
+	return {
+		attr: target.attr,
+		status: 'failed',
+		reason: error instanceof Error ? error.message : String(error)
+	};
+}
+
+interface CheckableTarget {
+	readonly target: PublishTarget;
+	readonly evaluation: TargetEvaluation;
+}
+
+// The roots of the targets that the pre-filter can check, with each root's
+// targets in plan order. A target without a complete evaluation has no
+// coverage to check.
+function checkableRoots(
+	targets: readonly PublishTarget[],
+	evaluationByTarget: ReadonlyMap<string, TargetEvaluation>
+): {
+	readonly unknown: readonly PublishTarget[];
+	readonly roots: ReadonlyMap<
+		string,
+		readonly [CheckableTarget, ...CheckableTarget[]]
+	>;
+} {
+	const unknown: PublishTarget[] = [];
+	const roots = new Map<string, [CheckableTarget, ...CheckableTarget[]]>();
+
+	for (const target of targets) {
+		const evaluation = evaluationByTarget.get(targetIdentityKey(target));
+
+		if (evaluation?.targetPaths.length !== target.outputs.length) {
+			unknown.push(target);
+			continue;
+		}
+
+		const members = roots.get(target.rootSuffix);
+
+		if (members === undefined) {
+			roots.set(target.rootSuffix, [{ target, evaluation }]);
+			continue;
+		}
+
+		members.push({ target, evaluation });
+	}
+
+	return { unknown, roots };
+}
+
+// Reads the reconciled list of every root with one invocation, then ensures
+// every non-empty list with another. A failed invocation fails the targets
+// that depended on it. The roots of the targets are read and ensured once,
+// however many targets share a root.
+async function batchedCoverage(
+	inputs: PlanInputs,
+	targets: readonly PublishTarget[],
+	evaluationByTarget: ReadonlyMap<string, TargetEvaluation>,
+	runner: EnsureRunner,
+	signal?: AbortSignal
+): Promise<ReadonlyMap<string, TargetCoverage>> {
+	const { unknown, roots } = checkableRoots(targets, evaluationByTarget);
+	const coverageByTarget = new Map<string, TargetCoverage>(
+		unknown.map((target) => [
+			targetIdentityKey(target),
+			{ attr: target.attr, status: 'unknown-output' }
+		])
+	);
+
+	if (roots.size === 0) {
+		return coverageByTarget;
+	}
+
+	const planRoots = [...roots].map(([rootSuffix, members]) => ({
+		rootSuffix,
+		retained: members.map(({ target, evaluation }) => ({
+			...target,
+			paths: evaluation.targetPaths
+		}))
+	}));
+	const setCoverage = (
+		members: readonly CheckableTarget[],
+		coverage: (member: CheckableTarget) => TargetCoverage
+	): void => {
+		for (const member of members) {
+			coverageByTarget.set(targetIdentityKey(member.target), coverage(member));
+		}
+	};
+	let reconciledByRoot: ReadonlyMap<string, ReadonlySet<StorePathString>>;
+
+	try {
+		reconciledByRoot = await readRootTargetsFromPlan(
+			inputs,
+			planRoots,
+			runner,
+			signal
+		);
+	} catch (error) {
+		signal?.throwIfAborted();
+
+		for (const members of roots.values()) {
+			setCoverage(members, ({ target }) => failedCoverage(target, error));
+		}
+
+		return coverageByTarget;
+	}
+
+	const reconciledOf = (rootSuffix: string): ReadonlySet<StorePathString> =>
+		reconciledByRoot.get(joinRoot(inputs.rootPrefix, rootSuffix)) ?? new Set();
+	const ensurable = [...roots].filter(
+		([rootSuffix]) => reconciledOf(rootSuffix).size > 0
+	);
+
+	for (const [rootSuffix, members] of roots) {
+		if (reconciledOf(rootSuffix).size === 0) {
+			setCoverage(members, ({ target }) => ({
+				attr: target.attr,
+				status: 'not-covered'
+			}));
+		}
+	}
+
+	if (ensurable.length === 0) {
+		return coverageByTarget;
+	}
+
+	let retainedSuffixes: ReadonlySet<string>;
+
+	try {
+		retainedSuffixes = await ensureRootsFromPlan(
+			inputs,
+			ensurable.map(([rootSuffix, [first]]) => ({
+				rootSuffix,
+				retained: [{ ...first.target, paths: [...reconciledOf(rootSuffix)] }]
+			})),
+			runner,
+			signal
+		);
+	} catch (error) {
+		signal?.throwIfAborted();
+
+		for (const [, members] of ensurable) {
+			setCoverage(members, ({ target }) => failedCoverage(target, error));
+		}
+
+		return coverageByTarget;
+	}
+
+	for (const [rootSuffix, members] of ensurable) {
+		setCoverage(members, ({ target, evaluation }) =>
+			evaluateTargetCoverage(target, evaluation.targetPaths, {
+				retained: retainedSuffixes.has(rootSuffix),
+				reconciledPaths: reconciledOf(rootSuffix)
+			})
+		);
+	}
+
+	return coverageByTarget;
+}
+
+/**
 Returns an advisory prune decision for every cohort. The filter reads only
 retention roots, so each remaining job still calculates its partition
 against the selected store. A failed check keeps the cohort in the matrix
@@ -1884,7 +2262,8 @@ export async function cohortPreFilter(
 	plan: Pick<PublishPlan, 'cohorts'>,
 	evaluations: readonly TargetEvaluation[],
 	runner: EnsureRunner = defaultEnsureRunner,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	mode: () => Promise<PreFilterMode> = () => Promise.resolve('per-target')
 ): Promise<readonly CohortPreFilterDecision[]> {
 	const evaluationByTarget = new Map(
 		evaluations.map((evaluation) => [
@@ -1893,22 +2272,34 @@ export async function cohortPreFilter(
 		])
 	);
 	const targets = plan.cohorts.flatMap((cohort) => cohort.targets);
-	const coverageEntries = await mapWithConcurrency(
-		targets,
-		maximumConcurrentRootEnsures,
-		async (target) =>
-			[
-				targetIdentityKey(target),
-				await targetCoverageOutcome(
-					target,
-					evaluationByTarget,
+	const hasCheckableTarget =
+		checkableRoots(targets, evaluationByTarget).roots.size > 0;
+	const coverageByTarget =
+		hasCheckableTarget && (await mode()) === 'batched'
+			? await batchedCoverage(
 					inputs,
+					targets,
+					evaluationByTarget,
 					runner,
 					signal
 				)
-			] as const
-	);
-	const coverageByTarget = new Map(coverageEntries);
+			: new Map(
+					await mapWithConcurrency(
+						targets,
+						maximumConcurrentRootEnsures,
+						async (target) =>
+							[
+								targetIdentityKey(target),
+								await targetCoverageOutcome(
+									target,
+									evaluationByTarget,
+									inputs,
+									runner,
+									signal
+								)
+							] as const
+					)
+				);
 
 	return plan.cohorts.map((cohort) =>
 		cohortPreFilterDecision(cohort, coverageByTarget)

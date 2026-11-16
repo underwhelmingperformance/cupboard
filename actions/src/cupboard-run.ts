@@ -49,7 +49,8 @@ export type CacheCommand =
 	| readonly ['attest', 'attach']
 	| readonly ['run']
 	| readonly ['build-push']
-	| readonly ['plan', 'cohort'];
+	| readonly ['plan', 'cohort']
+	| readonly ['root', 'targets'];
 
 /**
 The long options listed by a command's `--help` output. Released CLIs support
