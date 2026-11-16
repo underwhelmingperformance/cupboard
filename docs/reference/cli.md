@@ -965,7 +965,7 @@ Commands:
   ensure [options] <url> [name] [store-path...]  Set a root only if the cache can serve every store path. Otherwise, list the missing store paths and change nothing.
   set [options] <url> <name> <store-path...>     Create a retention root, or replace an existing root's targets.
   list [options] <url> [cache]                   List a cache's retention roots, with their target counts and expiry.
-  targets [options] <url> <name>                 List a retention root's targets, and show which of them the cache is missing.
+  targets [options] <url> [name]                 List a retention root's targets, and show which of them the cache is missing.
   remove [options] <url> <name>                  Remove a retention root.
   help [command]                                 display help for command
 ```
@@ -1047,7 +1047,7 @@ Options:
 #### cupboard root targets
 
 ```text
-Usage: cupboard root targets [options] <url> <name>
+Usage: cupboard root targets [options] <url> [name]
 
 List a retention root's targets, and show which of them the cache is missing.
 
@@ -1057,6 +1057,9 @@ Arguments:
   name                   root name (e.g. github:acme/app/main)
 
 Options:
+  --plan <file>          list the targets of the root of every retained target
+                         in this publish plan, which the publish workflow's plan
+                         step writes, instead of one named root
   --github-oidc          sign in with the job's GitHub Actions OIDC token
                          instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:

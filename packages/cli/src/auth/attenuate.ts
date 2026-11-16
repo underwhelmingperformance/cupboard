@@ -31,7 +31,7 @@ export interface RootEnsureGrantIntent {
 	readonly root: RootName;
 }
 
-export interface RootSetGrantIntent {
+export interface RootsGrantIntent {
 	readonly cache: CacheScope;
 	readonly roots: readonly RootName[];
 }
@@ -318,18 +318,40 @@ function sharedRootPrefix(roots: readonly RootName[]): RootName | undefined {
 	return end < 0 ? undefined : rootNameSchema.parse(first.slice(0, end + 1));
 }
 
-function rootSetDetails(
+type RootAction = 'root:set' | 'root:list';
+
+function rootDetails(
 	cache: CacheScope,
+	action: RootAction,
 	selectors: readonly RootName[]
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse(
 		selectors.map((root) => ({
 			type: 'cupboard_cache',
-			actions: ['root:set'],
+			actions: [action],
 			cache,
 			root
 		}))
 	);
+}
+
+function rootSelectors(
+	cache: CacheScope,
+	action: RootAction,
+	roots: readonly RootName[]
+): readonly RootName[] {
+	const exact = [...new Set(roots)];
+	const exactBytes = new TextEncoder().encode(
+		JSON.stringify(rootDetails(cache, action, exact))
+	).byteLength;
+
+	if (exactBytes <= exactRootGrantsMaxBytes) {
+		return exact;
+	}
+
+	const prefix = sharedRootPrefix(exact);
+
+	return prefix === undefined ? exact : [prefix];
 }
 
 /**
@@ -343,18 +365,7 @@ export function rootSetSelectors(
 	cache: CacheScope,
 	roots: readonly RootName[]
 ): readonly RootName[] {
-	const exact = [...new Set(roots)];
-	const exactBytes = new TextEncoder().encode(
-		JSON.stringify(rootSetDetails(cache, exact))
-	).byteLength;
-
-	if (exactBytes <= exactRootGrantsMaxBytes) {
-		return exact;
-	}
-
-	const prefix = sharedRootPrefix(exact);
-
-	return prefix === undefined ? exact : [prefix];
+	return rootSelectors(cache, 'root:set', roots);
 }
 
 /**
@@ -362,10 +373,26 @@ Requests `root:set` for every root in one batched update, with the selectors
 that `rootSetSelectors` chooses.
 */
 export function rootSetAuthorizationDetails(
-	intent: RootSetGrantIntent
+	intent: RootsGrantIntent
 ): AuthorizationDetails {
-	return rootSetDetails(
+	return rootDetails(
 		intent.cache,
+		'root:set',
 		rootSetSelectors(intent.cache, intent.roots)
+	);
+}
+
+/**
+Requests `root:list` for every root whose targets one command reads, with the
+same selector rules as `rootSetAuthorizationDetails`. The token cannot change
+a root.
+*/
+export function rootTargetsAuthorizationDetails(
+	intent: RootsGrantIntent
+): AuthorizationDetails {
+	return rootDetails(
+		intent.cache,
+		'root:list',
+		rootSelectors(intent.cache, 'root:list', intent.roots)
 	);
 }

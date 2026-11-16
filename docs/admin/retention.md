@@ -151,6 +151,7 @@ paths, not symlinks.
 | `root ensure <url> --plan <file>`    | Ensures the root of every retained target in a publish plan, through batched requests. The publish workflow's plan step uses it.                                        |
 | `root list <url> [cache]`            | Lists the roots, with how many targets each has and when it expires.                                                                                                    |
 | `root targets <url> <name>`          | Lists a root's targets, and marks any that are missing.                                                                                                                 |
+| `root targets <url> --plan <file>`   | Lists the targets of the root of every retained target in a publish plan, with one request per root and page. The publish workflow's plan step uses it.                 |
 | `root remove <url> <name>`           | Removes the root, which releases its targets. In a script, add `--yes` to skip the confirmation.                                                                        |
 
 ### Pins

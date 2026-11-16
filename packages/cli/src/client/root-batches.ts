@@ -10,7 +10,8 @@ import { UsageError } from '@cupboard/shared/errors';
 export type RootBatchEntry = RootBatchBody['roots'][number];
 
 // A server from before `roots.batch` gets one request per root. A push sets its
-// implicit pins with the same number of requests at a time.
+// implicit pins, and `root targets --plan` reads the targets of its roots, with
+// the same number of requests at a time.
 export const separateRootRequestConcurrency = 6;
 
 export class RootTargetLimitError extends UsageError {

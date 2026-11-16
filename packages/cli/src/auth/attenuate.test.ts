@@ -16,7 +16,8 @@ import {
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails,
-	rootSetAuthorizationDetails
+	rootSetAuthorizationDetails,
+	rootTargetsAuthorizationDetails
 } from './attenuate.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
@@ -311,6 +312,47 @@ describe('rootListAuthorizationDetails', () => {
 		const [grant] = rootListAuthorizationDetails({ cache: defaultCache });
 
 		expect(grant).toMatchObject({ cache: { kind: 'default' } });
+	});
+});
+
+describe('rootTargetsAuthorizationDetails', () => {
+	const manyRoots = Array.from(
+		{ length: 400 },
+		(_, index) => `github:acme/app/main/x86_64-linux/target-${String(index)}`
+	);
+
+	it.each([
+		{
+			name: 'the exact name of each root while the grants are small',
+			roots: [
+				'github:acme/app/main/x86_64-linux/app',
+				'github:acme/app/main/aarch64-darwin/app',
+				'github:acme/app/main/x86_64-linux/app'
+			],
+			selectors: [
+				'github:acme/app/main/x86_64-linux/app',
+				'github:acme/app/main/aarch64-darwin/app'
+			]
+		},
+		{
+			name: 'the longest shared prefix when exact grants would exceed the budget',
+			roots: manyRoots,
+			selectors: ['github:acme/app/main/x86_64-linux/']
+		}
+	])('requests root:list for $name', ({ roots, selectors }) => {
+		expect(
+			rootTargetsAuthorizationDetails({
+				cache: namedCache('nightly'),
+				roots: roots.map((root) => rootName(root))
+			})
+		).toStrictEqual(
+			selectors.map((root) => ({
+				type: 'cupboard_cache',
+				actions: ['root:list'],
+				cache: namedCache('nightly'),
+				root
+			}))
+		);
 	});
 });
 
