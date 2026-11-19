@@ -73,7 +73,9 @@ export function parseStoredUploadPathMetadata(
 			narSize,
 			references,
 			deriver,
-			ca
+			ca,
+			buildInputs,
+			buildInputsVersion
 		} = full.data;
 
 		return {
@@ -83,7 +85,8 @@ export function parseStoredUploadPathMetadata(
 			narSize,
 			references,
 			deriver,
-			ca
+			ca,
+			...(buildInputs !== undefined && { buildInputs, buildInputsVersion })
 		};
 	}
 

@@ -359,9 +359,11 @@ A narinfo row refers to other paths in two columns. Each column is a JSON array
 of store path basenames. `references_json` lists the path's runtime references.
 `build_inputs_json` lists its build inputs, which are the outputs that its
 derivation used when it was built. The column is NULL when no build inputs are
-recorded. The mark phase walks the references and then the build inputs as one
-sequence. A retained path therefore also keeps the build inputs that the cache
-has. It also keeps the paths that those inputs keep in turn.
+recorded. The publication that creates a row records its build inputs, as
+[Pushing store paths](#pushing-store-paths) describes. The mark phase walks the
+references and then the build inputs as one sequence. A retained path therefore
+also keeps the build inputs that the cache has. It also keeps the paths that
+those inputs keep in turn.
 
 The phase queues a referenced path whether or not the cache has a narinfo row
 for it, and it marks an absent one. It queues a build input only when the cache
@@ -1584,6 +1586,52 @@ beyond those caches is missed. The answer depends only on caches that the token
 may reuse from, so other caches never change whether a source appears. A request
 with more than 1,024 hashes receives `UPLOAD_REQUEST_LIMIT_EXCEEDED`, HTTP 413
 and `data.maxPaths` before the object reads any narinfo or cache rows.
+
+A client can also accept `build-inputs-v1` on the credential request. When the
+server echoes it, the client can send `buildInputs` and `buildInputsVersion` in
+the metadata of each path, in any of the push protocols. Older servers reject
+metadata with fields that they do not know, so a client sends the fields only
+after the echo. The server writes `build_inputs_json` and `build_inputs_version`
+only when it creates the path's narinfo row. That includes a row that replaces a
+row whose NAR is missing. A commit or a verification pass that finds a row of
+the same narinfo version keeps the row's build inputs. The publication that
+created a row therefore decides its build inputs. A path without build inputs
+gets a row with both columns NULL.
+
+Build inputs can make the metadata of one path about 1.5 MB. A client that sends
+build inputs must accept `build-inputs-v1` in `x-cupboard-accept-capabilities`
+on every negotiation, preview and plan request, and the Worker and the tenant
+object decide by that header how to treat the request. They refuse a request
+that contains build inputs without the header with
+`BUILD_INPUTS_CAPABILITY_REQUIRED` and HTTP 400. Requests without it are
+otherwise handled as they were before build inputs existed, because CLIs up to
+v0.0.35 send a whole closure in one request: no new body limit, paging by count
+only, and the same advertised maximum.
+
+For a request that accepts `build-inputs-v1`, the body can have at most
+`uploadRequestMaxBodyBytes` (8 MiB), and a larger one is answered with
+`UPLOAD_REQUEST_TOO_LARGE`, HTTP 413 and `data.maxBytes`: by the Worker for
+negotiation and preview, and by the tenant object for planning. Other plan
+requests keep the earlier limit of about 16 MB. The Worker reads such a body
+itself, not a copy, up to the limit, joins its chunks into one buffer, and pages
+it by the size of its path metadata as well as by count, at most 2 MiB a page.
+When the pages need more sends than the subrequests allow, the refusal reports
+the paths of the leading pages that fit. The Worker advertises at most as many
+paths in `x-cupboard-upload-max-paths` as fit in the limit at 4 KiB a path,
+2,047. While the Worker decodes and validates the body, the body, its text, the
+parsed JSON and the validated request exist together, each about as large as the
+body, so one request at the limit needs roughly 32 MiB. Once it has the pages,
+the Worker keeps only the pages and the fields that each page repeats. Six pages
+can be in flight, each taking about twice its size as JSON text and as an
+encoded body, so up to about 24 MiB. For an unpaged request, the negotiation
+hints use the validated request, so the Worker does not copy or parse the body
+again. The limit assumes that few such requests run at once in one isolate,
+which has 128 MB; nothing enforces that, so several concurrent requests at the
+limit can exhaust it. The Worker does not page planning requests or
+`publish-batch` messages. A client that sends build inputs must therefore page
+negotiation, preview and planning requests by bytes as well as by count, keeping
+each plan request within 8 MiB, and keep each `publish-batch` message within its
+4 MiB limit.
 
 The paced WebSocket accepts `publish-batch` with complete metadata and expected
 generation. Clients commit every selected path that confirmation has not

@@ -6,6 +6,7 @@ import {
 	dependencyStatusResponseSchema
 } from '../dependency-status.ts';
 import {
+	buildInputsCapabilityRequiredErrorCode,
 	pushCredentialSchema,
 	pushIdSchema,
 	uploadConfirmPresentRequestSchema,
@@ -21,6 +22,8 @@ import {
 	uploadPreviewResponseSchema,
 	uploadRequestLimitErrorCode,
 	uploadRequestLimitErrorDataSchema,
+	uploadRequestTooLargeErrorCode,
+	uploadRequestTooLargeErrorDataSchema,
 	uploadStatusResponseSchema
 } from '../upload.ts';
 
@@ -35,6 +38,13 @@ const uploadRequestErrors = {
 	[uploadRequestLimitErrorCode]: {
 		status: 413,
 		data: uploadRequestLimitErrorDataSchema
+	},
+	[uploadRequestTooLargeErrorCode]: {
+		status: StatusCodes.REQUEST_TOO_LONG,
+		data: uploadRequestTooLargeErrorDataSchema
+	},
+	[buildInputsCapabilityRequiredErrorCode]: {
+		status: StatusCodes.BAD_REQUEST
 	}
 };
 

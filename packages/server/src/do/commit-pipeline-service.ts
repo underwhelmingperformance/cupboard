@@ -398,6 +398,26 @@ function isStoredReferenceSet(stored: string, expected: string): boolean {
 	);
 }
 
+/**
+The build-input columns of a narinfo row that a publication with `metadata`
+creates. Metadata without build inputs leaves both columns null.
+*/
+function buildInputColumns(
+	metadata: UploadPathNegotiation
+): Pick<
+	typeof schema.narInfos.$inferInsert,
+	'buildInputsJson' | 'buildInputsVersion'
+> {
+	if (metadata.buildInputs === undefined) {
+		return {};
+	}
+
+	return {
+		buildInputsJson: JSON.stringify(referenceSet(metadata.buildInputs)),
+		buildInputsVersion: metadata.buildInputsVersion
+	};
+}
+
 function settledOutcome(
 	charged: ChargeOutcome,
 	narInfo: NarInfo
@@ -2839,6 +2859,7 @@ export class CommitPipelineService {
 				referencesJson: JSON.stringify(referenceSet(metadata.references)),
 				deriver: metadata.deriver,
 				ca: metadata.ca,
+				...buildInputColumns(metadata),
 				sigsJson,
 				generation,
 				signatureGeneration,
@@ -2902,6 +2923,7 @@ export class CommitPipelineService {
 					referencesJson,
 					deriver: metadata.deriver,
 					ca: metadata.ca,
+					...buildInputColumns(metadata),
 					sigsJson,
 					generation,
 					signatureGeneration,
@@ -2937,7 +2959,9 @@ export class CommitPipelineService {
 			// the references as sets, because a row written before uploads
 			// deduplicated them can list one twice. A row with unreadable
 			// references is another version. Do not compare signatures: key rotation
-			// can re-sign the same version.
+			// can re-sign the same version. Do not compare build inputs either: the
+			// publication that created the row decided them, and a later publication
+			// of the same version keeps the row and its build inputs.
 			const isMine =
 				existing.narHash === metadata.narHash &&
 				existing.narSize === metadata.narSize &&
