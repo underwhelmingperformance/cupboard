@@ -26,7 +26,6 @@ import {
 	lt,
 	lte,
 	notExists,
-	or,
 	type SQL,
 	sql
 } from 'drizzle-orm';
@@ -73,6 +72,7 @@ import {
 	GarbageCollectionInputs,
 	type ScanDecision
 } from './garbage-collection-inputs.ts';
+import { inFlightUploadSelect } from './in-flight-upload.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
 import { RootReleaseService } from './root-releases.ts';
@@ -1166,36 +1166,6 @@ export class GarbageCollectionService {
 	}
 
 	/**
-	An upload still in flight for the path the outer statement is looking at.
-
-	`pending` and `committing` are live commit states: verification may still
-	settle them, so a path with such an upload is not collectable.
-
-	`pending_upload_gc_path_idx` covers `(cache, json_extract(metadata_json,
-	'$.storePathHash'), verdict)`. Migration 0032 creates it and `schema.ts`
-	does not declare it, so Drizzle gives no warning when this predicate stops
-	matching the index expression.
-	*/
-	private inFlightUpload(cache: ResolvedCache) {
-		const reservedVerdict = or(
-			eq(schema.pendingUploads.verdict, 'committing'),
-			eq(schema.pendingUploads.verdict, 'pending')
-		);
-		const uploadPath = sql`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
-
-		return this.context.db
-			.select({ one: sql`1` })
-			.from(schema.pendingUploads)
-			.where(
-				and(
-					eq(schema.pendingUploads.cacheId, cache.id),
-					reservedVerdict,
-					eq(uploadPath, schema.narInfos.storePathHash)
-				)
-			);
-	}
-
-	/**
 	Collects the unreachable paths of one step.
 
 	The step reads a page and deletes from that page. A delete that searched
@@ -1232,7 +1202,9 @@ export class GarbageCollectionService {
 
 		for (const paths of jsonRowLists(batch)) {
 			const unmarked = notExists(this.markedPath(cache));
-			const settled = notExists(this.inFlightUpload(cache));
+			const settled = notExists(
+				inFlightUploadSelect(this.context.db, cache.id)
+			);
 			// Unprocessed frontier rows can reference a candidate for deletion.
 			// Keep this condition even if the caller changes the phase order.
 			const markIsCurrent = notExists(
