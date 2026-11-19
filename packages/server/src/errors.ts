@@ -296,6 +296,20 @@ export class RootBatchLimitExceededError extends ServerHttpError {
 	}
 }
 
+export class BuildInputsPageLimitExceededError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(
+		readonly maxEntries: number,
+		readonly maxBuildInputs: number
+	) {
+		super(
+			`The request exceeds the limits of one page. Send at most ${String(maxEntries)} entries and ${String(maxBuildInputs)} build inputs per request.`
+		);
+		this.name = 'BuildInputsPageLimitExceededError';
+	}
+}
+
 /**
 The invocation spent so many subrequests before a confirmation started that
 the remaining calls cannot evaluate even one path. A later request runs in a

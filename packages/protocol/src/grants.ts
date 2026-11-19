@@ -44,6 +44,7 @@ export const cacheOperationSchema = z.enum([
 	'cache:reopen',
 	'cache:delete',
 	'narinfo:delete',
+	'build-inputs:record',
 	'gc:run',
 	'stats:read'
 ]);
@@ -148,6 +149,7 @@ export const operationSchema = z.enum([
 	'cache:defaults-read',
 	'cache:defaults-update',
 	'narinfo:delete',
+	'build-inputs:record',
 	'gc:run',
 	'stats:read',
 	'check:run',

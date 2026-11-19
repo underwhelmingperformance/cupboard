@@ -5,6 +5,7 @@ import type { VerifyReportInput } from '@cupboard/protocol/reports';
 import type { AccessClaims } from '../auth/auth.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
+import type { BuildInputsService } from '../do/build-inputs-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
 import type { ConfirmationService } from '../do/confirmation-service.ts';
 import type { GarbageCollectionOutcome } from '../do/context.ts';
@@ -57,6 +58,7 @@ export interface TenantRpcServices {
 	readonly integrityCheck: IntegrityCheckService;
 	readonly roots: RootsService;
 	readonly deletionQueue: DeletionQueueService;
+	readonly buildInputs: BuildInputsService;
 	// Runs an interactive garbage-collection pass, serialised against the cron
 	// pass and the alarm resume on this instance, and arms the continuation for
 	// any leftover work. The router supplies the cache scope and the caller's purge

@@ -360,10 +360,30 @@ of store path basenames. `references_json` lists the path's runtime references.
 `build_inputs_json` lists its build inputs, which are the outputs that its
 derivation used when it was built. The column is NULL when no build inputs are
 recorded. The publication that creates a row records its build inputs, as
-[Pushing store paths](#pushing-store-paths) describes. The mark phase walks the
-references and then the build inputs as one sequence. A retained path therefore
-also keeps the build inputs that the cache has. It also keeps the paths that
-those inputs keep in turn.
+[Pushing store paths](#pushing-store-paths) describes. `POST /build-inputs` adds
+build inputs to rows that exist. It stores the union of the stored and the given
+sets with the higher of the two versions, and it writes nothing for a row when
+neither changes. It refuses to store more than 8,192 build inputs, more than
+1,000,000 bytes of them, or more than 1,500,000 bytes together with the row's
+references, so repeated requests cannot grow a row without bound. It reads the
+rows of its entries one at a time, in request order, and looks each one up by
+store path as well as hash, so a row of another store path matches nothing.
+SQLite counts the row's stored build inputs with `json_array_length`, which
+reads the stored value but does not load it into JavaScript. A row whose value
+is not a JSON array, that lists more than 8,192, or that has build inputs
+without a version or a version without build inputs is reported invalid without
+being loaded into JavaScript. The same query returns the stored value only when
+the entry fits in what is left of a budget of 32,768 stored and given build
+inputs for each request, so the request loads and parses only the sets that it
+records. At the first entry that would go over the budget, it stops reading rows
+and defers that entry and every later one, so a resent suffix reads only its own
+rows. When the union leaves the stored set as it was, it updates only
+`build_inputs_version`. The narinfo update barrier fires for every update that
+sets `build_inputs_json`, even to the same value, so writing the unchanged set
+would queue a marked path again. The mark phase walks the references and then
+the build inputs as one sequence. A retained path therefore also keeps the build
+inputs that the cache has. It also keeps the paths that those inputs keep in
+turn.
 
 The phase queues a referenced path whether or not the cache has a narinfo row
 for it, and it marks an absent one. It queues a build input only when the cache

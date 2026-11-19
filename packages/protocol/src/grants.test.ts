@@ -285,6 +285,23 @@ describe('root:attach implication', () => {
 	});
 });
 
+// Recording build inputs changes which paths collection keeps, so a grant for
+// publication must not imply it.
+describe('build-inputs:record implication', () => {
+	it.each<
+		[string, (actions: readonly Operation[], operation: Operation) => boolean]
+	>([
+		['at issuance', isOperationPermittedAtIssuance],
+		['by presented authority', isOperationSatisfiedByPresentedActions]
+	])('is reached only by its own action %s', (_name, isImplied) => {
+		const reaching = operationSchema.options.filter((operation) =>
+			isImplied([operation], 'build-inputs:record')
+		);
+
+		expect(reaching).toStrictEqual(['build-inputs:record']);
+	});
+});
+
 describe('isCoveredByToken', () => {
 	it.each<[string, AuthorizationDetail[], Operation, ResourceFields, boolean]>([
 		[
