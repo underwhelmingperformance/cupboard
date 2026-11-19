@@ -253,10 +253,11 @@ export class UploadPageSplitRequiredError extends ServerHttpError {
 export class UploadRequestLimitExceededError extends ServerHttpError {
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
 
-	constructor(readonly maxPaths: number) {
-		super(
-			`The upload request exceeds this invocation's subrequest budget. Send at most ${String(maxPaths)} paths per request.`
-		);
+	constructor(
+		readonly maxPaths: number,
+		message = `The upload request exceeds this invocation's subrequest budget. Send at most ${String(maxPaths)} paths per request.`
+	) {
+		super(message);
 		this.name = 'UploadRequestLimitExceededError';
 	}
 }

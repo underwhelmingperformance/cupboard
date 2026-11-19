@@ -6,9 +6,9 @@ import * as schema from '../db/schema.ts';
 import { type SchemaDatabase } from './context.ts';
 
 /**
-Selects an upload in `cacheId` that is still in flight for the narinfo row
-that the outer statement is looking at. Use it inside `exists` or
-`notExists`.
+Selects an upload in `cacheId` that is still in flight for `storePathHash`,
+which defaults to the narinfo row that the outer statement is looking at.
+Use it inside `exists` or `notExists`.
 
 `pending` and `committing` are live commit states: verification has not yet
 decided them, so the path's row is not yet committed.
@@ -25,7 +25,8 @@ upload of the cache for each narinfo row.
 */
 export function inFlightUploadSelect(
 	database: SchemaDatabase,
-	cacheId: CacheId | SQLWrapper
+	cacheId: CacheId | SQLWrapper,
+	storePathHash: SQLWrapper = schema.narInfos.storePathHash
 ) {
 	const reservedVerdict = or(
 		eq(schema.pendingUploads.verdict, 'committing'),
@@ -40,7 +41,7 @@ export function inFlightUploadSelect(
 			and(
 				eq(schema.pendingUploads.cacheId, cacheId),
 				reservedVerdict,
-				eq(uploadPath, sql`+${schema.narInfos.storePathHash}`)
+				eq(uploadPath, sql`+${storePathHash}`)
 			)
 		);
 }
