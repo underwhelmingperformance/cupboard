@@ -126,6 +126,12 @@ import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
+	collectOneUnitOfWork,
+	driveScanTo,
+	insertNarInfo,
+	insertRoot
+} from './garbage-collection.test-support.ts';
+import {
 	maxRootsExpiredPerRun,
 	phaseStepSize
 } from './garbage-collection-service.ts';
@@ -386,6 +392,62 @@ describe('retention grace deadlines in garbage collection', () => {
 		await runGc();
 
 		expect(await narInfoGeneration(path.storePathHash)).not.toBeUndefined();
+	});
+
+	it('keeps the empty-cache guard when a path arrives during the scan', async () => {
+		await useTestServer('grace-guard-arrival');
+		const { token } = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('f'),
+			name: 'guarded'
+		});
+		const arrived = syntheticStorePathHash(1);
+
+		await pushPath(token, path);
+		await withoutAlarmArming(async () => {
+			await driveScanTo(collectOneUnitOfWork, 'mark');
+			await runInDurableObject(currentServer(), (instance) => {
+				insertNarInfo(instance.context, arrived, 1);
+			});
+			await driveScanTo(collectOneUnitOfWork, undefined);
+		});
+
+		expect({
+			guarded: await narInfoGeneration(path.storePathHash),
+			arrived: await narInfoGeneration(arrived)
+		}).toStrictEqual({ guarded: 0, arrived: 0 });
+	});
+
+	// A failed settle deletes a reserved narinfo row. Here the deleted row is
+	// the cache's only present seed, which the seed phase has already seen.
+	it('keeps the empty-cache guard when the only present seed is deleted during the scan', async () => {
+		await useTestServer('grace-guard-deleted-seed');
+		await bootstrap();
+		const seed = syntheticStorePathHash(1);
+		const unretained = syntheticStorePathHash(2);
+
+		await withoutAlarmArming(async () => {
+			await runInDurableObject(currentServer(), (instance) => {
+				insertNarInfo(instance.context, seed, 1);
+				insertRoot(instance.context, { name: 'channel', target: seed });
+				insertNarInfo(instance.context, unretained, 2);
+			});
+			await driveScanTo(collectOneUnitOfWork, 'mark');
+			await runInDurableObject(currentServer(), (instance, state) => {
+				state.storage.sql.exec(
+					'DELETE FROM narinfo WHERE cache_id = ? AND store_path_hash = ?',
+					resolvedCache(instance.context).id,
+					seed
+				);
+			});
+			await driveScanTo(collectOneUnitOfWork, undefined);
+		});
+
+		expect({
+			seed: await narInfoGeneration(seed),
+			unretained: await narInfoGeneration(unretained)
+		}).toStrictEqual({ seed: undefined, unretained: 0 });
 	});
 
 	it('drains a large expired closure across capped continuation runs', async () => {

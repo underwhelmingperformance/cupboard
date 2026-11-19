@@ -496,7 +496,11 @@ export class GarbageCollectionService {
 		set: Partial<
 			Pick<
 				typeof schema.garbageCollectionScans.$inferInsert,
-				'phase' | 'cursor' | 'referenceCursor' | 'allowEmptyCollection'
+				| 'phase'
+				| 'cursor'
+				| 'referenceCursor'
+				| 'allowEmptyCollection'
+				| 'presentSeedHash'
 			>
 		> & {
 			readonly markStorePathHash?: StorePathHash | SQL;
@@ -625,27 +629,87 @@ export class GarbageCollectionService {
 		}
 	}
 
+	/**
+	One of the paths that has a narinfo row in the cache, or undefined when
+	none has. Each seed step checks its own page until one has such a path, so
+	a step reads at most one page.
+	*/
+	private presentPath(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[]
+	): StorePathHash | undefined {
+		for (const hashes of jsonValueLists(storePathHashes)) {
+			const present = this.context.db
+				.select({ storePathHash: schema.narInfos.storePathHash })
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, cache.id),
+						inArray(schema.narInfos.storePathHash, hashes)
+					)
+				)
+				.limit(1)
+				.get();
+
+			if (present !== undefined) {
+				return present.storePathHash;
+			}
+		}
+
+		return undefined;
+	}
+
+	/**
+	Whether the seed that the seed phases found present still has a narinfo
+	row. A failed settle can delete a reserved row after its seed page was
+	read.
+	*/
+	private isSeedStillPresent(
+		cache: ResolvedCache,
+		scan: typeof schema.garbageCollectionScans.$inferSelect
+	): boolean {
+		if (scan.presentSeedHash === null) {
+			return false;
+		}
+
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, cache.id),
+						eq(schema.narInfos.storePathHash, scan.presentSeedHash)
+					)
+				)
+				.get() !== undefined
+		);
+	}
+
 	private advanceSeed(
 		cache: ResolvedCache,
 		source: SeedSource,
-		cursor: string
+		scan: typeof schema.garbageCollectionScans.$inferSelect
 	): void {
 		const rows = seedPageSelect(
 			this.context.db,
 			source,
 			cache.id,
-			cursor
+			scan.cursor
 		).all();
 		const batch = rows.slice(0, phaseStepSize);
+		const hashes = batch.map((row) => row.storePathHash);
 
-		this.insertFrontier(
-			cache,
-			batch.map((row) => row.storePathHash)
-		);
+		this.insertFrontier(cache, hashes);
+
+		const presentSeedHash =
+			scan.presentSeedHash ?? this.presentPath(cache, hashes);
+		const seed = presentSeedHash === undefined ? {} : { presentSeedHash };
 
 		if (rows.length > batch.length) {
 			this.updateScan(cache, {
-				cursor: batch.at(-1)?.storePathHash ?? cursor
+				cursor: batch.at(-1)?.storePathHash ?? scan.cursor,
+				...seed
 			});
 
 			return;
@@ -653,7 +717,11 @@ export class GarbageCollectionService {
 
 		const next = seedSources[seedSources.indexOf(source) + 1];
 
-		this.updateScan(cache, { phase: next?.phase ?? 'mark', cursor: '' });
+		this.updateScan(cache, {
+			phase: next?.phase ?? 'mark',
+			cursor: '',
+			...seed
+		});
 	}
 
 	private existingMarks(
@@ -881,31 +949,17 @@ export class GarbageCollectionService {
 		}
 	}
 
-	private hasRetainedPath(cache: ResolvedCache): boolean {
-		return (
-			this.context.db
-				.select({ one: sql`1` })
-				.from(schema.narInfos)
-				.innerJoin(
-					schema.garbageCollectionMarks,
-					and(
-						eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
-						eq(
-							schema.garbageCollectionMarks.storePathHash,
-							schema.narInfos.storePathHash
-						)
-					)
-				)
-				.where(eq(schema.narInfos.cacheId, cache.id))
-				.limit(1)
-				.get() !== undefined
-		);
-	}
-
 	/**
 	An empty cursor means collection has not started. Preserve a non-empty
 	cursor when returning from marking so collection resumes after the last
 	scanned hash and does not repeat the empty-cache guard.
+
+	The guard confirms the present seed that the seed phases recorded. The
+	marks cannot decide it: the narinfo insert barrier marks every path that
+	arrives during the scan, whether or not anything retains it. When the
+	recorded seed has lost its narinfo row, the scan ends without collecting.
+	The deletion sets `inputs_changed`, so the next scan seeds again and
+	decides the cache.
 	*/
 	private finishMark(
 		cache: ResolvedCache,
@@ -914,7 +968,7 @@ export class GarbageCollectionService {
 		if (
 			scan.cursor === '' &&
 			!scan.allowEmptyCollection &&
-			!this.hasRetainedPath(cache)
+			!this.isSeedStillPresent(cache, scan)
 		) {
 			this.finishScan(cache);
 			return true;
@@ -1284,7 +1338,7 @@ export class GarbageCollectionService {
 			);
 
 			if (seedSource !== undefined) {
-				this.advanceSeed(cache, seedSource, scan.cursor);
+				this.advanceSeed(cache, seedSource, scan);
 
 				if (isRowBudgetExhausted()) {
 					break;

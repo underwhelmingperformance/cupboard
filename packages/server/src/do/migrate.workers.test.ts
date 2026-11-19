@@ -69,12 +69,14 @@ const everyTag = everyEntry.map((entry) => entry.tag);
 
 // Older builds must not run past these migrations: 0052 removed columns
 // that they read, after 0084 they would write root targets without the
-// root's incarnation, and after 0085 they would change a root's targets
-// without updating its stored count.
+// root's incarnation, after 0085 they would change a root's targets
+// without updating its stored count, and after 0088 their empty-cache
+// guard would count paths that the narinfo insert barrier marked.
 const barriers = [
 	{ tag: '0052_cache_identity_contract', index: 52 },
 	{ tag: '0084_root_incarnations', index: 84 },
-	{ tag: '0085_root_target_counts', index: 85 }
+	{ tag: '0085_root_target_counts', index: 85 },
+	{ tag: '0088_narinfo_build_inputs', index: 88 }
 ];
 
 const migrationSource = (bundle: MigrationBundle, index: number): string => {

@@ -269,6 +269,13 @@ const writes: readonly InputWrite[] = [
 		inputsChanged: false
 	},
 	{
+		name: 'recorded narinfo build inputs',
+		statement:
+			'UPDATE narinfo SET build_inputs_json = ?, build_inputs_version = 1 WHERE cache_id = ? AND store_path_hash = ?',
+		parameters: (cacheId) => [JSON.stringify([`${added}-app`]), cacheId, kept],
+		inputsChanged: false
+	},
+	{
 		name: 'a grace deadline extended',
 		statement: 'UPDATE retention_grace SET retain_until = ? WHERE cache_id = ?',
 		parameters: (cacheId) => ['2100-01-01T00:00:00.000Z', cacheId],

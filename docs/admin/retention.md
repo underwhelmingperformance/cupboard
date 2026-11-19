@@ -387,6 +387,13 @@ For each cache, a garbage collection:
 4. deletes every store path that isn't marked, except ones that are still being
    uploaded
 
+A store path that is first published to the cache while a garbage collection
+marks or deletes store paths is kept by that collection, even if nothing keeps
+it. The next garbage collection decides whether to keep it. A store path that is
+first published earlier in a collection is decided by that collection like any
+other store path. Publishing a store path that the cache already has does not
+change either case.
+
 Each cache is collected on its own. A store path kept in one cache doesn't keep
 the same store path in another cache.
 

@@ -324,7 +324,11 @@ export const narInfos = sqliteTable(
 		retentionEpoch: integer('retention_epoch').notNull().default(0),
 		inheritanceExhausted: integer('inheritance_exhausted', { mode: 'boolean' })
 			.notNull()
-			.default(false)
+			.default(false),
+		buildInputsJson: text('build_inputs_json'),
+		// The version of the client's build-input algorithm that produced
+		// `build_inputs_json`. Null when no build inputs were recorded.
+		buildInputsVersion: integer('build_inputs_version')
 	},
 	(table) => [
 		primaryKey({ columns: [table.cacheId, table.storePathHash] }),
@@ -1186,7 +1190,11 @@ export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	referenceCursor: integer('reference_cursor').notNull().default(-1),
 	allowEmptyCollection: integer('allow_empty_collection', { mode: 'boolean' })
 		.notNull()
-		.default(false)
+		.default(false),
+	// A root target or grace path that the seed phases found with a narinfo
+	// row in the cache, or null. The empty-cache guard checks that the path
+	// still has one.
+	presentSeedHash: text('present_seed_hash').$type<StorePathHash>()
 });
 
 // The paths an incremental scan still has to mark. The collection write barrier

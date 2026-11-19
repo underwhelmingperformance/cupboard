@@ -87,6 +87,7 @@ import m0084 from './0084_root_incarnations.sql';
 import m0085 from './0085_root_target_counts.sql';
 import m0086 from './0086_root_target_path_index.sql';
 import m0087 from './0087_backfill_unpublishable_narinfo.sql';
+import m0088 from './0088_narinfo_build_inputs.sql';
 
 export default {
 	journal,
@@ -178,6 +179,7 @@ export default {
 		m0084,
 		m0085,
 		m0086,
-		m0087
+		m0087,
+		m0088
 	}
 };

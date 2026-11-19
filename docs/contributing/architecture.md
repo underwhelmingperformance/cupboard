@@ -342,6 +342,67 @@ logs a warning. A removal or an expiry can delete the root between a run's
 negotiation and a later commit or verification. The run's next negotiation binds
 the root again.
 
+### Collection scans
+
+A collection scan decides which paths of one cache to keep. The scan row in
+`garbage_collection_scan` records its phase and cursor, so a scan continues
+across invocations. The `expire-roots` and `expire-grace` phases remove expired
+roots and passed grace deadlines, and then delete the marks and frontier that an
+earlier scan left. The `roots` and `grace` phases queue every root target and
+grace path in `garbage_collection_frontier`. The `mark` phase takes one path at
+a time from the frontier, records it in `garbage_collection_mark`, and queues
+the paths that its narinfo row refers to. The `collect` phase deletes the
+narinfo rows without a mark, and the `clear` phase deletes the scan's marks and
+frontier.
+
+Requests write to the cache between the invocations of a scan. Triggers on the
+retention and narinfo tables form the write barrier. They queue the paths that
+such a write can make reachable:
+
+- An insert into `retention_root_target` or `retention_grace`, or a change of a
+  row's path, queues the path while the cache's scan is in the `roots`, `grace`,
+  `mark` or `collect` phase. The seed phase that reads the table can already
+  have passed the row's page, so the seed phases need the barrier too. A row
+  written in the `expire-roots` or `expire-grace` phase is read by the seed
+  phases that follow.
+- An insert into `narinfo` queues the path while the cache's scan is in the
+  `mark` or `collect` phase. A push inserts the row when it first reserves the
+  path, before its upload commits. The scan therefore keeps a path that arrives
+  after the mark phase has walked the paths that refer to it. Before the mark
+  phase, no path has been walked, so the walk finds a path that arrives then
+  like any other.
+- A change to the `references_json` or `build_inputs_json` of a marked path
+  queues the path again, and the mark phase walks the path again.
+
+No insert barrier queues a path in the `clear` phase. That phase deletes the
+frontier after collection has finished, and inserts that kept adding frontier
+rows there could keep the scan row from ever being deleted. The narinfo update
+barrier fires only while the path's mark remains, and the `clear` phase deletes
+the marks before the frontier. The narinfo insert also sets `inputs_changed`, so
+the next scan decides whether to keep a path that this scan kept only because of
+the barrier.
+
+A scan that cannot finish keeps its scan row. This happens, for example, when a
+path's stored references are malformed and every pass fails on them. Every path
+reserved in the cache then adds a frontier row, so the frontier grows until the
+stored data is fixed.
+
+A scan ends without collecting when no root target or grace path of the cache
+has a narinfo row, unless the scan expired a root or the cache is grace-managed.
+This guard protects a cache whose roots were all removed by mistake. Each step
+of the `roots` and `grace` phases checks its own page of seeds for a narinfo
+row, until one page has one, and records that seed in the scan row's
+`present_seed_hash`. When the mark phase ends, the guard reads that seed's
+narinfo row by its key. A failed settle can delete a reserved row after its page
+was read. When the recorded seed has no row any more, the scan ends without
+collecting, and the deletion sets `inputs_changed` so the next scan seeds again.
+The guard does not read the marks, because the narinfo insert barrier marks
+every path that arrives during the scan, including paths that nothing retains.
+
+A pass refuses to collect while any of these triggers is missing, because SQLite
+drops a table's triggers when a migration rebuilds the table. See
+`barrierTriggers` in `do/garbage-collection-service.ts`.
+
 ## Storage
 
 ### D1
@@ -2707,11 +2768,16 @@ writer, and its contract migrations remove that compatibility. The tenant Worker
 upload is therefore the point after which a rollback can't recover: after an
 object contracts its SQLite schema, complete the deployment to recover.
 
-Every earlier build refuses a tenant that has applied migration 0084 or 0085,
-because the migrator records both with the `verified-contraction` state. The
-[root incarnations][root-incarnations] section explains why.
+Every earlier build refuses a tenant that has applied migration 0084, 0085 or
+0088, because the migrator records each with the `verified-contraction` state.
+The [root incarnations][root-incarnations] section explains 0084 and 0085. After
+0088, the narinfo insert barrier marks paths that nothing retains, and the
+empty-cache guard of an earlier build counts any marked path with a narinfo row,
+so that build could empty a cache whose roots were all removed. See [collection
+scans][collection-scans].
 
 [root-incarnations]: #root-incarnations
+[collection-scans]: #collection-scans
 
 The tenant objects and the control-plane trust gate ignore a
 `deployment_transition` row with an unknown transition ID, and count an unknown
