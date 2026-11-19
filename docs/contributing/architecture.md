@@ -1489,11 +1489,13 @@ these fields, in order: protocol version `cupboard/publication/v1`, tenant,
 cache kind, cache name, expected cache generation, push ID, path metadata, and
 requested root. Absent values encode as JSON `null`. Path metadata is an array
 of store-path hash, store path, NAR hash, NAR size, sorted deduplicated
-references, deriver and content address. A requested root is an array of root
-name, retention kind and duration in seconds, with `null` for a non-duration
-policy. Omitted retention becomes `inherit`. Paging, advisory availability,
-resolved policy defaults and compressed blob declarations do not affect
-identity.
+references, deriver and content address. When the path has build inputs, the
+array ends with the sorted deduplicated build inputs and their version. A path
+without build inputs therefore keeps the operation ID that it had before clients
+could send them. A requested root is an array of root name, retention kind and
+duration in seconds, with `null` for a non-duration policy. Omitted retention
+becomes `inherit`. Paging, advisory availability, resolved policy defaults and
+compressed blob declarations do not affect identity.
 
 Clients stage NARs at `staging-v2/<tenant>/<pushId>/<operationId>.nar.zst`.
 Temporary R2 credentials permit this push's new prefix and its legacy prefix,
