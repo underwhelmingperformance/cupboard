@@ -2,6 +2,10 @@ import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
+	dependencyStatusRequestSchema,
+	dependencyStatusResponseSchema
+} from '../dependency-status.ts';
+import {
 	pushCredentialSchema,
 	pushIdSchema,
 	uploadConfirmPresentRequestSchema,
@@ -116,6 +120,23 @@ const plan = cacheScopedProcedure(
 	uploadPlanResponseSchema
 );
 
+// Reports the state in this cache of up to `dependencyStatusMaxPaths` store
+// paths, and for each absent path at most one other cache of the tenant that
+// can supply it. A publisher calls it to decide which dependency outputs to
+// copy and which to record build inputs for, so it needs `upload:negotiate`
+// as publication does. It reads only tenant-object SQLite and writes nothing.
+const dependencyStatus = cacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/uploads/dependency-status',
+		requires: 'upload:negotiate',
+		replaySafety: 'replay-safe',
+		workBound: 'size'
+	},
+	dependencyStatusRequestSchema.shape,
+	dependencyStatusResponseSchema
+);
+
 export const uploadsContract = {
 	plan: {
 		inDefaultCache: plan.inDefaultCache.errors({
@@ -160,6 +181,10 @@ export const uploadsContract = {
 	confirmPresent: {
 		inDefaultCache: confirmPresent.inDefaultCache.errors(confirmPresentErrors),
 		inNamedCache: confirmPresent.inNamedCache.errors(confirmPresentErrors)
+	},
+	dependencyStatus: {
+		inDefaultCache: dependencyStatus.inDefaultCache.errors(uploadRequestErrors),
+		inNamedCache: dependencyStatus.inNamedCache.errors(uploadRequestErrors)
 	},
 
 	// Confirms an unretained publication by store path without uploading bytes.

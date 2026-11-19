@@ -1362,9 +1362,10 @@ otherwise.
   in rounds of calls of at most 15 seconds each, so their worst case grows with
   the page: upload previews, negotiation, planning and confirmation, a `check`
   page, the root procedures that set targets or list them, attestation
-  negotiation and attachment, and the collection and verification passes. A deep
-  `check` page also reads each NAR whole, and nothing bounds the time of that
-  read.
+  negotiation and attachment, and the collection and verification passes.
+  Dependency status calls neither, but the rows that it reads grow with the page
+  and with the number of caches in the tenant. A deep `check` page also reads
+  each NAR whole, and nothing bounds the time of that read.
 
 When a deadline passes, the Worker logs `tenant object response deadline passed`
 with the request class (`kind`) and `deadlineMs`, and aborts the request's
@@ -1551,6 +1552,36 @@ before it commits them. It sends at most two pages at a time, starts with the
 Free plan's limit and then follows the limit that the server advertises. It
 applies its divergence rules to a `diverged` answer as it does to a commit's
 answer.
+
+`POST /uploads/dependency-status` reports the state of up to 1,024 store-path
+hashes in the cache, in request order. It needs `upload:negotiate`, as
+publication does. A path is `in-flight` when the cache has a `pending` or
+`committing` upload of the path, with or without a narinfo row: a commit marks
+its upload `committing` before it reserves the row. Otherwise a path is `absent`
+when the cache has no narinfo row for it, `present` when it has a committed row
+without recorded build inputs, and `recorded` with `buildInputsVersion` when the
+committed row has build inputs. A cache that was never created or has been
+removed has no rows, so every path is `absent`, as other reads answer for such a
+cache.
+
+For an absent path, the answer can include a `source`, another live cache of the
+tenant. The source has a committed row for the path, and `ReuseAuthority`
+permits the token to reuse from it. When several caches qualify, the source is
+the qualifying cache with the lowest identity. A private cache is never a source
+for a public destination. A destination that was never created or has been
+removed has the access that a write would create it with: the default cache's
+access for a named cache, and public when the tenant has no default cache. The
+procedure builds the authority from the tenant object's own cache identities,
+reuse views and view members, as negotiation does. The source is a hint. A copy
+from it is a reference publication, and the commit checks reuse again against
+D1. The procedure reads only tenant-object SQLite and writes nothing.
+
+The source lookup considers only the first 16 caches in identity order that the
+token may reuse from, and it looks up each absent path in each of them. A source
+beyond those caches is missed. The answer depends only on caches that the token
+may reuse from, so other caches never change whether a source appears. A request
+with more than 1,024 hashes receives `UPLOAD_REQUEST_LIMIT_EXCEEDED`, HTTP 413
+and `data.maxPaths` before the object reads any narinfo or cache rows.
 
 The paced WebSocket accepts `publish-batch` with complete metadata and expected
 generation. Clients commit every selected path that confirmation has not

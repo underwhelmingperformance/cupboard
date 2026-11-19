@@ -460,6 +460,24 @@ export const tenantRouter = os.router({
 					)
 			)
 		},
+		dependencyStatus: {
+			inDefaultCache: os.uploads.dependencyStatus.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.dependencyStatus.status(
+						context.cache,
+						input.storePathHashes,
+						context.claims.grants
+					)
+			),
+			inNamedCache: os.uploads.dependencyStatus.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.dependencyStatus.status(
+						context.cache,
+						input.storePathHashes,
+						context.claims.grants
+					)
+			)
+		},
 		status: os.uploads.status.handler(({ input, context }) =>
 			context.services.uploads.uploadStatus(input.id)
 		)

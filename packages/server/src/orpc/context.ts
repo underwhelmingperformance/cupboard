@@ -10,6 +10,7 @@ import type { ConfirmationService } from '../do/confirmation-service.ts';
 import type { GarbageCollectionOutcome } from '../do/context.ts';
 import type { GarbageCollectionTarget } from '../do/context.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
+import type { DependencyStatusService } from '../do/dependency-status-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { LegacyRetentionService } from '../do/legacy-retention-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
@@ -67,6 +68,7 @@ export interface TenantRpcServices {
 	): Promise<GarbageCollectionOutcome>;
 	readonly uploads: UploadsService;
 	readonly confirmation: ConfirmationService;
+	readonly dependencyStatus: DependencyStatusService;
 	readonly attestations: AttestationsService;
 	// Runs an interactive verification pass, serialised against the cron verify
 	// pass on this instance. The router clamps the limit to the batch ceiling.

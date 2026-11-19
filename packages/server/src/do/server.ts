@@ -17,6 +17,7 @@ import {
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
 import { tenantContract } from '@cupboard/protocol/contract';
+import { dependencyStatusMaxRequestBytes } from '@cupboard/protocol/dependency-status';
 import { type LocalStep } from '@cupboard/protocol/deployment';
 import { isCoveredByToken } from '@cupboard/protocol/grants';
 import { publicationIdentity } from '@cupboard/protocol/publication';
@@ -225,6 +226,7 @@ import {
 } from './context.ts';
 import { currentDeadlineSignal, withDeadlineBudget } from './deadline.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
+import { DependencyStatusService } from './dependency-status-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import {
 	capturedGraceFact,
@@ -373,6 +375,26 @@ export type VerificationRecordRpcResult =
 // grace-facts capability when the client accepted it.
 const uploadGracePathPattern =
 	/^(?:\/cache\/[^/]+)?\/uploads(?:\/(?:preview|plan))?$/u;
+
+const dependencyStatusPathPattern =
+	/^(?:\/cache\/[^/]+)?\/uploads\/dependency-status$/u;
+
+// The largest body that the contract handler reads for a request.
+function contractBodyLimit(
+	isUploadGraceEndpoint: boolean,
+	method: string,
+	pathname: string
+): number {
+	if (isUploadGraceEndpoint) {
+		return uploadRequestMaxBytes;
+	}
+
+	if (method === 'POST' && dependencyStatusPathPattern.test(pathname)) {
+		return dependencyStatusMaxRequestBytes;
+	}
+
+	return contractRequestMaxBytes;
+}
 
 // Reuse misses must be `no-store`. A view update or commit can make the same
 // lookup succeed, and no purge key covers the cached 404.
@@ -593,6 +615,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly refreshSessions: RefreshSessionsService;
 	private readonly uploads: UploadsService;
 	private readonly confirmation: ConfirmationService;
+	private readonly dependencyStatus: DependencyStatusService;
 	private readonly commitPipeline: CommitPipelineService;
 	private readonly verification: VerificationService;
 	private readonly roots: RootsService;
@@ -698,6 +721,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.roots
 		);
+		this.dependencyStatus = new DependencyStatusService(this.context);
 		this.verification = new VerificationService(
 			this.context,
 			this.commitPipeline,
@@ -780,7 +804,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const contract = new ContractRequest(
 				context.req.raw,
 				authenticate,
-				isUploadGraceEndpoint ? uploadRequestMaxBytes : contractRequestMaxBytes
+				contractBodyLimit(isUploadGraceEndpoint, context.req.method, pathname)
 			);
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				contract.request,
@@ -2634,6 +2658,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.collectGarbageInteractive(logger, cache, purgeOrigin),
 			uploads: this.uploads,
 			confirmation: this.confirmation,
+			dependencyStatus: this.dependencyStatus,
 			attestations: this.attestations,
 			runVerification: (logger, purgeOrigin, limit) =>
 				this.verifyInteractive(logger, purgeOrigin, limit)

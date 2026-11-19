@@ -99,6 +99,8 @@ describe('the tenant contract', () => {
 			'uploads.confirm.inDefaultCache': 'size',
 			'uploads.confirm.inNamedCache': 'size',
 			'uploads.status': 'time',
+			'uploads.dependencyStatus.inDefaultCache': 'size',
+			'uploads.dependencyStatus.inNamedCache': 'size',
 			'attestations.negotiateBundles.inDefaultCache': 'size',
 			'attestations.negotiateBundles.inNamedCache': 'size',
 			'attestations.attachPaths.inDefaultCache': 'size',

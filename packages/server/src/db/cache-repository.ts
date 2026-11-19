@@ -101,6 +101,19 @@ export class CacheRepository {
 	}
 
 	/**
+	Every live cache of the tenant, in identity order.
+	*/
+	live(): ResolvedCache[] {
+		return this.database
+			.select(identityColumns)
+			.from(schema.cacheIdentities)
+			.where(isNull(schema.cacheIdentities.deletedAt))
+			.orderBy(schema.cacheIdentities.id)
+			.all()
+			.map((row) => this.resolved(row));
+	}
+
+	/**
 	Whether a cache of this scope was deleted at or after `since`. A scope has
 	at most one live cache, so its newest deleted identity has the latest
 	deletion, and the check reads that one row.
