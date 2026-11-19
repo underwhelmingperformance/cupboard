@@ -264,13 +264,13 @@ export class GarbageCollectionInputs {
 
 	/**
 	When a scan of some cache can next start, for the maintenance wake.
-	
+
 	This is the earlier of two times. The first is the end of the interval
 	of the changed cache that was scanned longest ago, found through
 	`garbage_collection_input_changed_idx`. The second is the later of the
 	tenant's earliest root or grace deadline and the end of the interval of
 	the cache that has that deadline.
-	
+
 	A cache with a later deadline can become scannable before the interval
 	of the cache with the earliest deadline ends, so this time can be up to
 	one interval late. It is never before a scan of some cache is allowed.
