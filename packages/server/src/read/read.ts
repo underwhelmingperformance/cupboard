@@ -67,7 +67,7 @@ import {
 	unauthorisedResponse
 } from './read-auth.ts';
 
-interface CacheNarInfoVersion extends NarInfoReferenceVersion {
+export interface CacheNarInfoVersion extends NarInfoReferenceVersion {
 	readonly cacheGeneration: CacheGeneration;
 }
 
@@ -460,6 +460,21 @@ export async function authorisedNarInfoVersions(
 	} catch (error) {
 		throw sharedFactsRefusal(logger, tenant, 'narinfo-reference-read', error);
 	}
+}
+
+/**
+Returns the version of `storePathHash` in `versions` when it belongs to
+`generation` of the cache. Returns `undefined` for a path with no version
+or with a version from another cache generation.
+*/
+export function currentNarInfoVersion(
+	versions: ReadonlyMap<StorePathHash, CacheNarInfoVersion>,
+	storePathHash: StorePathHash,
+	generation: CacheGeneration
+): CacheNarInfoVersion | undefined {
+	const version = versions.get(storePathHash);
+
+	return version?.cacheGeneration === generation ? version : undefined;
 }
 
 // The reference generation fences every narinfo read, including public objects

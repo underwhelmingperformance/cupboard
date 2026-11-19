@@ -5,7 +5,6 @@ import {
 	cacheMetadataMaxNarInfoBytes
 } from '@cupboard/protocol/cache-metadata';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { chunk } from '@cupboard/shared/collections';
 import {
 	readResponseBytes,
 	readResponseText,
@@ -18,7 +17,6 @@ import { StatusCodes } from 'http-status-codes';
 import { sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { logGroupRefusal } from '../db/transient.ts';
-import { maxOutgoingConnections } from '../do/bulk.ts';
 import {
 	MetadataNarInfoInvalidError,
 	MetadataNarInfoTooLargeError,
@@ -29,6 +27,7 @@ import { keepAliveIn } from '../http/bounded-body.ts';
 import { internalCorrelationHeaders } from '../observability/request-context.ts';
 import { withSpan } from '../observability/span.ts';
 import { upstreamTraceAttributes } from '../observability/trace-context.ts';
+import { readFoundInGroups } from '../read/found-reads.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest
@@ -37,7 +36,10 @@ import {
 	readCacheMetadata,
 	renderCacheMetadataEntry
 } from '../read/metadata-read.ts';
-import { authorisedNarInfoVersions } from '../read/read.ts';
+import {
+	authorisedNarInfoVersions,
+	currentNarInfoVersion
+} from '../read/read.ts';
 
 import { type WorkerHonoEnv } from './hono-env.ts';
 import {
@@ -144,33 +146,26 @@ async function* publicEntries(
 		paths.map((storePath) => StorePath.hash(storePath)),
 		context.get('logger')
 	);
-	for (const group of chunk(paths, maxOutgoingConnections)) {
-		const outcomes = await Promise.allSettled(
-			group.map((storePath): Promise<CacheMetadataEntry> => {
-				const current = versions.get(StorePath.hash(storePath));
-				if (current?.cacheGeneration !== scope.generation) {
-					return Promise.resolve({ storePath, status: 'missing' });
-				}
-				onCanonicalRead();
-				return publicEntry(context, storePath);
-			})
-		);
-		const failed = outcomes.find((outcome) => outcome.status === 'rejected');
-		if (failed !== undefined) {
-			const error: unknown = logGroupRefusal(
+	yield* readFoundInGroups(paths, {
+		version: (storePath) =>
+			currentNarInfoVersion(
+				versions,
+				StorePath.hash(storePath),
+				scope.generation
+			),
+		missing: (storePath) => ({ storePath, status: 'missing' }),
+		read: (storePath) => {
+			onCanonicalRead();
+			return publicEntry(context, storePath);
+		},
+		refusal: (failure) =>
+			logGroupRefusal(
 				context.get('logger'),
 				context.get('tenant'),
 				'canonical-narinfo-read',
-				failed.reason
-			);
-			throw error;
-		}
-		for (const outcome of outcomes) {
-			if (outcome.status === 'fulfilled') {
-				yield outcome.value;
-			}
-		}
-	}
+				failure
+			)
+	});
 }
 
 export async function answerCacheMetadata(
