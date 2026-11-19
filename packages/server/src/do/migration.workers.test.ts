@@ -2242,8 +2242,10 @@ describe('migrations', () => {
 		const insertIdentity =
 			"INSERT INTO cache_identity (id, kind, name, access, priority, generation, created_at) VALUES (10, 'named', 'live', 'public', 40, 1, '2026-01-01T00:00:00.000Z')";
 		const insertScan =
-			"INSERT INTO garbage_collection_scan (cache_id, phase, cursor, reference_cursor, allow_empty_collection) VALUES (10, 'collect', 'aa', -1, 1)";
-		// The cursor is past this path, so the scan leaves it in place.
+			"INSERT INTO garbage_collection_scan (cache_id, phase, cursor, reference_cursor, allow_empty_collection) VALUES (10, 'collect', 'aa', -1, 0)";
+		// Migration 0088 restarts the scan's seeding. The cache has no root
+		// target or grace path, so the restarted scan ends without collecting
+		// and leaves this path in place.
 		const insertNarInfo =
 			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (10, '00000000000000000000000000000001', '/nix/store/00000000000000000000000000000001-app', 'sha256:nar', 1, '[]', '2026-01-01T00:00:00.000Z')";
 		const selectInputs =
@@ -2599,6 +2601,72 @@ describe('migrations', () => {
 		});
 	});
 
+	// A scan seeded before 0088 recorded no present seed. 0088 sends a scan
+	// that has seeded back to `expire-grace`, which deletes its marks and
+	// frontier and seeds again.
+	it('restarts the seeding of scans in progress at migration 0088', async () => {
+		const insertCacheIdentity =
+			"INSERT INTO cache_identity (kind, name, access, priority, created_at) VALUES ('named', ?, 'public', 50, '2026-01-01T00:00:00.000Z') RETURNING id";
+		const insertScan =
+			"INSERT INTO garbage_collection_scan (cache_id, phase, cursor, mark_store_path_hash, reference_cursor, allow_empty_collection) VALUES (?, ?, ?, NULLIF(?, ''), ?, 1)";
+		const selectScans =
+			'SELECT phase, cursor, mark_store_path_hash IS NULL AS has_no_mark, reference_cursor, allow_empty_collection, present_seed_hash IS NULL AS has_no_present_seed FROM garbage_collection_scan ORDER BY cache_id';
+		const scans = [
+			{ phase: 'expire-roots', cursor: '', mark: '', referenceCursor: -1 },
+			{ phase: 'grace', cursor: 'c'.repeat(32), mark: '', referenceCursor: -1 },
+			{ phase: 'mark', cursor: '', mark: 'a'.repeat(32), referenceCursor: 127 },
+			{
+				phase: 'collect',
+				cursor: 'b'.repeat(32),
+				mark: '',
+				referenceCursor: -1
+			},
+			{ phase: 'clear', cursor: '~', mark: '', referenceCursor: -1 }
+		];
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-scan-restart'),
+			async (_instance, state) => {
+				await migrateThrough(state, 87);
+
+				for (const scan of scans) {
+					const cache = state.storage.sql
+						.exec<{ id: number }>(insertCacheIdentity, scan.phase)
+						.one().id;
+
+					state.storage.sql.exec(
+						insertScan,
+						cache,
+						scan.phase,
+						scan.cursor,
+						scan.mark,
+						scan.referenceCursor
+					);
+				}
+
+				await migrateThrough(state, 88);
+
+				return state.storage.sql.exec(selectScans).toArray();
+			}
+		);
+		const restarted = {
+			phase: 'expire-grace',
+			cursor: '',
+			has_no_mark: 1,
+			reference_cursor: -1,
+			allow_empty_collection: 1,
+			has_no_present_seed: 1
+		};
+
+		expect(migrated).toStrictEqual([
+			{ ...restarted, phase: 'expire-roots' },
+			restarted,
+			restarted,
+			restarted,
+			{ ...restarted, phase: 'clear', cursor: '~' }
+		]);
+	});
+
 	it('fires the collection write barrier for every write that adds reachability', async () => {
 		const cacheName = 'builds';
 		const rootTargetHash = 'a'.repeat(32);
@@ -2641,6 +2709,8 @@ describe('migrations', () => {
 			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at) VALUES (?, ?, ?, 'sha256:nar', 10, '[]', '[]', '2026-01-01T00:00:00.000Z')";
 		const updateNarInfoReferences =
 			'UPDATE narinfo SET references_json = ? WHERE cache_id = ? AND store_path_hash = ?';
+		const updateNarInfoBuildInputs =
+			'UPDATE narinfo SET build_inputs_json = ? WHERE cache_id = ? AND store_path_hash = ?';
 		const updateNarInfoSignatures =
 			'UPDATE narinfo SET sigs_json = ? WHERE cache_id = ? AND store_path_hash = ?';
 
@@ -2723,6 +2793,14 @@ describe('migrations', () => {
 								markedHash
 							);
 						}),
+						narInfoBuildInputsUpdate: frontierAfter(() => {
+							run(
+								updateNarInfoBuildInputs,
+								JSON.stringify([`${unmarkedHash}-input`]),
+								cache,
+								markedHash
+							);
+						}),
 						narInfoSignatureUpdate: frontierAfter(() => {
 							run(
 								updateNarInfoSignatures,
@@ -2770,12 +2848,13 @@ describe('migrations', () => {
 			frontier: {
 				seedInserts: [queued(rootTargetHash), queued(graceHash)],
 				narInfoInsert: [queued(markedHash)],
-				narInfoInsertUnmarked: [],
+				narInfoInsertUnmarked: [queued(unmarkedInsertHash)],
 				seedIdentityUpdates: [
 					queued(movedRootTargetHash),
 					queued(movedGraceHash)
 				],
 				narInfoReferencesUpdate: [queued(markedHash)],
+				narInfoBuildInputsUpdate: [queued(markedHash)],
 				narInfoSignatureUpdate: [],
 				graceDeadlineExtension: [],
 				withoutScanOrMark: []

@@ -15,6 +15,7 @@ import {
 	syntheticNarHash,
 	syntheticStorePathHash,
 	testBase,
+	underOneUnitOfWork,
 	withoutAlarmArming
 } from '../test-support.ts';
 
@@ -23,9 +24,11 @@ import {
 	futureInstant,
 	inputState,
 	insertNarInfo,
+	insertRoot,
 	pastInstant,
 	useMinScanInterval
 } from './garbage-collection.test-support.ts';
+import { phaseStepSize } from './garbage-collection-service.ts';
 import { gcContinuationKey, maintenancePassCursorKey } from './server.ts';
 
 const methodLineSchema = z.object({
@@ -128,6 +131,116 @@ async function hasContinuation(): Promise<boolean> {
 		async (_instance, state) =>
 			(await state.storage.get(gcContinuationKey)) !== undefined
 	);
+}
+
+// Runs one collection pass under a one-row budget and drops the continuation
+// that it arms, so the next step runs only when the test calls for it.
+async function oneUnitPass(): Promise<void> {
+	await runInDurableObject(currentServer(), async (instance, state) => {
+		await underOneUnitOfWork(() => instance.runGarbageCollection());
+		await state.storage.delete(gcContinuationKey);
+		await state.storage.deleteAlarm();
+	});
+}
+
+// The phase of the default cache's scan, or undefined when it has no scan.
+async function scanPhase(): Promise<string | undefined> {
+	const selectScanPhase =
+		'SELECT phase FROM garbage_collection_scan WHERE cache_id = ?';
+
+	return runInDurableObject(
+		currentServer(),
+		(instance, state) =>
+			state.storage.sql
+				.exec<{
+					phase: string;
+				}>(selectScanPhase, resolvedCache(instance.context).id)
+				.toArray()
+				.at(0)?.phase
+	);
+}
+
+// The root target fixture of the seed tests: one root, `channel`, with more
+// targets than two seed pages.
+const seedCount = 2 * phaseStepSize + 10;
+const seedBase = 50_000;
+const selectNarInfoPaths =
+	'SELECT store_path_hash AS hash FROM narinfo ORDER BY store_path_hash';
+
+// Gives `channel` its targets. Only the first target, which sorts first, can
+// have a narinfo row.
+async function insertChannelTargets(isFirstPresent: boolean): Promise<void> {
+	const insertChannelTargetRow =
+		"INSERT INTO retention_root_target (cache_id, root_name, store_path_hash, store_path) VALUES (?, 'channel', ?, ?)";
+
+	await runInDurableObject(currentServer(), (instance, state) => {
+		const cacheId = resolvedCache(instance.context).id;
+		const first = syntheticStorePathHash(seedBase);
+
+		insertRoot(instance.context, { name: 'channel', target: first });
+
+		if (isFirstPresent) {
+			insertNarInfo(instance.context, first, seedBase);
+		}
+
+		for (let index = 1; index < seedCount; index += 1) {
+			const target = syntheticStorePathHash(seedBase + index);
+
+			state.storage.sql.exec(
+				insertChannelTargetRow,
+				cacheId,
+				target,
+				`/nix/store/${target}-app`
+			);
+		}
+	});
+}
+
+interface ScanStepCost {
+	readonly before: string | undefined;
+	readonly after: string | undefined;
+	readonly rowsRead: number;
+	readonly rowsWritten: number;
+}
+
+// Runs one-step passes until the scan ends. Records the steps of the `roots`
+// phase, the step that ends the mark phase, and the last step that marks a
+// path.
+async function recordSeedAndGuardSteps(): Promise<{
+	readonly steps: readonly ScanStepCost[];
+	readonly lastMarkStep: ScanStepCost | undefined;
+}> {
+	const steps: ScanStepCost[] = [];
+	let lastMarkStep: ScanStepCost | undefined;
+	const pass = async (): Promise<void> => {
+		const before = await scanPhase();
+		const cost = await withInvocationCost(noCost, oneUnitPass);
+		const after = await scanPhase();
+		const step = {
+			before,
+			after,
+			rowsRead: cost.rowsRead,
+			rowsWritten: cost.rowsWritten
+		};
+
+		if (before === 'mark' && after === 'mark') {
+			lastMarkStep = step;
+			return;
+		}
+
+		if (before === 'roots' || before === 'mark') {
+			steps.push(step);
+		}
+	};
+
+	await pass();
+	await driveToCompletion(
+		pass,
+		async () => (await scanPhase()) === undefined,
+		seedCount + maxPasses
+	);
+
+	return { steps, lastMarkStep };
 }
 
 // Runs cron passes until the tenant-wide collection finishes, and adds up the
@@ -453,7 +566,7 @@ describe('garbage collection cost', () => {
 			const unchanged = { inputsChanged: false, scanCompletedAt: firstSweepAt };
 
 			expect({ cost, caches }).toStrictEqual({
-				cost: { invocations: 2, rowsRead: 9592, rowsWritten: 2837 },
+				cost: { invocations: 2, rowsRead: 9623, rowsWritten: 2837 },
 				caches: {
 					isAddedPathKept: false,
 					completions: {
@@ -465,6 +578,74 @@ describe('garbage collection cost', () => {
 						gamma: unchanged
 					}
 				}
+			});
+		}));
+
+	// Every root target points at a path that the cache does not have, so the
+	// empty-cache guard ends the scan without collecting. Each step of the
+	// `roots` phase checks one page of seeds for narinfo rows. The step that
+	// ends the mark phase reads one row fewer than a step that marks a path,
+	// so it reads no seed.
+	it('checks the seeds for narinfo rows one page at a time', async () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			await insertChannelTargets(false);
+
+			const { steps, lastMarkStep } = await recordSeedAndGuardSteps();
+			const seedPage = {
+				before: 'roots',
+				after: 'roots',
+				rowsRead: 661,
+				rowsWritten: 257
+			};
+
+			expect({ steps, lastMarkStep }).toStrictEqual({
+				steps: [
+					seedPage,
+					seedPage,
+					{ before: 'roots', after: 'grace', rowsRead: 305, rowsWritten: 21 },
+					{ before: 'mark', after: 'clear', rowsRead: 274, rowsWritten: 1 }
+				],
+				lastMarkStep: {
+					before: 'mark',
+					after: 'mark',
+					rowsRead: 275,
+					rowsWritten: 3
+				}
+			});
+		}));
+
+	// The first seed page has a present seed, so the later pages skip the
+	// check and read less. The guard confirms the seed, and the scan deletes
+	// the path that nothing retains.
+	it('stops checking seeds once a page has a present one', async () =>
+		withoutAlarmArming(async () => {
+			const unretained = syntheticStorePathHash(60_000);
+
+			await initialise();
+			await insertChannelTargets(true);
+			await runInDurableObject(currentServer(), (instance) => {
+				insertNarInfo(instance.context, unretained, 60_000);
+			});
+
+			const { steps } = await recordSeedAndGuardSteps();
+			const narInfos = await runInDurableObject(
+				currentServer(),
+				(_instance, state) =>
+					Array.from(
+						state.storage.sql.exec<{ hash: string }>(selectNarInfoPaths),
+						(row) => row.hash
+					)
+			);
+
+			expect({ steps, narInfos }).toStrictEqual({
+				steps: [
+					{ before: 'roots', after: 'roots', rowsRead: 662, rowsWritten: 257 },
+					{ before: 'roots', after: 'roots', rowsRead: 532, rowsWritten: 257 },
+					{ before: 'roots', after: 'grace', rowsRead: 294, rowsWritten: 21 },
+					{ before: 'mark', after: 'collect', rowsRead: 275, rowsWritten: 1 }
+				],
+				narInfos: [syntheticStorePathHash(seedBase)]
 			});
 		}));
 });

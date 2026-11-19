@@ -34,7 +34,9 @@ export const futureInstant = '2099-01-01T00:00:00.000Z';
 const maxDrivenPasses = 32;
 
 export function storePathString(storePathHash: StorePathHash): StorePathString {
-	return storePathSchema.parse(`/nix/store/${storePathHash}-app`);
+	return storePathSchema.parse(
+		`/nix/store/${storePathBasename(storePathHash)}`
+	);
 }
 
 export function inputState(
@@ -46,11 +48,25 @@ export function inputState(
 	);
 }
 
+export function storePathBasename(storePathHash: StorePathHash): string {
+	return `${storePathHash}-app`;
+}
+
+/**
+The paths that a narinfo row refers to. A row without `buildInputs` has no
+recorded build inputs, which the store keeps as SQL NULL.
+*/
+export interface NarInfoEdges {
+	readonly references?: readonly StorePathHash[];
+	readonly buildInputs?: readonly StorePathHash[];
+}
+
 export function insertNarInfo(
 	context: ServerContext,
 	storePathHash: StorePathHash,
 	index: number,
-	scope: CacheScope = defaultCache()
+	scope: CacheScope = defaultCache(),
+	edges: NarInfoEdges = {}
 ): void {
 	context.db
 		.insert(schema.narInfos)
@@ -60,7 +76,14 @@ export function insertNarInfo(
 			storePath: storePathString(storePathHash),
 			narHash: syntheticNarHash(index),
 			narSize: 1,
-			referencesJson: '[]',
+			referencesJson: JSON.stringify(
+				(edges.references ?? []).map((hash) => storePathBasename(hash))
+			),
+			...(edges.buildInputs !== undefined && {
+				buildInputsJson: JSON.stringify(
+					edges.buildInputs.map((hash) => storePathBasename(hash))
+				)
+			}),
 			createdAt: isoTimestamp(new Date(pastInstant))
 		})
 		.run();

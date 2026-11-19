@@ -232,7 +232,9 @@ The migrations that older builds must not run past. 0052 removed columns
 that they read. After 0084, a root keeps only the target rows of its
 incarnation, and older builds write target rows without one. After 0085, a
 root's stored target count must change with every change to its targets,
-and older builds change the targets without updating the count.
+and older builds change the targets without updating the count. After 0088,
+the narinfo insert barrier marks paths that nothing retains, and the
+empty-cache guard of older builds counts any marked path with a narinfo row.
 
 A tag can never leave the set: this build refuses the contraction state on
 any other tag, so it would refuse every store that recorded the tag.
@@ -240,7 +242,8 @@ any other tag, so it would refuse every store that recorded the tag.
 const barrierMigrationTags: ReadonlySet<string> = new Set([
 	'0052_cache_identity_contract',
 	'0084_root_incarnations',
-	'0085_root_target_counts'
+	'0085_root_target_counts',
+	'0088_narinfo_build_inputs'
 ]);
 
 function appliedVerificationState(tag: string): VerificationState {

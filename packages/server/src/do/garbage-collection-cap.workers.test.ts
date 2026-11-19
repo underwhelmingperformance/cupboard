@@ -34,6 +34,7 @@ import {
 	authorisedFetch,
 	bootstrap,
 	currentServer,
+	defaultCache,
 	driveToCompletion,
 	namedCache,
 	narBytes,
@@ -61,6 +62,7 @@ import {
 	insertRoot
 } from './garbage-collection.test-support.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
+import { withRowBudget } from './row-budget.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -123,8 +125,12 @@ class DrivenCollection {
 	}
 
 	async collectOneUnitOfWork(): Promise<void> {
+		await this.collectUnderRowBudget(1);
+	}
+
+	async collectUnderRowBudget(rows: number): Promise<void> {
 		await runInDurableObject(currentServer(), async (instance, state) => {
-			await underOneUnitOfWork(() => instance.runGarbageCollection());
+			await withRowBudget(() => instance.runGarbageCollection(), rows);
 			this.continuation = await state.storage.get(gcContinuationKey);
 			await state.storage.delete(gcContinuationKey);
 			await state.storage.deleteAlarm();
@@ -828,36 +834,44 @@ describe('garbage collection cap', () => {
 		});
 	});
 
-	it('reaches the collect phase while commits land between invocations', async () => {
+	it('completes a scan while a commit lands after every invocation', async () => {
 		await useTestServer('gc-sustained-commits');
 		const { token } = await bootstrap();
-		const kept = uploadMetadata({
-			fileSize: narBytes.byteLength,
-			storePathHash: repeated('a'),
-			name: 'kept',
-			references: []
-		});
-		const collectable = uploadMetadata({
-			fileSize: narBytes.byteLength,
-			storePathHash: repeated('b'),
-			name: 'collectable',
-			references: []
-		});
+		const chainLength = 300;
+		const chainPath = (index: number): StorePathHash =>
+			syntheticStorePathHash(1000 + index);
+		const collectable = syntheticStorePathHash(5000);
 
-		await pushPath(token, kept);
-		await pushPath(token, collectable);
-		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+		await runInDurableObject(currentServer(), (instance) => {
+			for (let index = 0; index < chainLength; index += 1) {
+				insertNarInfo(
+					instance.context,
+					chainPath(index),
+					1000 + index,
+					defaultCache(),
+					{
+						references: index + 1 < chainLength ? [chainPath(index + 1)] : []
+					}
+				);
+			}
+
+			insertNarInfo(instance.context, collectable, 5000);
+			insertRoot(instance.context, { name: 'channel', target: chainPath(0) });
+		});
 
 		let committed = 0;
 		const hasCollectablePath = async (): Promise<boolean> =>
-			(await narInfoGeneration(collectable.storePathHash)) !== undefined;
+			(await narInfoGeneration(collectable)) !== undefined;
 
-		// Each committed path is unmarked, so the barrier does not add it to the
-		// frontier. The scan must finish despite these intervening writes.
+		// The barrier queues each committed path, which costs the scan two mark
+		// steps. A pass of `passRows` rows marks fewer than `chainLength` paths,
+		// so the scan needs several passes, and a commit follows every pass.
+		const passRows = 2000;
+
 		await withoutAlarmArming(() =>
 			driveToCompletion(
 				async () => {
-					await driven.collectOneUnitOfWork();
+					await driven.collectUnderRowBudget(passRows);
 					await pushPath(
 						token,
 						uploadMetadata({
@@ -875,9 +889,14 @@ describe('garbage collection cap', () => {
 		);
 
 		expect({
-			collectable: await narInfoGeneration(collectable.storePathHash),
-			kept: await narInfoGeneration(kept.storePathHash)
-		}).toStrictEqual({ collectable: undefined, kept: 0 });
+			isCommittedAcrossPasses: committed > 1,
+			collectable: await narInfoGeneration(collectable),
+			chainEnd: await narInfoGeneration(chainPath(chainLength - 1))
+		}).toStrictEqual({
+			isCommittedAcrossPasses: true,
+			collectable: undefined,
+			chainEnd: 0
+		});
 	});
 
 	it('pages one high-fanout path across bounded mark chunks', async () => {
