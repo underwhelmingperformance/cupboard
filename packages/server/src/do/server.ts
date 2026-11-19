@@ -151,6 +151,7 @@ import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import {
 	authenticateOnce,
+	buildInputsRequestMaxBytes,
 	ContractRequest,
 	contractRequestMaxBytes,
 	uploadRequestMaxBytes
@@ -195,6 +196,7 @@ import {
 	type NarInfoDemotion
 } from './blob-reaper-service.ts';
 import { localMigrationBudget } from './bounded-migration.ts';
+import { BuildInputsService } from './build-inputs-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CacheListingProjection } from './cache-listing-projection.ts';
@@ -378,6 +380,7 @@ export type VerificationRecordRpcResult =
 // grace-facts capability when the client accepted it.
 const uploadGracePathPattern =
 	/^(?:\/cache\/[^/]+)?\/uploads(?:\/(?:preview|plan))?$/u;
+const buildInputsRecordPathPattern = /^(?:\/cache\/[^/]+)?\/build-inputs$/u;
 
 const dependencyStatusPathPattern =
 	/^(?:\/cache\/[^/]+)?\/uploads\/dependency-status$/u;
@@ -403,6 +406,10 @@ function contractBodyLimit(
 
 	if (method === 'POST' && dependencyStatusPathPattern.test(pathname)) {
 		return dependencyStatusMaxRequestBytes;
+	}
+
+	if (method === 'POST' && buildInputsRecordPathPattern.test(pathname)) {
+		return buildInputsRequestMaxBytes;
 	}
 
 	return contractRequestMaxBytes;
@@ -610,6 +617,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly signingKeys: SigningKeysService;
 	private readonly cachePurgeRetry = new CachePurgeRetryPolicy();
 	private readonly stats: StatsService;
+	private readonly buildInputs: BuildInputsService;
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
@@ -676,6 +684,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.cachePurgeRetry
 		);
 		this.stats = new StatsService(this.context);
+		this.buildInputs = new BuildInputsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
 		this.legacyRetention = new LegacyRetentionService(this.context);
@@ -2678,6 +2687,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			integrityCheck: this.integrityCheck,
 			roots: this.roots,
 			deletionQueue: this.deletionQueue,
+			buildInputs: this.buildInputs,
 			runGarbageCollection: (logger, cache, purgeOrigin) =>
 				this.collectGarbageInteractive(logger, cache, purgeOrigin),
 			uploads: this.uploads,

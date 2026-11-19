@@ -25,6 +25,7 @@ const operationLabels: Readonly<Record<Operation, string>> = {
 	'cache:defaults-read': 'read default cache settings',
 	'cache:defaults-update': 'change default cache settings',
 	'narinfo:delete': 'delete cached paths',
+	'build-inputs:record': 'record the build inputs of cached paths',
 	'gc:run': 'remove unretained paths',
 	'stats:read': 'read storage statistics',
 	'check:run': 'check cache integrity',

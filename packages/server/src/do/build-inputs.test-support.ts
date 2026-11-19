@@ -55,3 +55,31 @@ export async function buildInputColumns(
 				buildInputsVersion: row.buildInputsVersion ?? undefined
 			};
 }
+
+/**
+Stores build inputs on a path's row in the default cache, as the publication
+that created the row would have.
+*/
+export async function storeBuildInputs(
+	storePathHash: StorePathHash,
+	buildInputs: readonly string[],
+	buildInputsVersion: number
+): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
+
+		instance.context.db
+			.update(schema.narInfos)
+			.set({
+				buildInputsJson: JSON.stringify(buildInputs),
+				buildInputsVersion
+			})
+			.where(
+				and(
+					eq(schema.narInfos.cacheId, cacheId),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.run();
+	});
+}

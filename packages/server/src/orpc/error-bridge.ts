@@ -1,4 +1,5 @@
 import { type Logger } from '@cupboard/logger';
+import { buildInputsPageLimitErrorCode } from '@cupboard/protocol/build-inputs';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
 import { rootBatchLimitErrorCode } from '@cupboard/protocol/retention';
 import {
@@ -16,6 +17,7 @@ import {
 } from '../db/transient.ts';
 import {
 	BuildInputsCapabilityRequiredError,
+	BuildInputsPageLimitExceededError,
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
 	CacheClosedError,
@@ -235,6 +237,18 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { capacity: error.capacity },
+			defined: true
+		});
+	}
+
+	if (error instanceof BuildInputsPageLimitExceededError) {
+		return new ORPCError(buildInputsPageLimitErrorCode, {
+			status: error.status,
+			message: error.message,
+			data: {
+				maxEntries: error.maxEntries,
+				maxBuildInputs: error.maxBuildInputs
+			},
 			defined: true
 		});
 	}

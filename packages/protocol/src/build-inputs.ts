@@ -1,9 +1,13 @@
 import {
 	positiveIntSchema,
 	referenceSet,
-	storePathBasenameSchema
+	storePathBasenameSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import { z } from 'zod';
+
+import { countSchema } from './internal/counts.ts';
 
 /**
 The most build inputs that the server records for one path. A publication
@@ -97,3 +101,106 @@ export const storableEdgesMessage = `The references and build inputs must fit in
 // accept the token in `x-cupboard-accept-capabilities` on every negotiation,
 // preview and plan request, which the server refuses otherwise.
 export const buildInputsCapability = 'build-inputs-v1';
+
+/**
+The most entries in one `build-inputs` request.
+*/
+export const buildInputsRecordMaxEntries = 128;
+
+/**
+The most build inputs in one `build-inputs` request, counted across its
+entries. A request at this limit can bring one path to the most build inputs
+that a path can have.
+*/
+export const buildInputsRecordMaxBuildInputs = buildInputsMaxLength;
+
+/**
+The most build inputs that one `build-inputs` request reads, counting both
+those stored on its entries' rows and those that it gives. A row never has
+more than `buildInputsMaxLength` and a request gives at most
+`buildInputsRecordMaxBuildInputs`, so the first entry always fits.
+*/
+export const buildInputsRecordWorkBudget = 4 * buildInputsMaxLength;
+
+export const buildInputsPageLimitErrorCode = 'BUILD_INPUTS_PAGE_LIMIT_EXCEEDED';
+export const buildInputsPageLimitErrorDataSchema = z.strictObject({
+	maxEntries: countSchema,
+	maxBuildInputs: countSchema
+});
+
+const buildInputsRecordEntrySchema = z.strictObject({
+	storePath: storePathSchema,
+	buildInputs: z
+		.array(storePathBasenameSchema)
+		.transform((buildInputs) => referenceSet(buildInputs)),
+	buildInputsVersion: buildInputsVersionSchema
+});
+export type BuildInputsRecordEntry = z.output<
+	typeof buildInputsRecordEntrySchema
+>;
+
+// The schema leaves the number of entries and of build inputs open, so a
+// request above the limits receives the typed refusal. Two entries for one
+// path would make the result depend on their order, so each store-path hash
+// appears once.
+export const buildInputsRecordBodySchema = z.strictObject({
+	entries: z
+		.array(buildInputsRecordEntrySchema)
+		.min(1)
+		.superRefine((entries, ctx) => {
+			const seen = new Set<string>();
+
+			for (const [index, entry] of entries.entries()) {
+				const storePathHash = storePathHashOf(entry.storePath);
+
+				if (storePathHash === undefined) {
+					continue;
+				}
+
+				if (seen.has(storePathHash)) {
+					ctx.addIssue({
+						code: 'custom',
+						path: [index, 'storePath'],
+						message: `store path hash '${storePathHash}' appears more than once in the request`
+					});
+				}
+
+				seen.add(storePathHash);
+			}
+		})
+});
+export type BuildInputsRecordBody = z.output<
+	typeof buildInputsRecordBodySchema
+>;
+
+// One result for each entry, in request order. `recorded` means that the
+// row's build inputs or version changed, and `unchanged` that the row already
+// had every given build input at the same or a higher version. `absent` means
+// that the cache has no narinfo row for the store path. `limit-exceeded`
+// means that the row would go over `buildInputsMaxLength` build inputs,
+// `buildInputsMaxJsonBytes`, or `pathEdgesMaxJsonBytes` with its references.
+// `invalid-stored` means that the row's stored build inputs cannot be read or
+// list more than `buildInputsMaxLength`. `deferred` means that the request
+// reached `buildInputsRecordWorkBudget` before the entry, so the client sends
+// the entry again in a later request. Only `recorded` changes the row.
+export const buildInputsRecordResultSchema = z.strictObject({
+	storePath: storePathSchema,
+	status: z.enum([
+		'recorded',
+		'unchanged',
+		'absent',
+		'limit-exceeded',
+		'invalid-stored',
+		'deferred'
+	])
+});
+export type BuildInputsRecordResult = z.output<
+	typeof buildInputsRecordResultSchema
+>;
+
+export const buildInputsRecordResponseSchema = z.strictObject({
+	entries: z.array(buildInputsRecordResultSchema)
+});
+export type BuildInputsRecordResponse = z.output<
+	typeof buildInputsRecordResponseSchema
+>;

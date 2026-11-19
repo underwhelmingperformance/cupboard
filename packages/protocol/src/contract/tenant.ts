@@ -1,4 +1,5 @@
 import { attestationsContract } from './attestations.ts';
+import { buildInputsContract } from './build-inputs.ts';
 import { cachesContract } from './caches.ts';
 import { gcContract } from './gc.ts';
 import { keysContract } from './keys.ts';
@@ -32,5 +33,6 @@ export const tenantContract = {
 	gc: gcContract,
 	verify: verifyContract,
 	uploads: uploadsContract,
-	attestations: attestationsContract
+	attestations: attestationsContract,
+	buildInputs: buildInputsContract
 };

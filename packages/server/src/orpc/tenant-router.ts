@@ -395,6 +395,20 @@ export const tenantRouter = os.router({
 			runVerify(context.logger, context.request, context.services, input.limit)
 		)
 	},
+	buildInputs: {
+		record: {
+			inDefaultCache: os.buildInputs.record.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.buildInputs.record(context.cache, input)
+			),
+			inNamedCache: os.buildInputs.record.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.buildInputs.record(context.cache, {
+						entries: input.entries
+					})
+			)
+		}
+	},
 	uploads: {
 		plan: {
 			inDefaultCache: os.uploads.plan.inDefaultCache.handler(

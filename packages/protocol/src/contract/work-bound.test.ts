@@ -108,7 +108,9 @@ describe('the tenant contract', () => {
 			'attestations.negotiate.inDefaultCache': 'size',
 			'attestations.negotiate.inNamedCache': 'size',
 			'attestations.attach.inDefaultCache': 'size',
-			'attestations.attach.inNamedCache': 'size'
+			'attestations.attach.inNamedCache': 'size',
+			'buildInputs.record.inDefaultCache': 'size',
+			'buildInputs.record.inNamedCache': 'size'
 		});
 	});
 });

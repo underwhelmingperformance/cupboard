@@ -402,6 +402,53 @@ any tenant, refers to them. This happens at least 70 minutes after the last
 reference goes, and usually within a few hours. Deleting a store path from one
 cache never removes bytes that another cache still serves.
 
+### Build inputs
+
+A store path can also list its build inputs: the store paths that its derivation
+used when it was built, such as compilers, fetched sources and build tools. A
+garbage collection that keeps a store path also keeps those of its build inputs
+that are in the same cache, and follows their dependencies and build inputs in
+turn. A build input that the cache doesn't have keeps nothing. If it's published
+later, a kept store path that lists it keeps it from then on.
+
+A client can send a store path's build inputs with the publication that adds the
+store path to the cache. Publishing the store path again doesn't change them,
+with one exception: when the cache has lost the store path's NAR, a publication
+that uploads a different NAR replaces the store path, and its build inputs with
+it.
+
+A tenant administrator, or another caller with a grant for the
+`build-inputs:record` action, can add build inputs to store paths that a cache
+already has, through the admin API: `POST /build-inputs` for the default cache,
+or `POST /cache/<name>/build-inputs` for a named cache. A request lists at most
+128 store paths and 8,192 build inputs in total, with a version number for each
+store path, and a larger request is refused with HTTP 413. The request adds the
+build inputs to those that the store path already lists and never removes one,
+and the store path keeps the higher of the two versions. A store path can list
+at most 8,192 build inputs, in at most 1,000,000 bytes of JSON, and its
+references and build inputs together can take at most 1,500,000 bytes of JSON.
+The request leaves a store path unchanged when it would go over any of these
+limits.
+
+A request records at most 32,768 build inputs, counting both those that its
+store paths already list and those that it adds. When the next store path would
+go over that budget, the request stops, and that store path and every later one
+are reported as `deferred`. Send them again in another request.
+
+The response reports each store path as one of:
+
+- `recorded` when its build inputs or version changed
+- `unchanged` when it already listed every given build input at the same or a
+  higher version
+- `absent` when the cache doesn't have it
+- `limit-exceeded` when it would go over a limit
+- `invalid-stored` when its stored build inputs can't be read, list more than
+  8,192, or lack their version, or it has a version without build inputs
+- `deferred` when the request reached its budget before it
+
+A closed cache refuses the request. Build inputs change what the cache keeps, so
+no trust rule that the CLI creates grants this action.
+
 ## Retiring empty caches
 
 A named cache can remove itself once it's empty. This is useful for short-lived

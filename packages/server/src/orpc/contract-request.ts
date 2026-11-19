@@ -1,4 +1,12 @@
+import {
+	storePathBasenameMaxLength,
+	storePathMaxLength
+} from '@cupboard/nix-store/scalars';
 import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
+import {
+	buildInputsRecordMaxBuildInputs,
+	buildInputsRecordMaxEntries
+} from '@cupboard/protocol/build-inputs';
 import {
 	readResponseBytes,
 	RemoteBodyTooLargeError
@@ -21,6 +29,16 @@ export const contractRequestMaxBytes =
 // references, so the schema allows pages larger than any request that
 // Cloudflare accepts. The limit allows 40 KiB for each path's entry.
 export const uploadRequestMaxBytes = uploadPageSize * 40 * 1024;
+
+// A full `build-inputs` page lists `buildInputsRecordMaxBuildInputs` build
+// inputs, each a quoted basename and a comma, and `buildInputsRecordMaxEntries`
+// entries, each with a quoted store path and up to 128 bytes for its keys,
+// version and punctuation. The limit is twice that, so a client may also send
+// whitespace.
+export const buildInputsRequestMaxBytes =
+	2 *
+	(buildInputsRecordMaxBuildInputs * (storePathBasenameMaxLength + 3) +
+		buildInputsRecordMaxEntries * (storePathMaxLength + 128));
 
 /**
 Returns a function that calls `authenticate` once and returns the same
