@@ -27,6 +27,9 @@ import {
 	verificationCursor
 } from '../db/schema.ts';
 import {
+	StoredBuildInputsInvalidError,
+	StoredBuildInputsJsonMalformedError,
+	StoredBuildInputsNotArrayError,
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
 } from '../errors.ts';
@@ -67,6 +70,10 @@ import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 const tenantWideContinuation = { scope: 'tenant' };
+const updateReferences =
+	'UPDATE narinfo SET references_json = ? WHERE cache_id = ? AND store_path_hash = ?';
+const updateBuildInputs =
+	'UPDATE narinfo SET build_inputs_json = ? WHERE cache_id = ? AND store_path_hash = ?';
 
 async function continuation(): Promise<unknown> {
 	return runInDurableObject(currentServer(), (_instance, state) =>
@@ -952,22 +959,125 @@ describe('garbage collection cap', () => {
 		});
 	});
 
+	it('pages the references and build inputs of one path as one sequence', async () => {
+		await useTestServer('gc-bounded-build-inputs');
+		await bootstrap();
+		const parent = syntheticStorePathHash(10_000);
+		const references = Array.from({ length: 5 }, (_unused, index) =>
+			syntheticStorePathHash(1000 + index)
+		);
+		const buildInputs = Array.from(
+			{ length: phaseStepSize },
+			(_unused, index) => syntheticStorePathHash(index)
+		);
+
+		await runInDurableObject(currentServer(), (instance) => {
+			insertNarInfo(instance.context, parent, 10_000, defaultCache(), {
+				references,
+				buildInputs
+			});
+			insertRoot(instance.context, { name: 'channel', target: parent });
+
+			for (const [index, input] of buildInputs.entries()) {
+				insertNarInfo(instance.context, input, index);
+			}
+		});
+
+		// The references are absent and the build inputs are present. The first
+		// step walks the five references and the first build inputs, and the
+		// second step walks the build inputs that remain.
+		await driveScanTo(
+			(scan) =>
+				scan?.phase === 'mark' && scan.marks === 1 && scan.frontier === 0
+		);
+
+		await driven.collectOneUnitOfWork();
+		const firstStep = await referenceWalk();
+
+		await driven.collectOneUnitOfWork();
+		const secondStep = await referenceWalk();
+
+		await driven.restore();
+		await drainContinuation();
+
+		expect({
+			firstStep,
+			secondStep,
+			collection: await runInDurableObject(currentServer(), (instance) =>
+				collectionState(instance.context)
+			)
+		}).toStrictEqual({
+			firstStep: {
+				scan: {
+					phase: 'mark',
+					markStorePathHash: parent,
+					referenceCursor: phaseStepSize - 1
+				},
+				frontier: phaseStepSize
+			},
+			secondStep: {
+				scan: {
+					phase: 'mark',
+					markStorePathHash: undefined,
+					referenceCursor: -1
+				},
+				frontier: phaseStepSize + 5
+			},
+			collection: {
+				narInfos: [...buildInputs, parent],
+				roots: ['channel'],
+				inputs: {
+					inputsChanged: false,
+					scanCompletedAt: isoTimestamp(new Date())
+				}
+			}
+		});
+	});
+
 	it.each([
 		{
 			kind: 'malformed JSON',
+			edges: 'references',
 			server: 'gc-invalid-json',
+			update: updateReferences,
 			stored: '{',
 			error: StoredReferencesJsonMalformedError
 		},
 		{
 			kind: 'a non-array container',
+			edges: 'references',
 			server: 'gc-invalid-container',
+			update: updateReferences,
 			stored: JSON.stringify({ reference: `${repeated('b')}-child` }),
 			error: StoredReferencesNotArrayError
+		},
+		{
+			kind: 'malformed JSON',
+			edges: 'build inputs',
+			server: 'gc-invalid-build-inputs-json',
+			update: updateBuildInputs,
+			stored: '{',
+			error: StoredBuildInputsJsonMalformedError
+		},
+		{
+			kind: 'a non-array container',
+			edges: 'build inputs',
+			server: 'gc-invalid-build-inputs-container',
+			update: updateBuildInputs,
+			stored: JSON.stringify({ input: `${repeated('b')}-child` }),
+			error: StoredBuildInputsNotArrayError
+		},
+		{
+			kind: 'an entry that is not a store path basename',
+			edges: 'build inputs',
+			server: 'gc-invalid-build-input-entry',
+			update: updateBuildInputs,
+			stored: JSON.stringify(['not-a-path']),
+			error: StoredBuildInputsInvalidError
 		}
 	])(
-		'reports $kind as invalid stored references',
-		async ({ server, stored, error: ErrorClass }) => {
+		'reports $kind as invalid stored $edges',
+		async ({ server, update, stored, error: ErrorClass }) => {
 			await useTestServer(server);
 			const { token } = await bootstrap();
 			const parent = uploadMetadata({
@@ -980,20 +1090,33 @@ describe('garbage collection cap', () => {
 			await pushPath(token, parent);
 			await setRoot(token, { name: 'channel', targets: [parent.storePath] });
 
-			await expect(
-				runInDurableObject(currentServer(), async (instance, state) => {
+			let rejection: unknown;
+
+			try {
+				await runInDurableObject(currentServer(), async (instance, state) => {
 					const cache = resolvedCache(instance.context);
 
 					state.storage.sql.exec(
-						'UPDATE narinfo SET references_json = ? WHERE cache_id = ? AND store_path_hash = ?',
+						update,
 						stored,
 						cache.id,
 						parent.storePathHash
 					);
 
 					await instance.runGarbageCollection();
-				})
-			).rejects.toStrictEqual(new ErrorClass(parent.storePathHash));
+				});
+			} catch (error) {
+				rejection = error;
+			}
+
+			expect({
+				isExpectedError: rejection instanceof ErrorClass,
+				storePathHash:
+					rejection instanceof ErrorClass ? rejection.storePathHash : undefined
+			}).toStrictEqual({
+				isExpectedError: true,
+				storePathHash: parent.storePathHash
+			});
 		}
 	);
 });

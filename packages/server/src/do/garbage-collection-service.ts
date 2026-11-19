@@ -37,7 +37,11 @@ import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	GarbageCollectionBarrierMissingError,
+	MarkEdgesIncompleteError,
 	PushIdSigningKeyMissingError,
+	StoredBuildInputsInvalidError,
+	StoredBuildInputsJsonMalformedError,
+	StoredBuildInputsNotArrayError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError,
@@ -97,9 +101,11 @@ export const maxRootsExpiredPerRun = 32;
 const clearedScanCursor = '~';
 
 /**
-Reachability comes from retention targets, grace entries and the references
-of reachable narinfo rows. Seed queries and expected barrier trigger names
-share this list, so adding a seed source also requires its write barrier.
+Reachability comes from retention targets, grace entries, and the references
+and build inputs of reachable narinfo rows. Seed queries and expected barrier
+trigger names share this list, so adding a seed source also requires its write
+barrier. A new edge column of `narinfo` must also be added to the column list
+of `garbage_collection_barrier_narinfo_update`.
 */
 const reachabilitySources = [
 	{
@@ -239,6 +245,28 @@ export const collectionTriggers: readonly {
 // from the next indexed expiry query, so the existing alarm continuation drains
 // the remainder without a separate cursor.
 export const maxPendingRowsDeletedPerRun = 1000;
+
+/**
+The lengths of a narinfo row's references and build inputs. The mark phase
+walks them as one sequence: the references, then the build inputs.
+*/
+interface EdgeCounts {
+	readonly references: number;
+	readonly buildInputs: number;
+}
+
+/**
+One entry of that sequence: the column that it comes from and its JSON path
+in the column.
+*/
+interface EdgePosition {
+	readonly column: 'references' | 'build-inputs';
+	readonly path: string;
+}
+
+interface MarkEdge extends EdgePosition {
+	readonly entry: unknown;
+}
 
 interface UnreachableCollection {
 	readonly rootsExpired: number;
@@ -630,6 +658,42 @@ export class GarbageCollectionService {
 	}
 
 	/**
+	Queues the paths that have a narinfo row in the cache and skips the rest.
+
+	Build inputs are often absent from the cache, and many paths list the same
+	absent inputs. Queuing them as `insertFrontier` does would write a frontier
+	row and a mark for each one on every scan. The scan does not need those
+	marks. When an absent input is published during the mark or collect phase,
+	the narinfo insert barrier queues it. When it is published earlier, the
+	walk of the path that needs it finds it present.
+	*/
+	private insertPresentFrontier(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[]
+	): void {
+		for (const hashes of jsonValueLists(storePathHashes)) {
+			const present = this.context.db
+				.select({
+					cacheId: schema.narInfos.cacheId,
+					storePathHash: schema.narInfos.storePathHash
+				})
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cacheId, cache.id),
+						inArray(schema.narInfos.storePathHash, hashes)
+					)
+				);
+
+			this.context.db
+				.insert(schema.garbageCollectionFrontier)
+				.select(present)
+				.onConflictDoNothing()
+				.run();
+		}
+	}
+
+	/**
 	One of the paths that has a narinfo row in the cache, or undefined when
 	none has. Each seed step checks its own page until one has such a path, so
 	a step reads at most one page.
@@ -750,33 +814,106 @@ export class GarbageCollectionService {
 		return marks;
 	}
 
-	private referenceHash(
+	private edgeHash(
 		storePathHash: StorePathHash,
-		reference: unknown
+		edge: MarkEdge
 	): StorePathHash {
 		try {
-			const basename = storePathBasenameSchema.parse(reference);
+			const basename = storePathBasenameSchema.parse(edge.entry);
 			const separator = basename.indexOf('-');
 
 			return storePathHashSchema.parse(basename.slice(0, separator));
 		} catch (error) {
-			throw new StoredReferencesInvalidError(
-				storePathHash,
-				error instanceof Error ? error : new Error(String(error))
-			);
+			const cause = error instanceof Error ? error : new Error(String(error));
+
+			if (edge.column === 'build-inputs') {
+				throw new StoredBuildInputsInvalidError(storePathHash, cause);
+			}
+
+			throw new StoredReferencesInvalidError(storePathHash, cause);
 		}
 	}
 
-	private validateReferencesContainer(
+	/**
+	Reads the entries at `positions` from one narinfo row, in order. The query
+	reads the row once and each listed entry once. A `json_each` over a whole
+	column reads every entry of the column on every step, so a path with N
+	entries would cost about N² / `phaseStepSize` rows over one scan.
+
+	A new edge source also needs barrier triggers. Otherwise writes to it after
+	marking could make paths reachable without re-queuing them.
+	*/
+	private readEdges(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		positions: readonly EdgePosition[]
+	): readonly MarkEdge[] {
+		if (positions.length === 0) {
+			return [];
+		}
+
+		const rows = this.context.db.all<{ entry: unknown }>(sql`
+			SELECT CASE json_extract(step.value, '$.column')
+			         WHEN 'build-inputs'
+			         THEN json_extract(
+			           ${schema.narInfos.buildInputsJson},
+			           json_extract(step.value, '$.path')
+			         )
+			         ELSE json_extract(
+			           ${schema.narInfos.referencesJson},
+			           json_extract(step.value, '$.path')
+			         )
+			       END AS entry
+			FROM ${schema.narInfos}
+			CROSS JOIN json_each(${JSON.stringify(positions)}) AS step
+			WHERE ${schema.narInfos.cacheId} = ${cache.id}
+			  AND ${schema.narInfos.storePathHash} = ${storePathHash}
+			ORDER BY step.key
+		`);
+
+		if (rows.length !== positions.length) {
+			throw new MarkEdgesIncompleteError(
+				storePathHash,
+				positions.length,
+				rows.length
+			);
+		}
+
+		return positions.map((position, index) => ({
+			...position,
+			entry: rows[index]?.entry
+		}));
+	}
+
+	/**
+	Checks that the path's references and build inputs are JSON arrays and
+	returns their lengths. A path without a narinfo row has no edges.
+	*/
+	private edgeCounts(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash
-	): void {
+	): EdgeCounts {
 		const shape = this.context.db
 			.select({
 				referencesValid: sql<number>`json_valid(${schema.narInfos.referencesJson})`,
 				referencesType: sql<string | null>`CASE
 					WHEN json_valid(${schema.narInfos.referencesJson})
 					THEN json_type(${schema.narInfos.referencesJson})
+				END`,
+				buildInputsValid: sql<
+					number | null
+				>`json_valid(${schema.narInfos.buildInputsJson})`,
+				buildInputsType: sql<string | null>`CASE
+					WHEN json_valid(${schema.narInfos.buildInputsJson})
+					THEN json_type(${schema.narInfos.buildInputsJson})
+				END`,
+				referenceCount: sql<number | null>`CASE
+					WHEN json_valid(${schema.narInfos.referencesJson})
+					THEN json_array_length(${schema.narInfos.referencesJson})
+				END`,
+				buildInputCount: sql<number | null>`CASE
+					WHEN json_valid(${schema.narInfos.buildInputsJson})
+					THEN json_array_length(${schema.narInfos.buildInputsJson})
 				END`
 			})
 			.from(schema.narInfos)
@@ -788,26 +925,41 @@ export class GarbageCollectionService {
 			)
 			.get();
 
-		if (
-			shape === undefined ||
-			(shape.referencesValid === 1 && shape.referencesType === 'array')
-		) {
-			return;
+		if (shape === undefined) {
+			return { references: 0, buildInputs: 0 };
 		}
 
 		if (shape.referencesValid !== 1) {
 			throw new StoredReferencesJsonMalformedError(storePathHash);
 		}
 
-		throw new StoredReferencesNotArrayError(storePathHash);
+		if (shape.referencesType !== 'array') {
+			throw new StoredReferencesNotArrayError(storePathHash);
+		}
+
+		const references = shape.referenceCount ?? 0;
+
+		if (shape.buildInputsValid === null) {
+			return { references, buildInputs: 0 };
+		}
+
+		if (shape.buildInputsValid !== 1) {
+			throw new StoredBuildInputsJsonMalformedError(storePathHash);
+		}
+
+		if (shape.buildInputsType !== 'array') {
+			throw new StoredBuildInputsNotArrayError(storePathHash);
+		}
+
+		return { references, buildInputs: shape.buildInputCount ?? 0 };
 	}
 
 	/**
 	Walks the frontier until the budget is spent or the mark completes.
 
 	Each iteration is one step: it pops a path from the frontier and marks it,
-	or it walks a step of one path's references. The budget is consulted after
-	a step, so the first one always runs.
+	or it walks a step of one path's references and build inputs. The budget is
+	consulted after a step, so the first one always runs.
 
 	The path being walked and the reference cursor are kept in local
 	variables. Nothing else writes the scan row while the pass runs, so they
@@ -898,40 +1050,48 @@ export class GarbageCollectionService {
 				storePathHash = pending;
 			}
 
-			this.validateReferencesContainer(cache, storePathHash);
+			const counts = this.edgeCounts(cache, storePathHash);
+			const edgeCount = counts.references + counts.buildInputs;
+			const first = referenceCursor + 1;
+			const end = Math.min(first + phaseStepSize, edgeCount);
+			const positions: EdgePosition[] = [];
 
-			const page = phaseStepSize;
+			for (let index = first; index < end; index += 1) {
+				positions.push(
+					index < counts.references
+						? { column: 'references', path: `$[${String(index)}]` }
+						: {
+								column: 'build-inputs',
+								path: `$[${String(index - counts.references)}]`
+							}
+				);
+			}
 
-			// A new reference source also needs barrier triggers. Otherwise writes
-			// to it after marking could make paths reachable without re-queuing them.
-			const references = this.context.db.all<{
-				referenceIndex: number;
-				reference: unknown;
-			}>(sql`
-				SELECT CAST(json_each.key AS INTEGER) AS referenceIndex,
-				       json_each.value AS reference
-				FROM ${schema.narInfos}, json_each(${schema.narInfos.referencesJson})
-				WHERE ${schema.narInfos.cacheId} = ${cache.id}
-				  AND ${schema.narInfos.storePathHash} = ${storePathHash}
-				  AND CAST(json_each.key AS INTEGER) > ${referenceCursor}
-				ORDER BY CAST(json_each.key AS INTEGER)
-				LIMIT ${page + 1}
-			`);
-			const batch = references.slice(0, page);
-			const hashes = batch.map(({ reference }) =>
-				this.referenceHash(storePathHash, reference)
-			);
-			const marked = this.existingMarks(cache, hashes);
+			const references: StorePathHash[] = [];
+			const buildInputs: StorePathHash[] = [];
 
-			this.insertFrontier(
-				cache,
-				hashes.filter((hash) => hash !== storePathHash && !marked.has(hash))
-			);
+			for (const edge of this.readEdges(cache, storePathHash, positions)) {
+				const hash = this.edgeHash(storePathHash, edge);
 
-			if (references.length > batch.length) {
-				this.updateScan(cache, {
-					referenceCursor: batch.at(-1)?.referenceIndex ?? referenceCursor
-				});
+				if (edge.column === 'build-inputs') {
+					buildInputs.push(hash);
+					continue;
+				}
+
+				references.push(hash);
+			}
+
+			const marked = this.existingMarks(cache, [...references, ...buildInputs]);
+			const unmarked = (
+				hashes: readonly StorePathHash[]
+			): readonly StorePathHash[] =>
+				hashes.filter((hash) => hash !== storePathHash && !marked.has(hash));
+
+			this.insertFrontier(cache, unmarked(references));
+			this.insertPresentFrontier(cache, unmarked(buildInputs));
+
+			if (end < edgeCount) {
+				this.updateScan(cache, { referenceCursor: end - 1 });
 
 				return { complete: false };
 			}

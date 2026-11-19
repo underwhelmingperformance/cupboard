@@ -1,4 +1,5 @@
 import { startCapture } from '@cupboard/logger/testing';
+import { type StorePathHash } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +7,7 @@ import { z } from 'zod';
 
 import {
 	currentServer,
+	defaultCache,
 	driveToCompletion,
 	initialise,
 	namedCache,
@@ -26,6 +28,7 @@ import {
 	insertNarInfo,
 	insertRoot,
 	pastInstant,
+	storePathBasename,
 	useMinScanInterval
 } from './garbage-collection.test-support.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
@@ -89,6 +92,12 @@ const clearInputFlag =
 	'UPDATE garbage_collection_input SET inputs_changed = 0 WHERE cache_id = ?';
 const selectNarInfo =
 	'SELECT store_path_hash FROM narinfo WHERE cache_id = ? AND store_path_hash = ?';
+const recordBuildInputs =
+	'UPDATE narinfo SET build_inputs_json = ? WHERE cache_id = ? AND store_path_hash = ?';
+const selectWalkPosition =
+	'SELECT mark_store_path_hash AS markStorePathHash, reference_cursor AS referenceCursor FROM garbage_collection_scan WHERE cache_id = ?';
+const markInputsChanged =
+	'UPDATE garbage_collection_input SET inputs_changed = 1 WHERE cache_id = ?';
 
 interface PassCost {
 	readonly invocations: number;
@@ -97,6 +106,10 @@ interface PassCost {
 }
 
 const noCost: PassCost = { invocations: 0, rowsRead: 0, rowsWritten: 0 };
+
+function basenameList(paths: readonly StorePathHash[]): string {
+	return JSON.stringify(paths.map((path) => storePathBasename(path)));
+}
 
 // Adds one invocation and the rows of its `garbage-collection` cost lines.
 async function withInvocationCost(
@@ -123,6 +136,35 @@ async function withInvocationCost(
 		rowsWritten:
 			total.rowsWritten + lines.reduce((sum, line) => sum + line.rowsWritten, 0)
 	};
+}
+
+interface WalkStepCost {
+	readonly referenceCursor: number;
+	readonly rowsRead: number;
+	readonly rowsWritten: number;
+}
+
+// Enough one-step passes for a scan of one path with five steps of edges.
+const maxUnitPasses = 32;
+
+// The path that the default cache's scan is walking and its reference cursor,
+// or undefined when the cache has no scan.
+async function walkPosition(): Promise<
+	| {
+			readonly markStorePathHash: string | null;
+			readonly referenceCursor: number;
+	  }
+	| undefined
+> {
+	return runInDurableObject(currentServer(), (instance, state) =>
+		state.storage.sql
+			.exec<{ markStorePathHash: string | null; referenceCursor: number }>(
+				selectWalkPosition,
+				resolvedCache(instance.context).id
+			)
+			.toArray()
+			.at(0)
+	);
 }
 
 async function hasContinuation(): Promise<boolean> {
@@ -528,6 +570,121 @@ describe('garbage collection cost', () => {
 			});
 		}));
 
+	// A root target and four other paths list the same absent build inputs. A
+	// scan reads the cache's narinfo rows to find that the inputs are absent,
+	// and writes nothing for them. Each path's build inputs fit in one mark
+	// step, so the scan row's cursor is written as often in both scans.
+	it('writes no rows for build inputs that the cache does not have', async () =>
+		withoutAlarmArming(async () => {
+			const target = syntheticStorePathHash(20_000);
+			const present = [1, 2, 3, 4].map((index) =>
+				syntheticStorePathHash(20_000 + index)
+			);
+			const absent = Array.from(
+				{ length: phaseStepSize - present.length },
+				(_unused, index) => syntheticStorePathHash(30_000 + index)
+			);
+
+			await initialise();
+			await runInDurableObject(currentServer(), (instance) => {
+				insertNarInfo(instance.context, target, 20_000, defaultCache(), {
+					buildInputs: present
+				});
+				insertRoot(instance.context, { name: 'channel', target });
+
+				for (const [index, path] of present.entries()) {
+					insertNarInfo(instance.context, path, 20_001 + index);
+				}
+			});
+			await cronSweepCost();
+
+			const scanWithAbsentInputs = async (
+				absentInputs: readonly StorePathHash[]
+			): Promise<PassCost> => {
+				await runInDurableObject(currentServer(), (instance, state) => {
+					const cacheId = resolvedCache(instance.context).id;
+
+					state.storage.sql.exec(
+						recordBuildInputs,
+						basenameList([...present, ...absentInputs]),
+						cacheId,
+						target
+					);
+
+					for (const path of present) {
+						state.storage.sql.exec(
+							recordBuildInputs,
+							basenameList(absentInputs),
+							cacheId,
+							path
+						);
+					}
+
+					state.storage.sql.exec(markInputsChanged, cacheId);
+				});
+
+				return cronSweepCost();
+			};
+			const presentOnly = await scanWithAbsentInputs([]);
+			const withAbsent = await scanWithAbsentInputs(absent);
+
+			expect({ presentOnly, withAbsent }).toStrictEqual({
+				presentOnly: { invocations: 1, rowsRead: 415, rowsWritten: 54 },
+				withAbsent: { invocations: 1, rowsRead: 4139, rowsWritten: 54 }
+			});
+		}));
+
+	// One path lists five mark steps of absent build inputs, and each pass runs
+	// one step. Every full step reads the same number of rows, however long
+	// the list is.
+	it('reads one step of build inputs in each mark step', async () =>
+		withoutAlarmArming(async () => {
+			const target = syntheticStorePathHash(40_000);
+			const absent = Array.from(
+				{ length: 5 * phaseStepSize },
+				(_unused, index) => syntheticStorePathHash(41_000 + index)
+			);
+
+			await initialise();
+			await runInDurableObject(currentServer(), (instance) => {
+				insertNarInfo(instance.context, target, 40_000, defaultCache(), {
+					buildInputs: absent
+				});
+				insertRoot(instance.context, { name: 'channel', target });
+			});
+
+			const steps: WalkStepCost[] = [];
+			const pass = async (): Promise<void> => {
+				const before = await walkPosition();
+				const cost = await withInvocationCost(noCost, oneUnitPass);
+
+				if (before?.markStorePathHash !== target) {
+					return;
+				}
+
+				steps.push({
+					referenceCursor: before.referenceCursor,
+					rowsRead: cost.rowsRead,
+					rowsWritten: cost.rowsWritten
+				});
+			};
+
+			await pass();
+			await driveToCompletion(
+				pass,
+				async () => (await walkPosition()) === undefined,
+				maxUnitPasses
+			);
+
+			expect(steps).toStrictEqual(
+				[-1, 127, 255, 383, 511].map((referenceCursor) => ({
+					referenceCursor,
+					rowsRead: 1044,
+					rowsWritten: 1
+				}))
+			);
+		}));
+
 	// The scan of the changed cache ends its invocation, and the next one
 	// skips the remaining caches.
 	it('scans only the cache that changed', async () =>
@@ -566,7 +723,7 @@ describe('garbage collection cost', () => {
 			const unchanged = { inputsChanged: false, scanCompletedAt: firstSweepAt };
 
 			expect({ cost, caches }).toStrictEqual({
-				cost: { invocations: 2, rowsRead: 9623, rowsWritten: 2837 },
+				cost: { invocations: 2, rowsRead: 9619, rowsWritten: 2837 },
 				caches: {
 					isAddedPathKept: false,
 					completions: {
