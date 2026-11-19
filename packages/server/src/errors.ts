@@ -1565,6 +1565,21 @@ export class GarbageCollectionBarrierMissingError extends ServerHttpError {
 	}
 }
 
+export class MarkEdgesIncompleteError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly storePathHash: StorePathHash,
+		public readonly expected: number,
+		public readonly read: number
+	) {
+		super(
+			'Garbage collection read a different number of narinfo edges than it requested'
+		);
+		this.name = 'MarkEdgesIncompleteError';
+	}
+}
+
 export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -1592,6 +1607,36 @@ export class StoredReferencesNotArrayError extends ServerHttpError {
 	constructor(public readonly storePathHash: StorePathHash) {
 		super('Stored narinfo references are not an array');
 		this.name = 'StoredReferencesNotArrayError';
+	}
+}
+
+export class StoredBuildInputsInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly storePathHash: StorePathHash,
+		public override readonly cause: Error
+	) {
+		super('Stored narinfo build inputs are invalid');
+		this.name = 'StoredBuildInputsInvalidError';
+	}
+}
+
+export class StoredBuildInputsJsonMalformedError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly storePathHash: StorePathHash) {
+		super('Stored narinfo build inputs are malformed JSON');
+		this.name = 'StoredBuildInputsJsonMalformedError';
+	}
+}
+
+export class StoredBuildInputsNotArrayError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly storePathHash: StorePathHash) {
+		super('Stored narinfo build inputs are not an array');
+		this.name = 'StoredBuildInputsNotArrayError';
 	}
 }
 

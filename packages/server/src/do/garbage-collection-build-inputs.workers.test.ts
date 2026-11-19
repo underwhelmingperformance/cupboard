@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	currentServer,
+	defaultCache,
 	initialise,
 	resetTestServer,
 	resolvedCache,
@@ -11,6 +12,7 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import { type ServerContext } from './context.ts';
 import {
 	collectionState,
 	collectOneUnitOfWork,
@@ -19,11 +21,20 @@ import {
 	futureInstant,
 	insertNarInfo,
 	insertRoot,
+	storePathBasename,
 	storePathString
 } from './garbage-collection.test-support.ts';
 
 const target = syntheticStorePathHash(1);
+const input = syntheticStorePathHash(2);
+const inputReference = syntheticStorePathHash(3);
 const added = syntheticStorePathHash(4);
+const unrelated = syntheticStorePathHash(5);
+
+const recordBuildInputs =
+	'UPDATE narinfo SET build_inputs_json = ? WHERE cache_id = ? AND store_path_hash = ?';
+const gracePeriodUpdate =
+	'UPDATE cache_identity SET grace_seconds = ? WHERE id = ?';
 
 const selectQueued =
 	'SELECT store_path_hash FROM garbage_collection_frontier WHERE store_path_hash = ?';
@@ -41,8 +52,113 @@ async function defaultCacheState(): Promise<unknown> {
 	);
 }
 
+// A build input that refers to another path at run time, and a path that
+// nothing refers to.
+function insertInputs(context: ServerContext): void {
+	insertNarInfo(context, input, 2, defaultCache(), {
+		references: [inputReference]
+	});
+	insertNarInfo(context, inputReference, 3);
+	insertNarInfo(context, unrelated, 5);
+}
+
 describe('garbage collection build inputs', () => {
 	beforeEach(resetTestServer);
+
+	it.each([
+		{
+			edge: 'a build edge',
+			buildInputs: [input],
+			narInfos: [target, input, inputReference]
+		},
+		{ edge: 'no build edge', buildInputs: undefined, narInfos: [target] }
+	])(
+		'keeps the build inputs of a root target with $edge',
+		async ({ buildInputs, narInfos }) =>
+			withoutAlarmArming(async () => {
+				await initialise();
+				await runInDurableObject(currentServer(), (instance) => {
+					insertNarInfo(instance.context, target, 1, defaultCache(), {
+						buildInputs
+					});
+					insertRoot(instance.context, { name: 'channel', target });
+					insertInputs(instance.context);
+				});
+
+				await collectTenant();
+
+				expect(await defaultCacheState()).toStrictEqual({
+					narInfos,
+					roots: ['channel'],
+					inputs: {
+						inputsChanged: false,
+						scanCompletedAt: isoTimestamp(new Date())
+					}
+				});
+			})
+	);
+
+	it('keeps the build inputs of a released target through its grace deadline', async () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			await runInDurableObject(currentServer(), (instance, state) => {
+				state.storage.sql.exec(
+					gracePeriodUpdate,
+					24 * 60 * 60,
+					resolvedCache(instance.context).id
+				);
+				insertNarInfo(instance.context, target, 1, defaultCache(), {
+					buildInputs: [input]
+				});
+				insertRoot(instance.context, {
+					name: 'channel',
+					expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+					target
+				});
+				insertInputs(instance.context);
+			});
+
+			await collectTenant();
+
+			expect(await defaultCacheState()).toStrictEqual({
+				narInfos: [target, input, inputReference],
+				roots: [],
+				inputs: {
+					inputsChanged: false,
+					scanCompletedAt: isoTimestamp(new Date())
+				}
+			});
+		}));
+
+	it('walks a marked path again when its build inputs are recorded during a scan', async () =>
+		withoutAlarmArming(async () => {
+			await initialise();
+			await runInDurableObject(currentServer(), (instance) => {
+				insertNarInfo(instance.context, target, 1);
+				insertRoot(instance.context, { name: 'channel', target });
+				insertInputs(instance.context);
+			});
+
+			await driveScanTo(collectOneUnitOfWork, 'collect');
+			await runInDurableObject(currentServer(), (instance, state) => {
+				state.storage.sql.exec(
+					recordBuildInputs,
+					JSON.stringify([storePathBasename(input)]),
+					resolvedCache(instance.context).id,
+					target
+				);
+			});
+			await driveScanTo(collectOneUnitOfWork, undefined);
+
+			expect(await defaultCacheState()).toStrictEqual({
+				narInfos: [target, input, inputReference],
+				roots: ['channel'],
+				inputs: {
+					inputsChanged: false,
+					scanCompletedAt: isoTimestamp(new Date())
+				}
+			});
+		}));
 
 	it('keeps a path inserted during a scan and leaves it to the next scan', async () =>
 		withoutAlarmArming(async () => {

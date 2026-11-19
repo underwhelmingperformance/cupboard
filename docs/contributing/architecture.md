@@ -355,6 +355,26 @@ the paths that its narinfo row refers to. The `collect` phase deletes the
 narinfo rows without a mark, and the `clear` phase deletes the scan's marks and
 frontier.
 
+A narinfo row refers to other paths in two columns. Each column is a JSON array
+of store path basenames. `references_json` lists the path's runtime references.
+`build_inputs_json` lists its build inputs, which are the outputs that its
+derivation used when it was built. The column is NULL when no build inputs are
+recorded. The mark phase walks the references and then the build inputs as one
+sequence. A retained path therefore also keeps the build inputs that the cache
+has. It also keeps the paths that those inputs keep in turn.
+
+The phase queues a referenced path whether or not the cache has a narinfo row
+for it, and it marks an absent one. It queues a build input only when the cache
+has a narinfo row for it. An absent build input therefore costs index reads and
+writes no rows. A build input that is published later is kept from then on,
+because the row of the path that needs it still lists it. Recording build inputs
+does not set `inputs_changed`, so it does not by itself make a scan due.
+
+Each mark step walks up to `phaseStepSize` entries of one path. The scan row's
+`reference_cursor` records the position in the sequence of the last entry
+walked. A step reads only its own entries, with `json_extract`. The rows that a
+step reads therefore do not grow with the length of the arrays.
+
 Requests write to the cache between the invocations of a scan. Triggers on the
 retention and narinfo tables form the write barrier. They queue the paths that
 such a write can make reachable:
@@ -383,9 +403,9 @@ the next scan decides whether to keep a path that this scan kept only because of
 the barrier.
 
 A scan that cannot finish keeps its scan row. This happens, for example, when a
-path's stored references are malformed and every pass fails on them. Every path
-reserved in the cache then adds a frontier row, so the frontier grows until the
-stored data is fixed.
+path's stored references or build inputs are malformed and every pass fails on
+them. Every path reserved in the cache then adds a frontier row, so the frontier
+grows until the stored data is fixed.
 
 A scan ends without collecting when no root target or grace path of the cache
 has a narinfo row, unless the scan expired a root or the cache is grace-managed.
