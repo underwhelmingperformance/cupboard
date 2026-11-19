@@ -44,6 +44,7 @@ import {
 	UrlInputInvalidError
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
+import { encryptedDerivationArchiveName } from '../plan-archive.ts';
 import { publishReferenceTargets } from '../plan-reference.ts';
 import { type NixEvaluator, type TargetEvaluation } from '../publish-plan.ts';
 import {
@@ -564,7 +565,7 @@ describe('planAction', () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const output = path.join(directory, 'output');
 		const exportDirectory = path.join(directory, 'cupboard-derivations');
-		const archive = path.join(exportDirectory, 'cupboard-derivations.tar');
+		const archive = path.join(exportDirectory, encryptedDerivationArchiveName);
 		const roots = JSON.stringify({
 			derivations: {
 				[targetRootDrvPath]: derivationNode(`${'1'.repeat(32)}-app`),
@@ -600,15 +601,17 @@ describe('planAction', () => {
 
 					return result;
 				},
-				exportDerivationClosure: (derivations, cacheDirectory) => {
+				exportEncryptedDerivations: (derivations, cacheDirectory) => {
 					events.push(`export ${derivations.join(',')} into ${cacheDirectory}`);
 
 					return Promise.resolve({
 						archive,
+						ticket: 'test-ticket',
 						archiveBytes: 1024,
 						paths: 2000,
 						checkMs: 300,
 						copyMs: 1000,
+						encryptMs: 10,
 						packMs: 500
 					});
 				}
@@ -635,6 +638,7 @@ describe('planAction', () => {
 			],
 			outputs: exported
 				? [
+						'derivation-ticket=test-ticket',
 						`derivation-cache-file=${archive}`,
 						'derivation-artifact-name=cupboard-derivations-test'
 					]

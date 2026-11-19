@@ -56,7 +56,9 @@ const retryableStatuses = new Set<number>([
 	StatusCodes.GATEWAY_TIMEOUT
 ]);
 
-export function isTransientResponse(response: Response): boolean {
+export function isTransientResponse(
+	response: Pick<Response, 'status'>
+): boolean {
 	return retryableStatuses.has(response.status);
 }
 

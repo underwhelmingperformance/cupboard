@@ -70,6 +70,7 @@ import { NarInfoDemotionWatches } from './narinfo-demotion-watches.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 import { currentOperationCost } from './operation-cost.ts';
+import { PlanArchiveStore } from './plan-archive-store.ts';
 import { currentRowBudgetMeter } from './row-budget.ts';
 import { StagingDeletes } from './staging-deletes.ts';
 import { TransitionGate } from './transition-gate.ts';
@@ -183,6 +184,7 @@ export class ServerContext {
 	readonly transitions: TransitionGate;
 	grantsContracted = false;
 	referenceStorageContracted = false;
+	readonly planArchives: PlanArchiveStore;
 	readonly cacheRepository: CacheRepository;
 	readonly subrequestsPerInvocation: number;
 	gateBudgetMs = criticalSectionBudgetMs;
@@ -228,6 +230,7 @@ export class ServerContext {
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
 		this.transitions = new TransitionGate(this.d1);
 		this.subrequestsPerInvocation = subrequestsPerInvocation(env);
+		this.planArchives = new PlanArchiveStore(this.db);
 		this.cacheRepository = new CacheRepository(this.db);
 	}
 

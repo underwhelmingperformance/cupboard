@@ -36,6 +36,7 @@
 		"./oidc-trust-match": "./src/oidc-trust-match.ts",
 		"./oidc-trust-diagnostics": "./src/oidc-trust-diagnostics.ts",
 		"./oidc-trust-selection": "./src/oidc-trust-selection.ts",
+		"./plan-archive": "./src/plan-archive.ts",
 		"./plan": "./src/plan.ts",
 		"./platform": "./src/platform.ts",
 		"./publication": "./src/publication.ts",

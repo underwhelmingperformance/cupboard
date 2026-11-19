@@ -1798,6 +1798,25 @@ export class CohortEvaluationDriftError extends CodedError {
 	}
 }
 
+export class PlanArchiveConnectionError extends CodedError {
+	constructor(cause: unknown) {
+		super(
+			'The job could not reach the Cupboard token endpoint. Retry the job when connectivity returns.',
+			{ cause }
+		);
+		this.name = 'PlanArchiveConnectionError';
+	}
+}
+
+export class MissingDerivationTicketError extends CodedError {
+	constructor() {
+		super(
+			'Importing a plan archive requires the derivation-ticket output from the plan job.'
+		);
+		this.name = 'MissingDerivationTicketError';
+	}
+}
+
 export class DerivationClosureImportError extends CodedError {
 	constructor(
 		public readonly archive: string,

@@ -246,12 +246,12 @@ on:
           the targets again, so it no longer checks that each target still
           evaluates to the plan's derivation. Every imported path must match its
           content address or have a trusted signature, and the plan job fails
-          when a path has neither, as with import from derivation. The artifact
-          contains the sources that the derivations reference, including sources
-          from private flake inputs, and anyone who can read the repository can
-          download it, so leave this off in a public repository with private
-          inputs. The job logs and diagnostics record how long the export and
-          the import take.
+          when a path has neither, as with import from derivation. The plan
+          encrypts the whole archive, including private sources, before upload.
+          The tenant must support plan archive grants and trust the jobs' GitHub
+          OIDC identity for uploads to the destination cache. Each cohort can
+          decrypt the whole archive. The job logs and diagnostics record export
+          and import times, including encryption and decryption.
         required: false
         default: false
         type: boolean

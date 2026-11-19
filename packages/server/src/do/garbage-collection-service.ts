@@ -2000,6 +2000,10 @@ export class GarbageCollectionService {
 		const hasMoreReplacementCleanups =
 			this.deletionQueue.queueDueReplacementCleanups(now);
 		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
+		const hasMoreExpiredArchives = this.context.planArchives.deleteExpired(
+			now,
+			phaseStepSize
+		);
 		const hasMoreExpiredSubjectNonces = this.collectExpiredSubjectNonces(now);
 
 		if (expiredRefreshFamilies.hasMoreWork) {
@@ -2072,6 +2076,7 @@ export class GarbageCollectionService {
 				hasMoreRefreshCredentialMaintenance ||
 				hasMoreReplacementCleanups ||
 				expiredRefreshFamilies.hasMoreWork ||
+				hasMoreExpiredArchives ||
 				hasMoreExpiredSubjectNonces ||
 				hasMorePendingRows,
 			stagingKeys
