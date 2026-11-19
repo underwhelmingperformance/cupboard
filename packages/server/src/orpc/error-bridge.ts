@@ -2,6 +2,7 @@ import { type Logger } from '@cupboard/logger';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
 import { rootBatchLimitErrorCode } from '@cupboard/protocol/retention';
 import {
+	buildInputsCapabilityRequiredErrorCode,
 	cacheRemovedErrorCode,
 	uploadRequestLimitErrorCode
 } from '@cupboard/protocol/upload';
@@ -14,6 +15,7 @@ import {
 	isD1Overload
 } from '../db/transient.ts';
 import {
+	BuildInputsCapabilityRequiredError,
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
 	CacheClosedError,
@@ -242,6 +244,14 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { cache: error.cache },
+			defined: true
+		});
+	}
+
+	if (error instanceof BuildInputsCapabilityRequiredError) {
+		return new ORPCError(buildInputsCapabilityRequiredErrorCode, {
+			status: error.status,
+			message: error.message,
 			defined: true
 		});
 	}

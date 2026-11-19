@@ -1,3 +1,4 @@
+import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
 	uploadCapabilitiesHeader,
 	type UploadDecision,
@@ -9,7 +10,8 @@ import {
 	type UploadPreviewDecision,
 	type UploadPreviewRequest,
 	uploadPreviewRequestSchema,
-	uploadPreviewResponseSchema
+	uploadPreviewResponseSchema,
+	uploadRequestMaxBodyBytes
 } from '@cupboard/protocol/upload';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
@@ -18,11 +20,15 @@ import { StatusCodes } from 'http-status-codes';
 
 import { spendSubrequests } from '../do/subrequest-slice.ts';
 import {
+	BuildInputsCapabilityRequiredError,
 	uploadPageSplitHeader,
-	UploadRequestLimitExceededError
+	UploadRequestLimitExceededError,
+	UploadRequestTooLargeError
 } from '../errors.ts';
+import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
 	directUploadPageSize,
+	uploadPageMaxBytes,
 	uploadPageSize
 } from '../policy/upload-pages.ts';
 
@@ -51,9 +57,49 @@ function maximumRequestSends(paths: number): number {
 	);
 }
 
-export function uploadRequestMaxPathsFor(availableSubrequests: number): number {
+// The bytes of one path's entry that the advertised maximum allows for, for a
+// client that accepts `build-inputs-v1`. The fixed fields of an entry take
+// about 250 bytes, which leaves room for about 60 references of 60-character
+// basenames. A path whose build inputs are larger than this needs the client
+// to page by bytes, which such a client must do.
+const advertisedPathBytes = 4096;
+
+// The bytes of a request that are not path entries: the push ID, a run root and
+// the JSON around them.
+const uploadRequestEnvelopeBytes = 4096;
+
+/**
+Whether an upload request comes from a client that accepts `build-inputs-v1`.
+Only such a client sends build inputs, and only its requests have the body
+limit, the paging by size and the smaller advertised maximum. Other clients,
+including those that send a whole closure in one request, are answered as
+before build inputs existed.
+*/
+export function isBuildInputsRequest(request: Request): boolean {
+	return hasAcceptedCapability(request, buildInputsCapability);
+}
+
+/**
+The most paths that one negotiation or preview request may contain, which the
+Worker advertises in `x-cupboard-upload-max-paths`. The Worker must be able to
+send every page and every split within `availableSubrequests`. For a client
+that accepts build inputs, a request of that many paths at
+`advertisedPathBytes` each must also stay within `uploadRequestMaxBodyBytes`.
+*/
+export function uploadRequestMaxPathsFor(
+	availableSubrequests: number,
+	isBuildInputsClient: boolean
+): number {
 	let lower = 0;
-	let upper = uploadNegotiateMaxPaths;
+	let upper = isBuildInputsClient
+		? Math.min(
+				uploadNegotiateMaxPaths,
+				Math.floor(
+					(uploadRequestMaxBodyBytes - uploadRequestEnvelopeBytes) /
+						advertisedPathBytes
+				)
+			)
+		: uploadNegotiateMaxPaths;
 	while (lower < upper) {
 		const middle = Math.ceil((lower + upper) / 2);
 		if (maximumRequestSends(middle) <= availableSubrequests) {
@@ -63,6 +109,41 @@ export function uploadRequestMaxPathsFor(availableSubrequests: number): number {
 		}
 	}
 	return lower;
+}
+
+const utf8 = new TextEncoder();
+
+// Groups the paths into pages of at most `uploadPageSize` paths and
+// `uploadPageMaxBytes` bytes of metadata, in order. A path larger than a page
+// gets a page of its own.
+function pagesBySize(
+	paths: readonly UploadPathNegotiation[]
+): UploadPathNegotiation[][] {
+	const pages: UploadPathNegotiation[][] = [];
+	let page: UploadPathNegotiation[] = [];
+	let bytes = 0;
+
+	for (const path of paths) {
+		const size = utf8.encode(JSON.stringify(path)).length + 1;
+
+		if (
+			page.length > 0 &&
+			(page.length === uploadPageSize || bytes + size > uploadPageMaxBytes)
+		) {
+			pages.push(page);
+			page = [];
+			bytes = 0;
+		}
+
+		page.push(path);
+		bytes += size;
+	}
+
+	if (page.length > 0) {
+		pages.push(page);
+	}
+
+	return pages;
 }
 
 class UploadPageRefused extends Error {
@@ -78,36 +159,275 @@ interface UploadPageAnswer {
 	readonly capability: string | undefined;
 }
 
-export async function answerUploadsInChunks(
-	request: Request,
-	mode: 'negotiate' | 'preview',
-	send: (body: UploadRequest) => Promise<Response>,
-	availableSubrequests: number
-): Promise<Response | undefined> {
-	let body: unknown;
+interface UploadBodyStream {
+	getReader(): {
+		read(): Promise<
+			| { readonly done: true; readonly value?: Uint8Array }
+			| { readonly done: false; readonly value: Uint8Array }
+		>;
+		releaseLock(): void;
+	};
+}
 
-	try {
-		body = await request.clone().json();
-	} catch {
-		return undefined;
+// Reads the request body, up to `uploadRequestMaxBodyBytes`, and stops
+// reading a larger body.
+async function uploadRequestBytes(request: {
+	readonly headers: Pick<Headers, 'get'>;
+	readonly body: UploadBodyStream | null;
+}): Promise<Uint8Array> {
+	const declared = Number(request.headers.get('content-length'));
+
+	if (declared > uploadRequestMaxBodyBytes) {
+		throw new UploadRequestTooLargeError(uploadRequestMaxBodyBytes);
 	}
 
+	if (request.body === null) {
+		return new Uint8Array();
+	}
+
+	const reader = request.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let length = 0;
+
+	for (;;) {
+		const chunk = await reader.read();
+
+		if (chunk.done) {
+			break;
+		}
+
+		length += chunk.value.byteLength;
+
+		if (length > uploadRequestMaxBodyBytes) {
+			reader.releaseLock();
+			throw new UploadRequestTooLargeError(uploadRequestMaxBodyBytes);
+		}
+
+		chunks.push(chunk.value);
+	}
+
+	const bytes = new Uint8Array(length);
+	let offset = 0;
+
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	return bytes;
+}
+
+function parseUploadRequest(
+	body: unknown,
+	mode: 'negotiate' | 'preview'
+): UploadRequest | undefined {
 	const parsed =
 		mode === 'negotiate'
 			? uploadNegotiateRequestSchema.safeParse(body)
 			: uploadPreviewRequestSchema.safeParse(body);
 
-	if (!parsed.success) {
+	return parsed.success ? parsed.data : undefined;
+}
+
+// Decodes and validates a body, and returns only the validated request, so
+// the decoded text and the raw JSON can be collected before any page is sent.
+function decodeUploadRequest(
+	bytes: Uint8Array,
+	mode: 'negotiate' | 'preview'
+): UploadRequest | undefined {
+	let body: unknown;
+
+	try {
+		body = JSON.parse(new TextDecoder().decode(bytes));
+	} catch {
 		return undefined;
 	}
-	const input = parsed.data;
-	const maxPaths = uploadRequestMaxPathsFor(availableSubrequests);
-	if (maximumRequestSends(input.paths.length) > availableSubrequests) {
+
+	return parseUploadRequest(body, mode);
+}
+
+/**
+The pages of a request and the fields that every page repeats. The paths go
+only in the pages, so the Worker keeps one list of them.
+*/
+interface UploadPages {
+	readonly envelope: UploadRequest;
+	readonly pages: readonly (readonly UploadPathNegotiation[])[];
+}
+
+function uploadPagesOf(
+	input: UploadRequest,
+	pages: readonly (readonly UploadPathNegotiation[])[]
+): UploadPages {
+	return { envelope: { ...input, paths: [] }, pages };
+}
+
+// Refuses pages that need more sends than `availableSubrequests` allows, as
+// a request needs at least one send even without paths. The refusal reports the
+// paths of the leading pages that fit, so a retry of those leading paths makes
+// the same pages and fits. When no page fits, it reports `maxPaths`.
+function refuseOverBudget(
+	pages: readonly (readonly UploadPathNegotiation[])[],
+	availableSubrequests: number,
+	maxPaths: number
+): void {
+	if (availableSubrequests < 1) {
 		throw new UploadRequestLimitExceededError(maxPaths);
 	}
-	if (input.paths.length <= directUploadPageSize) {
-		return undefined;
+
+	let sends = 0;
+	let fittingPaths = 0;
+
+	for (const page of pages) {
+		sends += maximumPageSends(page.length);
+
+		if (sends > availableSubrequests) {
+			throw new UploadRequestLimitExceededError(
+				fittingPaths === 0 ? maxPaths : Math.min(maxPaths, fittingPaths)
+			);
+		}
+
+		fittingPaths += page.length;
 	}
+}
+
+/**
+What the Worker does with an upload request: the merged answer of its pages,
+or a forward of the request to the tenant object as it is. For a client that
+accepts build inputs, `bytes` is the body that the Worker read and `input` the
+request that it validated, or undefined when the body is not a valid request.
+For any other client, the Worker forwards the original request.
+*/
+export type UploadRequestOutcome =
+	| { readonly kind: 'answered'; readonly response: Response }
+	| {
+			readonly kind: 'direct';
+			readonly body?: {
+				readonly bytes: Uint8Array;
+				readonly input: UploadRequest | undefined;
+			};
+	  };
+
+/**
+Answers an upload request in pages when it is too large for one request to
+the tenant object, or tells the caller to forward it.
+
+For a client that accepts build inputs, the Worker reads the body itself, not
+a copy, up to `uploadRequestMaxBodyBytes`, joins its chunks into one buffer,
+and pages it by size as well as by count. For any other client, it reads a
+copy of the body without a limit and pages it by count, as it did before build
+inputs existed, and refuses a request that contains build inputs.
+*/
+export async function answerUploadsInChunks(
+	request: Request,
+	mode: 'negotiate' | 'preview',
+	send: (body: UploadRequest) => Promise<Response>,
+	availableSubrequests: number
+): Promise<UploadRequestOutcome> {
+	const isBuildInputsClient = isBuildInputsRequest(request);
+	const maxPaths = uploadRequestMaxPathsFor(
+		availableSubrequests,
+		isBuildInputsClient
+	);
+
+	if (!isBuildInputsClient) {
+		let body: unknown;
+
+		try {
+			body = await request.clone().json();
+		} catch {
+			return { kind: 'direct' };
+		}
+
+		const input = parseUploadRequest(body, mode);
+
+		if (input === undefined) {
+			return { kind: 'direct' };
+		}
+
+		if (input.paths.some((path) => path.buildInputs !== undefined)) {
+			throw new BuildInputsCapabilityRequiredError();
+		}
+
+		if (maximumRequestSends(input.paths.length) > availableSubrequests) {
+			throw new UploadRequestLimitExceededError(maxPaths);
+		}
+
+		if (input.paths.length <= directUploadPageSize) {
+			return { kind: 'direct' };
+		}
+
+		return {
+			kind: 'answered',
+			response: await answerUploadPages(
+				uploadPagesOf(input, chunk(input.paths, uploadPageSize)),
+				mode,
+				send,
+				availableSubrequests,
+				maxPaths
+			)
+		};
+	}
+
+	const plan = await planBuildInputsRequest(
+		request,
+		mode,
+		availableSubrequests,
+		maxPaths
+	);
+
+	if (plan.kind === 'direct') {
+		return plan;
+	}
+
+	return {
+		kind: 'answered',
+		response: await answerUploadPages(
+			plan.pages,
+			mode,
+			send,
+			availableSubrequests,
+			maxPaths
+		)
+	};
+}
+
+// Reads and validates the body of a client that accepts build inputs. A paged
+// plan keeps only its pages, so the body, its text and the validated request
+// can be collected while the pages are sent.
+async function planBuildInputsRequest(
+	request: Request,
+	mode: 'negotiate' | 'preview',
+	availableSubrequests: number,
+	maxPaths: number
+): Promise<
+	| Extract<UploadRequestOutcome, { kind: 'direct' }>
+	| { readonly kind: 'paged'; readonly pages: UploadPages }
+> {
+	const bytes = await uploadRequestBytes(request);
+	const input = decodeUploadRequest(bytes, mode);
+
+	if (input === undefined) {
+		return { kind: 'direct', body: { bytes, input } };
+	}
+
+	const pages = pagesBySize(input.paths);
+	refuseOverBudget(pages, availableSubrequests, maxPaths);
+
+	if (pages.length <= 1 && input.paths.length <= directUploadPageSize) {
+		return { kind: 'direct', body: { bytes, input } };
+	}
+
+	return { kind: 'paged', pages: uploadPagesOf(input, pages) };
+}
+
+async function answerUploadPages(
+	{ envelope, pages }: UploadPages,
+	mode: 'negotiate' | 'preview',
+	send: (body: UploadRequest) => Promise<Response>,
+	availableSubrequests: number,
+	maxPaths: number
+): Promise<Response> {
 	let sent = 0;
 	const responseSchema =
 		mode === 'negotiate'
@@ -123,7 +443,7 @@ export async function answerUploadsInChunks(
 
 		sent += 1;
 		spendSubrequests(1, 'upload page');
-		const response = await send({ ...input, paths: [...paths] });
+		const response = await send({ ...envelope, paths: [...paths] });
 
 		if (
 			response.headers.get(uploadPageSplitHeader) === '1' &&
@@ -153,17 +473,17 @@ export async function answerUploadsInChunks(
 
 	try {
 		const chunks = await mapWithConcurrency(
-			chunk(input.paths, uploadPageSize),
+			pages,
 			outgoingConnections,
 			sendPage
 		);
-		const pages = chunks.flat();
-		const capabilities = new Set(pages.map((page) => page.capability));
+		const answers = chunks.flat();
+		const capabilities = new Set(answers.map((answer) => answer.capability));
 		const capability =
-			capabilities.size === 1 ? pages[0]?.capability : undefined;
+			capabilities.size === 1 ? answers[0]?.capability : undefined;
 
 		return Response.json(
-			{ uploads: pages.flatMap((page) => page.uploads) },
+			{ uploads: answers.flatMap((answer) => answer.uploads) },
 			{
 				status: StatusCodes.OK,
 				headers: {

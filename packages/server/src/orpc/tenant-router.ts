@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import { type RootName, type StorePathHash } from '@cupboard/nix-store/scalars';
+import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import {
@@ -16,6 +17,7 @@ import {
 import { implement } from '@orpc/server';
 
 import { type AccessClaims } from '../auth/auth.ts';
+import { BuildInputsCapabilityRequiredError } from '../errors.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
 	internalOrigin,
@@ -587,10 +589,25 @@ function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
 	);
 }
 
+// A client sends build inputs only on a request that accepts `build-inputs-v1`,
+// which gives the request the body limit and the paging that build inputs need.
+function refuseUnacceptedBuildInputs(
+	request: Request,
+	paths: readonly { readonly buildInputs?: unknown }[]
+): void {
+	if (
+		!hasAcceptedCapability(request, buildInputsCapability) &&
+		paths.some((path) => path.buildInputs !== undefined)
+	) {
+		throw new BuildInputsCapabilityRequiredError();
+	}
+}
+
 function planUpload(
 	context: TenantOrpcContext & { readonly claims: AccessClaims },
 	input: UploadNegotiateRequest
 ) {
+	refuseUnacceptedBuildInputs(context.request, input.paths);
 	if (input.attachRoot !== undefined) {
 		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
 	}
@@ -605,6 +622,7 @@ function negotiateUpload(
 	context: TenantOrpcContext & { readonly claims: AccessClaims },
 	input: UploadNegotiateRequest
 ) {
+	refuseUnacceptedBuildInputs(context.request, input.paths);
 	if (input.attachRoot !== undefined) {
 		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
 	}
@@ -650,6 +668,7 @@ function previewUpload(
 	context: TenantOrpcContext & { readonly claims: AccessClaims },
 	paths: UploadPreviewRequest['paths']
 ) {
+	refuseUnacceptedBuildInputs(context.request, paths);
 	return context.services.uploads.preview(
 		context.cache,
 		{ paths },

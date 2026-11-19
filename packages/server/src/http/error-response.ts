@@ -1,7 +1,9 @@
 import { type Logger } from '@cupboard/logger';
 import {
+	buildInputsCapabilityRequiredErrorCode,
 	uploadRequestLimitErrorCode,
-	uploadRequestMaxPathsHeader
+	uploadRequestMaxPathsHeader,
+	uploadRequestTooLargeErrorCode
 } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import type { Context, ErrorHandler } from 'hono';
@@ -14,6 +16,7 @@ import {
 } from '../db/transient.ts';
 import {
 	AttestationInfoHttpError,
+	BuildInputsCapabilityRequiredError,
 	ControlDatabaseMigrationPendingError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
@@ -25,7 +28,8 @@ import {
 	UnauthenticatedError,
 	uploadPageSplitHeader,
 	UploadPageSplitRequiredError,
-	UploadRequestLimitExceededError
+	UploadRequestLimitExceededError,
+	UploadRequestTooLargeError
 } from '../errors.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { isRuntimeRetryable } from '../runtime-fault.ts';
@@ -86,6 +90,29 @@ export function serverHttpErrorResponse(error: ServerHttpError): Response {
 				status: error.status,
 				message: error.message,
 				data: { maxPaths: error.maxPaths },
+				defined: true
+			}).toJSON(),
+			{ status: error.status, headers }
+		);
+	}
+	if (error instanceof BuildInputsCapabilityRequiredError) {
+		headers.set('cache-control', 'no-store');
+		return Response.json(
+			new ORPCError(buildInputsCapabilityRequiredErrorCode, {
+				status: error.status,
+				message: error.message,
+				defined: true
+			}).toJSON(),
+			{ status: error.status, headers }
+		);
+	}
+	if (error instanceof UploadRequestTooLargeError) {
+		headers.set('cache-control', 'no-store');
+		return Response.json(
+			new ORPCError(uploadRequestTooLargeErrorCode, {
+				status: error.status,
+				message: error.message,
+				data: { maxBytes: error.maxBytes },
 				defined: true
 			}).toJSON(),
 			{ status: error.status, headers }

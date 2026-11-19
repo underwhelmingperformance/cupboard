@@ -30,6 +30,7 @@ import {
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
+import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
 	type TransitionId,
 	type TransitionState
@@ -3081,9 +3082,7 @@ export async function negotiateUploads(
 			}),
 			headers: {
 				'content-type': 'application/json',
-				...(shouldReportGrace && {
-					[acceptCapabilitiesHeader]: uploadGraceFactsCapability
-				})
+				...acceptedUploadCapabilities(paths, shouldReportGrace)
 			},
 			method: 'POST'
 		}
@@ -3092,6 +3091,24 @@ export async function negotiateUploads(
 	expect(response.status, await response.clone().text()).toBe(StatusCodes.OK);
 
 	return uploadNegotiateResponseSchema.parse(await response.json());
+}
+
+// The capabilities that a client accepts on a negotiation: grace facts when
+// asked for, and `build-inputs-v1` whenever a path has build inputs.
+function acceptedUploadCapabilities(
+	paths: readonly UploadPathMetadata[],
+	shouldReportGrace: boolean
+): Record<string, string> {
+	const capabilities = [
+		...(shouldReportGrace ? [uploadGraceFactsCapability] : []),
+		...(paths.some((path) => path.buildInputs !== undefined)
+			? [buildInputsCapability]
+			: [])
+	];
+
+	return capabilities.length === 0
+		? {}
+		: { [acceptCapabilitiesHeader]: capabilities.join(',') };
 }
 
 // Drives a single-path negotiate straight at a Durable Object instance, for a
@@ -4836,7 +4853,11 @@ export function uploadPathNegotiation(metadata: UploadPathMetadata) {
 		narSize: metadata.narSize,
 		references: metadata.references,
 		deriver: metadata.deriver,
-		ca: metadata.ca
+		ca: metadata.ca,
+		...(metadata.buildInputs !== undefined && {
+			buildInputs: metadata.buildInputs,
+			buildInputsVersion: metadata.buildInputsVersion
+		})
 	};
 }
 

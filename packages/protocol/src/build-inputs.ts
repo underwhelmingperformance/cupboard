@@ -89,3 +89,11 @@ export function hasStorableEdges(value: {
 }
 
 export const storableEdgesMessage = `The references and build inputs must fit in ${String(pathEdgesMaxJsonBytes)} bytes of JSON`;
+
+// A client accepts this token on the credential request when it can send
+// `buildInputs` and `buildInputsVersion` in path metadata. Older servers reject
+// metadata with a field that they do not know, so the client sends the fields
+// only when the server echoes this token. A client that sends them must also
+// accept the token in `x-cupboard-accept-capabilities` on every negotiation,
+// preview and plan request, which the server refuses otherwise.
+export const buildInputsCapability = 'build-inputs-v1';

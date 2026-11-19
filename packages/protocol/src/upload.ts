@@ -189,6 +189,29 @@ export const uploadRequestLimitErrorDataSchema = z.strictObject({
 });
 export const uploadRequestMaxPathsHeader = 'x-cupboard-upload-max-paths';
 
+// The most bytes in the body of one negotiation, preview or plan request that
+// accepts `build-inputs-v1`. Other requests keep the earlier limits.
+// Build inputs can make one path's metadata about 1.5 MB, so a client pages
+// these requests by size as well as by count, and keeps each `publish-batch`
+// message within `publicationMaxFrameBytes`. The Worker reads a negotiation or
+// preview body whole and parses it, and while it parses, the body, its text,
+// the parsed JSON and the validated request each take up to about this much.
+// The limit assumes that few such requests run at once in one isolate, which
+// has 128 MB of memory; nothing enforces that, so several concurrent requests
+// at the limit can exhaust it.
+export const uploadRequestMaxBodyBytes = 8 * 1024 * 1024;
+
+export const uploadRequestTooLargeErrorCode = 'UPLOAD_REQUEST_TOO_LARGE';
+export const uploadRequestTooLargeErrorDataSchema = z.strictObject({
+	maxBytes: countSchema
+});
+
+// A request contains build inputs but did not accept `build-inputs-v1` in
+// `x-cupboard-accept-capabilities`. Only a request that accepts the capability
+// gets the body limit and the paging by size that build inputs need.
+export const buildInputsCapabilityRequiredErrorCode =
+	'BUILD_INPUTS_CAPABILITY_REQUIRED';
+
 // A push request is refused with this code when a cache with the push's
 // cache name was removed after the push started. The push must not create the
 // cache again, so the client stops the push.

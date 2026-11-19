@@ -263,6 +263,28 @@ export class UploadRequestLimitExceededError extends ServerHttpError {
 	}
 }
 
+export class UploadRequestTooLargeError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(readonly maxBytes: number) {
+		super(
+			`The upload request body is larger than ${String(maxBytes)} bytes. Send fewer paths per request.`
+		);
+		this.name = 'UploadRequestTooLargeError';
+	}
+}
+
+export class BuildInputsCapabilityRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor() {
+		super(
+			'The request contains build inputs but does not accept build-inputs-v1. Accept the capability in x-cupboard-accept-capabilities.'
+		);
+		this.name = 'BuildInputsCapabilityRequiredError';
+	}
+}
+
 export class RootBatchLimitExceededError extends ServerHttpError {
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
 

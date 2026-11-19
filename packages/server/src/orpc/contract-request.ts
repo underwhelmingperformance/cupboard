@@ -100,6 +100,11 @@ export class ContractRequest {
 		);
 	}
 
+	// Whether the handler's read of the body crossed the limit.
+	get isOversize(): boolean {
+		return this.#isTooLarge;
+	}
+
 	/**
 	Throws {@link RequestBodyTooLargeError} if the handler's read of the body
 	crossed the limit. The handler turns a failed read into its own 400

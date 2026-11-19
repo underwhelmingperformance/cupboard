@@ -9,6 +9,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
+import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
 	cacheAvailabilityMaxRequestBytes,
 	cacheAvailabilityRequestSchema,
@@ -58,6 +59,7 @@ import {
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadIdSchema,
+	uploadRequestMaxBodyBytes,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import {
@@ -107,6 +109,7 @@ import {
 	TenantNotConfiguredError,
 	UnauthenticatedError,
 	UploadNotFoundError,
+	UploadRequestTooLargeError,
 	ZstdUnavailableError
 } from '../errors.ts';
 import { forbidStoring } from '../http/bounded-body.ts';
@@ -382,9 +385,18 @@ const dependencyStatusPathPattern =
 // The largest body that the contract handler reads for a request.
 function contractBodyLimit(
 	isUploadGraceEndpoint: boolean,
+	isBuildInputsUpload: boolean,
 	method: string,
 	pathname: string
 ): number {
+	// A client that accepts build inputs sends `uploads.plan` requests here
+	// unpaged, and a plan request with build inputs can be as large as a whole
+	// client request, so its limit is the protocol's request limit, not the
+	// Worker's page size. Other clients keep the earlier limit.
+	if (isBuildInputsUpload) {
+		return uploadRequestMaxBodyBytes;
+	}
+
 	if (isUploadGraceEndpoint) {
 		return uploadRequestMaxBytes;
 	}
@@ -798,13 +810,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const pathname = new URL(context.req.url).pathname;
 			const isUploadGraceEndpoint =
 				context.req.method === 'POST' && uploadGracePathPattern.test(pathname);
+			const isBuildInputsUpload =
+				isUploadGraceEndpoint &&
+				hasAcceptedCapability(context.req.raw, buildInputsCapability);
 			const authenticate = authenticateOnce(() =>
 				this.authKeys.authenticate(context.req.raw)
 			);
 			const contract = new ContractRequest(
 				context.req.raw,
 				authenticate,
-				contractBodyLimit(isUploadGraceEndpoint, context.req.method, pathname)
+				contractBodyLimit(
+					isUploadGraceEndpoint,
+					isBuildInputsUpload,
+					context.req.method,
+					pathname
+				)
 			);
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				contract.request,
@@ -820,6 +840,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			if (isMatched) {
+				if (isBuildInputsUpload && contract.isOversize) {
+					throw new UploadRequestTooLargeError(uploadRequestMaxBodyBytes);
+				}
 				contract.refuseOversizeBody();
 
 				if (isUploadGraceEndpoint && !pathname.endsWith('/confirm')) {
@@ -863,7 +886,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					const echoed = [
 						publicationCapability,
 						confirmPresentCapability,
-						pushRootWritesCapability
+						pushRootWritesCapability,
+						buildInputsCapability
 					]
 						.filter((capability) =>
 							hasAcceptedCapability(context.req.raw, capability)

@@ -43,12 +43,15 @@ const lenientNegotiateBodySchema = z.object({
 Prefetches shared blob and reference facts before dispatching a negotiation.
 The Durable Object checks the access token and its cache grant before any
 shared D1 fact read. Invalid input or credentials disable the optimisation.
+When the caller has already read and parsed the body, it passes `parsedBody`
+and the request's body is not read.
 */
 export async function computeNegotiateHints(
 	request: Request,
 	env: Env,
 	tenant: TenantId,
-	cache: CacheScope
+	cache: CacheScope,
+	parsedBody?: unknown
 ): Promise<NegotiateHints | undefined> {
 	const authorization = request.headers.get('authorization');
 
@@ -56,12 +59,14 @@ export async function computeNegotiateHints(
 		return undefined;
 	}
 
-	let body: unknown;
+	let body = parsedBody;
 
-	try {
-		body = await request.clone().json();
-	} catch {
-		return undefined;
+	if (body === undefined) {
+		try {
+			body = await request.clone().json();
+		} catch {
+			return undefined;
+		}
 	}
 
 	const parsed = lenientNegotiateBodySchema.safeParse(body);

@@ -29,6 +29,27 @@ export function innerRequest(context: Context<WorkerHonoEnv>): Request {
 }
 
 /**
+Builds the request to forward from an upload body that the Worker has already
+read, with the same path and sanitised headers as {@link innerRequest}. A
+request without `body` is a template for pages, which supply their own.
+*/
+export function innerUploadRequest(
+	context: Context<WorkerHonoEnv>,
+	body?: Uint8Array
+): Request {
+	const inner = new URL(context.req.url);
+	inner.pathname = context.get('tenantRest');
+	const headers = new Headers(context.req.raw.headers);
+	headers.delete(negotiateHintsHeader);
+
+	return new Request(inner, {
+		method: context.req.method,
+		headers,
+		...(body !== undefined && { body })
+	});
+}
+
+/**
 Returns the deadline for the response headers of `read`. A narinfo GET and
 each narinfo read of a `path-info` probe get what admission left of the read
 budget, so that admission and the reads together end within the CLI's

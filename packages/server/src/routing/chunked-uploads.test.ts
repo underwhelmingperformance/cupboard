@@ -1,16 +1,27 @@
+import { storePathNameMaxLength } from '@cupboard/nix-store/scalars';
+import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
+	acceptCapabilitiesHeader,
 	pushIdSchema,
 	uploadNegotiateResponseSchema,
+	type UploadPathNegotiation,
 	uploadPathNegotiationSchema,
-	uploadPreviewResponseSchema
+	uploadPreviewResponseSchema,
+	uploadRequestMaxBodyBytes
 } from '@cupboard/protocol/upload';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import {
 	subrequestsAvailable,
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
-import { UploadRequestLimitExceededError } from '../errors.ts';
+import {
+	BuildInputsCapabilityRequiredError,
+	UploadRequestLimitExceededError,
+	UploadRequestTooLargeError
+} from '../errors.ts';
+import { uploadPageMaxBytes } from '../policy/upload-pages.ts';
 
 import {
 	answerUploadsInChunks,
@@ -21,6 +32,9 @@ import {
 
 const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const pushId = pushIdSchema.parse('test-push');
+const buildInputsHeaders = {
+	[acceptCapabilitiesHeader]: buildInputsCapability
+};
 
 function suffix(index: number): string {
 	let value = index;
@@ -32,6 +46,21 @@ function suffix(index: number): string {
 	}
 
 	return result;
+}
+
+// Paths whose build inputs take about 1 MB each.
+function largePaths(count: number) {
+	return paths(count).map((path, index) =>
+		uploadPathNegotiationSchema.parse({
+			...path,
+			buildInputs: Array.from(
+				{ length: 4000 },
+				(_, offset) =>
+					`${String(index * 4000 + offset).padStart(32, '0')}-${'a'.repeat(storePathNameMaxLength)}`
+			),
+			buildInputsVersion: 1
+		})
+	);
 }
 
 function paths(count: number) {
@@ -48,11 +77,45 @@ function paths(count: number) {
 	});
 }
 
+// A negotiation that accepts build inputs.
+function buildInputsRequest(paths: readonly UploadPathNegotiation[]): Request {
+	return new Request('https://cache.example/uploads', {
+		method: 'POST',
+		headers: buildInputsHeaders,
+		body: JSON.stringify({ pushId, paths })
+	});
+}
+
+// Answers every path of a page with `skip`.
+function skipEvery(body: {
+	readonly paths: readonly UploadPathNegotiation[];
+}): Promise<Response> {
+	return Promise.resolve(
+		Response.json({
+			uploads: body.paths.map((path) => ({
+				action: 'skip',
+				storePathHash: path.storePathHash,
+				narHash: path.narHash
+			}))
+		})
+	);
+}
+
+// The merged answer of a paged request, or undefined when the Worker forwards
+// the body as it is.
+async function answer(
+	...parameters: Parameters<typeof answerUploadsInChunks>
+): Promise<Response | undefined> {
+	const outcome = await answerUploadsInChunks(...parameters);
+
+	return outcome.kind === 'answered' ? outcome.response : undefined;
+}
+
 describe('chunked upload requests', () => {
 	it('merges more than one DO probe allowance of existing paths in input order', async () => {
 		const input = paths(901);
 		const pages: number[] = [];
-		const response = await answerUploadsInChunks(
+		const response = await answer(
 			new Request('https://cache.example/uploads/preview', {
 				method: 'POST',
 				body: JSON.stringify({ paths: input })
@@ -95,9 +158,10 @@ describe('chunked upload requests', () => {
 	it('splits negotiation pages before a missing-NAR repair exceeds the DO allowance', async () => {
 		const input = paths(uploadPageSize + 1);
 		const pages: number[] = [];
-		const response = await answerUploadsInChunks(
+		const response = await answer(
 			new Request('https://cache.example/uploads', {
 				method: 'POST',
+				headers: buildInputsHeaders,
 				body: JSON.stringify({ pushId, paths: input })
 			}),
 			'negotiate',
@@ -157,7 +221,7 @@ describe('chunked upload requests', () => {
 				})
 			});
 			await expect(
-				answerUploadsInChunks(
+				answer(
 					request,
 					mode,
 					() => {
@@ -175,7 +239,7 @@ describe('chunked upload requests', () => {
 		const pages: number[] = [];
 		const result = await withSubrequestSlice(
 			async () => {
-				const response = await answerUploadsInChunks(
+				const response = await answer(
 					new Request('https://cache.example/uploads', {
 						method: 'POST',
 						body: JSON.stringify({ pushId, paths: input })
@@ -230,7 +294,7 @@ describe('chunked upload requests', () => {
 			});
 			const pages: number[] = [];
 			const input = paths(101);
-			const response = await answerUploadsInChunks(
+			const response = await answer(
 				new Request('https://cache.example/uploads', {
 					method: 'POST',
 					body: JSON.stringify({ pushId, paths: input })
@@ -257,14 +321,109 @@ describe('chunked upload requests', () => {
 		}
 	);
 
+	// Six paths whose build inputs take about 1 MB each fit in one page by
+	// count, but not in one page by size.
+	it.each(['negotiate', 'preview'] as const)(
+		'pages %s requests by the size of their build inputs',
+		async (mode) => {
+			const input = largePaths(6);
+			const pages: { readonly paths: number; readonly bytes: number }[] = [];
+			const response = await answer(
+				new Request('https://cache.example/uploads', {
+					method: 'POST',
+					headers: buildInputsHeaders,
+					body: JSON.stringify(
+						mode === 'negotiate' ? { pushId, paths: input } : { paths: input }
+					)
+				}),
+				mode,
+				(body) => {
+					pages.push({
+						paths: body.paths.length,
+						bytes: JSON.stringify(body.paths).length
+					});
+
+					return Promise.resolve(
+						Response.json({
+							uploads: body.paths.map((path) => ({
+								action: 'skip',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash
+							}))
+						})
+					);
+				},
+				900
+			);
+			const schema =
+				mode === 'negotiate'
+					? uploadNegotiateResponseSchema
+					: uploadPreviewResponseSchema;
+
+			expect({
+				pages: pages.map((page) => ({
+					paths: page.paths,
+					isWithinLimit: page.bytes <= uploadPageMaxBytes
+				})),
+				hashes:
+					response === undefined
+						? undefined
+						: schema
+								.parse(await response.json())
+								.uploads.map((upload) => upload.storePathHash)
+			}).toStrictEqual({
+				pages: [2, 2, 2].map((count) => ({
+					paths: count,
+					isWithinLimit: true
+				})),
+				hashes: input.map((path) => path.storePathHash)
+			});
+		}
+	);
+
+	it('refuses a request body larger than the upload request limit from a client that accepts build inputs', async () => {
+		let sent = 0;
+
+		const request = new Request('https://cache.example/uploads', {
+			method: 'POST',
+			headers: buildInputsHeaders,
+			body: JSON.stringify({ pushId, paths: largePaths(20) })
+		});
+		const send = () => {
+			sent += 1;
+
+			return Promise.resolve(Response.json({ uploads: [] }));
+		};
+		let error: unknown;
+
+		try {
+			await answer(request, 'negotiate', send, 900);
+		} catch (error_) {
+			error = error_;
+		}
+
+		expect({
+			error:
+				error instanceof UploadRequestTooLargeError
+					? { status: error.status, maxBytes: error.maxBytes }
+					: error,
+			sent
+		}).toStrictEqual({
+			error: {
+				status: StatusCodes.REQUEST_TOO_LONG,
+				maxBytes: uploadRequestMaxBodyBytes
+			},
+			sent: 0
+		});
+	});
+
+	// The request is larger than `uploadRequestMaxBodyBytes`, which applies
+	// only to clients that accept build inputs.
 	it('keeps large requests within a reserved split budget', async () => {
 		let sent = 0;
-		const input = paths(40_000);
-		const response = await answerUploadsInChunks(
-			new Request('https://cache.example/uploads', {
-				method: 'POST',
-				body: JSON.stringify({ pushId, paths: input })
-			}),
+		const body = JSON.stringify({ pushId, paths: paths(40_000) });
+		const response = await answer(
+			new Request('https://cache.example/uploads', { method: 'POST', body }),
 			'negotiate',
 			() => {
 				sent += 1;
@@ -273,15 +432,161 @@ describe('chunked upload requests', () => {
 			700
 		);
 		expect({
+			isOverBuildInputsLimit: body.length > uploadRequestMaxBodyBytes,
 			status: response?.status,
-			sent,
-			limits: [0, 1, 2, 3, 7, 900].map((available) =>
-				uploadRequestMaxPathsFor(available)
+			sent
+		}).toStrictEqual({ isOverBuildInputsLimit: true, status: 200, sent: 100 });
+	});
+
+	it('advertises a maximum for each subrequest allowance', () => {
+		const allowances = [0, 1, 2, 3, 7, 700, 900, 10_000];
+
+		expect({
+			earlierClients: allowances.map((available) =>
+				uploadRequestMaxPathsFor(available, false)
+			),
+			buildInputsClients: allowances.map((available) =>
+				uploadRequestMaxPathsFor(available, true)
 			)
 		}).toStrictEqual({
-			status: 200,
-			sent: 100,
-			limits: [0, 100, 100, 200, 400, 51_400]
+			earlierClients: [0, 100, 100, 200, 400, 40_000, 51_400, 100_000],
+			buildInputsClients: [0, 100, 100, 200, 400, 2047, 2047, 2047]
 		});
 	});
+
+	it('accepts and pages a request of the advertised number of paths at nearly 4 KiB each', async () => {
+		const maxPaths = uploadRequestMaxPathsFor(900, true);
+		const input = paths(maxPaths).map((path, index) =>
+			uploadPathNegotiationSchema.parse({
+				...path,
+				references: Array.from(
+					{ length: 58 },
+					(_, offset) =>
+						`${String(index * 27 + offset).padStart(32, '0')}-${'r'.repeat(27)}`
+				)
+			})
+		);
+		const pages: number[] = [];
+		const body = JSON.stringify({ pushId, paths: input });
+
+		const response = await answer(
+			new Request('https://cache.example/uploads', {
+				method: 'POST',
+				headers: buildInputsHeaders,
+				body
+			}),
+			'negotiate',
+			(page) => {
+				pages.push(page.paths.length);
+
+				return Promise.resolve(
+					Response.json({
+						uploads: page.paths.map((path) => ({
+							action: 'skip',
+							storePathHash: path.storePathHash,
+							narHash: path.narHash
+						}))
+					})
+				);
+			},
+			900
+		);
+
+		expect({
+			maxPaths,
+			largestEntry: Math.max(
+				...input.map((path) => JSON.stringify(path).length + 1)
+			),
+			fitsBody: body.length <= uploadRequestMaxBodyBytes,
+			status: response?.status,
+			pages
+		}).toStrictEqual({
+			maxPaths: 2047,
+			largestEntry: 3869,
+			fitsBody: true,
+			status: StatusCodes.OK,
+			pages: [...Array.from({ length: 5 }, () => 400), 47]
+		});
+	});
+
+	it('refuses build inputs in a request that does not accept the capability', async () => {
+		let sent = 0;
+		const request = new Request('https://cache.example/uploads', {
+			method: 'POST',
+			body: JSON.stringify({ pushId, paths: largePaths(1) })
+		});
+		let error: unknown;
+
+		try {
+			await answer(
+				request,
+				'negotiate',
+				() => {
+					sent += 1;
+
+					return Promise.resolve(Response.json({ uploads: [] }));
+				},
+				900
+			);
+		} catch (error_) {
+			error = error_;
+		}
+
+		expect({
+			isRefused: error instanceof BuildInputsCapabilityRequiredError,
+			sent
+		}).toStrictEqual({ isRefused: true, sent: 0 });
+	});
+
+	// Six paths of about 1 MB make three pages of two by size, but two sends
+	// allow only the first two pages, which hold four paths.
+	it('refuses size pages beyond the allowance with a maximum that a retry can meet', async () => {
+		const input = largePaths(6);
+		let error: unknown;
+
+		try {
+			await answer(buildInputsRequest(input), 'negotiate', skipEvery, 2);
+		} catch (error_) {
+			error = error_;
+		}
+
+		const maxPaths =
+			error instanceof UploadRequestLimitExceededError
+				? error.maxPaths
+				: undefined;
+		const retried = await answer(
+			buildInputsRequest(input.slice(0, maxPaths)),
+			'negotiate',
+			skipEvery,
+			2
+		);
+
+		expect({ maxPaths, retried: retried?.status }).toStrictEqual({
+			maxPaths: 4,
+			retried: StatusCodes.OK
+		});
+	});
+
+	// A request needs one send even without paths, so no allowance refuses it.
+	it.each([
+		{ request: 'no paths', paths: () => [] },
+		{ request: 'one page of large paths', paths: () => largePaths(2) }
+	])(
+		'refuses a request that accepts build inputs with $request and no subrequests',
+		async ({ paths: pathsOf }) => {
+			let error: unknown;
+
+			try {
+				await answer(buildInputsRequest(pathsOf()), 'negotiate', skipEvery, 0);
+			} catch (error_) {
+				error = error_;
+			}
+
+			expect(
+				error instanceof UploadRequestLimitExceededError
+					? { maxPaths: error.maxPaths }
+					: error
+			).toStrictEqual({ maxPaths: uploadRequestMaxPathsFor(0, true) });
+		}
+	);
 });

@@ -34,7 +34,10 @@ import {
 	withinReadDeadline,
 	withoutForwardDeadline
 } from '../do/deadline.ts';
-import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
+import {
+	type NegotiateHints,
+	negotiateHintsHeader
+} from '../do/negotiate-hints.ts';
 import { withOperationCost } from '../do/operation-cost.ts';
 import {
 	subrequestsAvailable,
@@ -74,6 +77,7 @@ import {
 } from './chunked-availability.ts';
 import {
 	answerUploadsInChunks,
+	isBuildInputsRequest,
 	uploadRequestMaxPathsFor
 } from './chunked-uploads.ts';
 import { tenantServer } from './durable-object.ts';
@@ -85,6 +89,7 @@ import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import { sizeBoundTenantRoutes } from './size-bound-routes.ts';
 import {
 	innerRequest,
+	innerUploadRequest,
 	tenantUncachedRead,
 	withoutStoring
 } from './tenant-forward.ts';
@@ -441,13 +446,16 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 				subrequestsPerInvocation(context.env),
 				subrequestsAvailable()
 			);
-			const maxPaths = uploadRequestMaxPathsFor(availableSubrequests);
+			const maxPaths = uploadRequestMaxPathsFor(
+				availableSubrequests,
+				isBuildInputsRequest(context.req.raw)
+			);
 			let pageTemplate: Request | undefined;
 			const chunked = await answerUploadsInChunks(
 				context.req.raw,
 				'negotiate',
 				(body) => {
-					pageTemplate ??= innerRequest(context);
+					pageTemplate ??= innerUploadRequest(context);
 
 					return dispatchTenant(
 						uploadPageRequest(pageTemplate, body),
@@ -459,19 +467,31 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 				availableSubrequests
 			);
 
-			if (chunked !== undefined) {
-				return withUploadRequestLimit(chunked, maxPaths);
+			if (chunked.kind === 'answered') {
+				return withUploadRequestLimit(chunked.response, maxPaths);
 			}
 
-			// Compute hints before constructing the forwarded request because reading
-			// them clones the original body.
-			const hints = await computeNegotiateHints(
-				context.req.raw,
-				context.env,
-				tenant,
-				context.get('readScope').scope
-			);
-			const inner = innerRequest(context);
+			// A client without build inputs is answered as before: the hints read a
+			// copy of its original body before the request is forwarded. For any
+			// other client the Worker has read the body, and the hints use the
+			// request that it validated.
+			const { body } = chunked;
+			let hints: NegotiateHints | undefined;
+
+			if (body === undefined || body.input !== undefined) {
+				hints = await computeNegotiateHints(
+					context.req.raw,
+					context.env,
+					tenant,
+					context.get('readScope').scope,
+					body?.input
+				);
+			}
+
+			const inner =
+				body === undefined
+					? innerRequest(context)
+					: innerUploadRequest(context, body.bytes);
 
 			if (hints !== undefined) {
 				try {
@@ -503,13 +523,16 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 				subrequestsPerInvocation(context.env),
 				subrequestsAvailable()
 			);
-			const maxPaths = uploadRequestMaxPathsFor(availableSubrequests);
+			const maxPaths = uploadRequestMaxPathsFor(
+				availableSubrequests,
+				isBuildInputsRequest(context.req.raw)
+			);
 			let pageTemplate: Request | undefined;
 			const chunked = await answerUploadsInChunks(
 				context.req.raw,
 				'preview',
 				(body) => {
-					pageTemplate ??= innerRequest(context);
+					pageTemplate ??= innerUploadRequest(context);
 
 					return tenantServer(context.env, context.get('tenant')).fetch(
 						uploadPageRequest(pageTemplate, body)
@@ -519,10 +542,13 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 			);
 
 			return withUploadRequestLimit(
-				chunked ??
-					(await tenantServer(context.env, context.get('tenant')).fetch(
-						innerRequest(context)
-					)),
+				chunked.kind === 'answered'
+					? chunked.response
+					: await tenantServer(context.env, context.get('tenant')).fetch(
+							chunked.body === undefined
+								? innerRequest(context)
+								: innerUploadRequest(context, chunked.body.bytes)
+						),
 				maxPaths
 			);
 		}

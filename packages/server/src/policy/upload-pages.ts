@@ -14,6 +14,13 @@ export const directUploadPageSize = Math.floor(
 	pageSubrequests / (1 + subrequestsPerReconcileRemoval)
 );
 
+// The most bytes of path metadata in one page that the Worker sends to the
+// tenant object. Build inputs can make one path's metadata about 1.5 MB, so the
+// Worker pages by size as well as by count. Each page in flight takes about
+// twice this, as JSON text and as an encoded body, and six can be in flight
+// beside the validated request's paths.
+export const uploadPageMaxBytes = 2 * 1024 * 1024;
+
 // The most paths that one `uploads.plan` request may contain. CLIs up to
 // v0.0.52 send plan pages of 100 paths and cannot send a smaller page after a
 // refusal, so the limit stays at 100 whatever the other page sizes become. A
