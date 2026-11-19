@@ -449,6 +449,26 @@ The response reports each store path as one of:
 A closed cache refuses the request. Build inputs change what the cache keeps, so
 no trust rule that the CLI creates grants this action.
 
+A tenant administrator, or another caller with a grant for the
+`cache:content-read` action, can read the build inputs of one store path:
+`GET /build-inputs/<hash>` for the default cache, or
+`GET /cache/<name>/build-inputs/<hash>` for a named cache. The response reports
+`recorded` with the build inputs and their version, `none` when the store path
+lists none, `absent` when the cache doesn't have it, or `invalid-stored` when
+its stored build inputs can't be read, list more than 8,192 or lack their
+version, or it has a version without build inputs.
+
+A tenant administrator, or another caller with a grant for the `narinfo:delete`
+action, can clear the build inputs of up to 128 store paths:
+`POST /build-inputs/clear` for the default cache, or
+`POST /cache/<name>/build-inputs/clear` for a named cache, with the store path
+hashes in `storePathHashes`. The response reports each store path as `cleared`,
+as `unchanged` when it listed no build inputs, or as `absent` when the cache
+doesn't have it. Clear a store path that is reported as `invalid-stored` before
+recording its build inputs again. A clear counts as a change for garbage
+collection, so the next collection can delete the build inputs that nothing else
+keeps.
+
 ## Retiring empty caches
 
 A named cache can remove itself once it's empty. This is useful for short-lived

@@ -407,6 +407,38 @@ export const tenantRouter = os.router({
 						entries: input.entries
 					})
 			)
+		},
+		read: {
+			inDefaultCache: os.buildInputs.read.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.buildInputs.read(context.cache, input.hash)
+			),
+			inNamedCache: os.buildInputs.read.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.buildInputs.read(context.cache, input.hash)
+			)
+		},
+		clear: {
+			inDefaultCache: os.buildInputs.clear.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.buildInputs.clear(
+						context.cache,
+						input.storePathHashes,
+						() => {
+							context.maintenanceChange.record();
+						}
+					)
+			),
+			inNamedCache: os.buildInputs.clear.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.buildInputs.clear(
+						context.cache,
+						input.storePathHashes,
+						() => {
+							context.maintenanceChange.record();
+						}
+					)
+			)
 		}
 	},
 	uploads: {
