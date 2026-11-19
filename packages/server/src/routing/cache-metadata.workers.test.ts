@@ -1,5 +1,7 @@
+import { rootLogger } from '@cupboard/logger';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	firstCacheGeneration,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -23,12 +25,17 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { sha256Hex } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { committedPath, setView } from '../do/reuse-view-read.test-support.ts';
+import { withSubrequestSlice } from '../do/subrequest-slice.ts';
+import { keepAliveIn } from '../http/bounded-body.ts';
 import { type SpanAttributes } from '../observability/span.ts';
+import { readCacheMetadata } from '../read/metadata-read.ts';
 import {
 	countingD1,
 	currentOrigin,
@@ -126,6 +133,34 @@ function probe(
 		},
 		body: JSON.stringify({ storePaths: paths })
 	};
+}
+
+/**
+Commits three paths at positions 0, 6 and 12 of a 13-path request, so that
+a group of six holds at most one of them. The other ten paths are absent.
+*/
+async function committedSpreadPaths(
+	access: 'private' | 'public'
+): Promise<{ paths: StorePathString[]; foundIndexes: ReadonlySet<number> }> {
+	await initialiseViaWorker();
+	await provisionFixtureTenant({ read: { user: 'alice', password: 'secret' } });
+	const foundIndexes = new Set([0, 6, 12]);
+	const paths: StorePathString[] = [];
+	for (let index = 0; index < 13; index += 1) {
+		const hash = index.toString(2).padStart(32, '0');
+		if (!foundIndexes.has(index)) {
+			paths.push(storePathSchema.parse(`/nix/store/${hash}-metadata`));
+			continue;
+		}
+		const committed = await committedPath(
+			`metadata-spread-${String(index)}`,
+			defaultCache(),
+			{ storePathHash: hash, name: 'metadata', access }
+		);
+		paths.push(storePathSchema.parse(committed.storePath));
+	}
+
+	return { paths, foundIndexes };
 }
 
 describe('cache metadata probe', () => {
@@ -389,6 +424,127 @@ describe('cache metadata probe', () => {
 			]);
 		}
 	);
+
+	it.each(['public', 'private'] as const)(
+		'reads found paths of a %s page together when missing paths separate them',
+		async (access) => {
+			const { paths, foundIndexes } = await committedSpreadPaths(access);
+			const baselineResponse = await readFetch(
+				'/api/v1/path-info',
+				probe(paths, true)
+			);
+			const baseline = cacheMetadataResponseSchema.parse(
+				await baselineResponse.json()
+			);
+			expect(baseline.entries.map(({ status }) => status)).toStrictEqual(
+				paths.map((_, index) => (foundIndexes.has(index) ? 'found' : 'missing'))
+			);
+			const narinfos = new Map(
+				baseline.entries.flatMap((entry) =>
+					entry.status === 'found'
+						? [[StorePath.hash(entry.storePath), entry.narinfo] as const]
+						: []
+				)
+			);
+			let inFlight = 0;
+			const inFlightAtEachStart: number[] = [];
+			const startRead = async (): Promise<void> => {
+				inFlight += 1;
+				inFlightAtEachStart.push(inFlight);
+				await Promise.resolve();
+			};
+			const bucket = new Proxy(env.BLOBS, {
+				get(target, key, receiver): unknown {
+					const value: unknown = Reflect.get(target, key, receiver);
+					if (key !== 'get' || typeof value !== 'function') {
+						return typeof value === 'function' ? value.bind(target) : value;
+					}
+					return async (...parameters: unknown[]): Promise<unknown> => {
+						await startRead();
+						try {
+							return await Reflect.apply(value, target, parameters);
+						} finally {
+							inFlight -= 1;
+						}
+					};
+				}
+			});
+			const tenant: Env['CUPBOARD_TENANT'] = {
+				async fetch(
+					input: RequestInfo | URL,
+					init?: RequestInit
+				): Promise<Response> {
+					const request = new Request(input, init);
+					await startRead();
+					// The round trip keeps this read in flight until the rest of the group
+					// has started. Without it the public case cannot observe concurrency.
+					await env.BLOBS.head('absent-object');
+					inFlight -= 1;
+					const narinfo = [...narinfos].find(([hash]) =>
+						request.url.includes(`${hash}.narinfo`)
+					)?.[1];
+					if (narinfo === undefined) {
+						throw new Error('Missing canonical narinfo fixture');
+					}
+					return new Response(narinfo);
+				},
+				connect() {
+					throw new Error('unexpected tenant connection');
+				}
+			};
+			const response = await readFetch(
+				'/api/v1/path-info',
+				probe(paths, true),
+				{
+					BLOBS: bucket,
+					CUPBOARD_TENANT: tenant
+				}
+			);
+			const body = cacheMetadataResponseSchema.parse(await response.json());
+			expect({
+				status: response.status,
+				inFlightAtEachStart,
+				entries: body.entries
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				inFlightAtEachStart: [1, 2, 3],
+				entries: baseline.entries
+			});
+		}
+	);
+
+	it('asks a private page for as many subrequests as it has found paths', async () => {
+		const { paths, foundIndexes } = await committedSpreadPaths('private');
+		const context = createExecutionContext();
+		const entries = await withSubrequestSlice(
+			async () => {
+				const read = readCacheMetadata(
+					rootLogger(),
+					env.BLOBS,
+					drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+					fixtureTenant,
+					{
+						scope: defaultCache(),
+						access: 'private',
+						generation: firstCacheGeneration
+					},
+					paths,
+					keepAliveIn(context)
+				);
+				return Array.fromAsync(read);
+			},
+			{ subrequests: foundIndexes.size, reserve: 0 }
+		);
+		await waitOnExecutionContext(context);
+
+		expect(entries).toStrictEqual(
+			paths.map((storePath, index) =>
+				foundIndexes.has(index)
+					? { storePath, status: 'found', narinfo: stringMatcher }
+					: { storePath, status: 'missing' }
+			)
+		);
+	});
 
 	it('logs one record when several canonical narinfo reads fail', async () => {
 		await initialiseViaWorker();

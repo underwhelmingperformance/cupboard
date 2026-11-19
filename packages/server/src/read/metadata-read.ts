@@ -14,7 +14,6 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import { isNarInfoObjectOfCommit } from '../blob/narinfo-object-metadata.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { logGroupRefusal } from '../db/transient.ts';
-import { chunk, maxOutgoingConnections } from '../do/bulk.ts';
 import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import {
 	MetadataNarInfoInvalidError,
@@ -25,7 +24,13 @@ import { boundedBody, type KeepAlive } from '../http/bounded-body.ts';
 import { narInfoObjectKey, type R2ObjectKey } from '../http/http.ts';
 import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 
-import { authorisedNarInfoVersions, type ReadScope } from './read.ts';
+import { readFoundInGroups } from './found-reads.ts';
+import {
+	authorisedNarInfoVersions,
+	type CacheNarInfoVersion,
+	currentNarInfoVersion,
+	type ReadScope
+} from './read.ts';
 
 const utf8 = new TextEncoder();
 
@@ -140,15 +145,10 @@ export async function* readCacheMetadata(
 		logger
 	);
 	const readEntry = async (
-		storePath: StorePathString
+		storePath: StorePathString,
+		current: CacheNarInfoVersion
 	): Promise<CacheMetadataEntry> => {
 		const hash = StorePath.hash(storePath);
-		const current = versions.get(hash);
-
-		if (current?.cacheGeneration !== cache.generation) {
-			return { storePath, status: 'missing' };
-		}
-
 		const key = narInfoObjectKey(tenant, hash, cache.scope, cache.generation);
 		const object = await sharedRead(() => blobs.get(key));
 
@@ -180,27 +180,19 @@ export async function* readCacheMetadata(
 		return renderCacheMetadataEntry(storePath, narInfo);
 	};
 
-	for (const paths of chunk(storePaths, maxOutgoingConnections)) {
-		requireSubrequestsFor(paths.length, 'cache metadata probe');
-		const entries = await Promise.allSettled(
-			paths.map((storePath) => readEntry(storePath))
-		);
-		const failed = entries.find((entry) => entry.status === 'rejected');
-
-		if (failed !== undefined) {
-			const error: unknown = logGroupRefusal(
-				logger,
-				tenant,
-				'narinfo-object-read',
-				failed.reason
-			);
-			throw error;
-		}
-
-		for (const entry of entries) {
-			if (entry.status === 'fulfilled') {
-				yield entry.value;
-			}
-		}
-	}
+	yield* readFoundInGroups(storePaths, {
+		version: (storePath) =>
+			currentNarInfoVersion(
+				versions,
+				StorePath.hash(storePath),
+				cache.generation
+			),
+		missing: (storePath) => ({ storePath, status: 'missing' }),
+		read: readEntry,
+		beforeGroup: (paths) => {
+			requireSubrequestsFor(paths.length, 'cache metadata probe');
+		},
+		refusal: (failure) =>
+			logGroupRefusal(logger, tenant, 'narinfo-object-read', failure)
+	});
 }
