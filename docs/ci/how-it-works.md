@@ -258,15 +258,15 @@ narinfo.
 
 With `reuse-plan-derivations: true`, the plan job copies the derivations of
 every cohort in the matrix from its store into a binary cache, together with the
-sources that those derivations reference. It packs the cache into one file and
-uploads the file as an artifact that expires after one day. Each cohort job
-downloads the artifact by its ID, which only the plan job can output, and copies
-the derivations of its targets into the runner's store. It then deletes the
-artifact and its unpacked copy to free the disk space, and plans and builds as
-usual. It builds every target that has a derivation in the plan from that
-derivation, so it evaluates none of those targets. When the plan exports
-nothing, for example with `publish: none`, the cohort jobs evaluate their
-targets as described in step 3.
+sources that those derivations reference. It packs the cache into one file,
+encrypts it with age and uploads the ciphertext as an artifact that expires
+after one day. Each cohort job downloads the artifact by its ID, which only the
+plan job can output, and copies the derivations of its targets into the runner's
+store. It then deletes the downloaded file and its unpacked copy to free disk
+space, and plans and builds as usual. It builds every target that has a
+derivation in the plan from that derivation, so it evaluates none of those
+targets. When the plan exports nothing, for example with `publish: none`, the
+cohort jobs evaluate their targets as described in step 3.
 
 The cohort job takes the derivation paths from the cohort matrix, not from the
 artifact. Derivations and the sources that they reference are content-addressed:
@@ -287,10 +287,34 @@ turns `require-sigs` off would not make this check for an untrusted client. Nix
 then checks each copied path against its NAR hash and content address, so the
 cohort job fails when the artifact lacks a path or contains a changed one.
 
-The artifact contains the sources that the derivations reference, including
-sources from private flake inputs. Anyone who can read the repository can
-download a workflow artifact, so leave `reuse-plan-derivations` off in a public
-repository whose flake has private inputs.
+Repository readers can download the ciphertext. The plan and cohort jobs each
+authenticate to the tenant with GitHub Actions OIDC. The plan receives a public
+age recipient and a ticket. To decrypt the archive, a cohort presents the ticket
+and an unexpired GitHub Actions ID token. The tenant checks its current trust
+rules and matches the verified issuer, repository and owner IDs, run ID, and
+workflow file and revision. The grant accepts GitHub.com and GitHub Enterprise
+Cloud issuers, including GHE.com issuers for enterprises with data residency. A
+retried job in the same run can use the ticket for 24 hours from issue. Every
+authorised job can decrypt the sources of all scheduled cohorts, including
+private flake inputs.
+
+The tenant requires the upload grants for the destination cache each time. Jobs
+from two calls to the same reusable workflow in one run share this boundary when
+they publish to the same cache. For direct action calls, the workflow file is
+the caller's own. Any job defined in that file at the same revision and in the
+same run can redeem the ticket if it has the ticket, can request an ID token and
+qualifies for upload to the same destination. Use separate runs for jobs with
+different trust levels. Each cohort checks the age chunks and detects truncation
+before unpacking. Anyone with the public recipient can encrypt a file, so the
+workflow selects the plan's upload by artifact ID and verifies the store paths
+with Nix.
+
+The tenant stores a random identity for each archive and deletes it during
+expiry maintenance or a redemption after expiry. Rerun all jobs after expiry to
+create a fresh archive. See [Plan archives][archive-security] for the recovery
+window. An older server refuses the grant and the plan stops before upload.
+
+[archive-security]: ../security.md#plan-archives
 
 A cohort job that imports the derivations skips the check in step 3 that each
 target still evaluates to the plan's `rootDrvPath`. `nix build` still evaluates

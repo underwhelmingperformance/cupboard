@@ -2263,6 +2263,27 @@ clears expired successor envelopes, a bounded page at a time.
 
 A client can also exchange a cupboard access token for one with fewer grants.
 
+The tenant token endpoint implements
+`urn:cupboard:params:oauth:grant-type:plan-archive` for GitHub Actions,
+including enterprise-specific issuers on GitHub.com and GHE.com. Both issue and
+redemption select the ordinary push upload actions for the exact destination
+cache against the current OIDC trust policy. The tenant stores a fresh X25519
+identity, an opaque random ticket, the run binding and the expiry in
+`plan_archive_identity`. The binding includes the tenant and its issuer, the
+verified GitHub issuer, owner and repository IDs, run ID, job workflow ref and
+SHA, and cache. A retry in the same run can redeem the ticket.
+
+The plan receives the public recipient. GitHub retains the encrypted artifact
+for one day. The expiry index schedules tenant maintenance, which deletes due
+identities in bounded batches. A redemption at or after the 24-hour deadline
+deletes the row and fails. A deployment secret cannot regenerate a deleted
+identity. Cloudflare account controllers and code running in the tenant Durable
+Object can restore a previous database state for 30 days through [point-in-time
+recovery][plan-archive-pitr].
+
+[plan-archive-pitr]:
+  https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#pitr-point-in-time-recovery-api
+
 CI read acquisition uses the extension grant
 `urn:cupboard:params:oauth:grant-type:read-access` at the tenant token endpoint.
 The request contains an external ID token and a bounded `read_resources` array

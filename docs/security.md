@@ -140,6 +140,30 @@ CI jobs need no long-lived secret to publish or to read private caches when
 their trust rules grant the exact content read. A job can still use a static
 read credential when its runner or remote daemon needs one.
 
+### Plan archives
+
+With `reuse-plan-derivations`, GitHub retains the encrypted workflow artifact
+for one day. The tenant creates a random age identity for each archive and
+stores it in its Durable Object. A job with the ticket must authenticate through
+GitHub Actions OIDC and qualify for upload negotiation, status and commit on the
+destination cache. The tenant matches the GitHub issuer, repository, owner, run,
+workflow file and workflow revision from issuance. Two calls to that workflow in
+the same run and cache can therefore share access. Use separate runs for
+publications with different trust levels.
+
+The ticket expires after 24 hours. Redemption checks expiry before releasing the
+identity and deletes an expired row. Tenant maintenance also deletes due rows.
+Rolling the server back to a build without archive support pauses deletion until
+an archive-capable build resumes maintenance. Once the live row is gone,
+deployment secrets cannot reconstruct its key. A cohort job that received the
+identity may have retained a copy. Cloudflare provides [point-in-time
+recovery][archive-pitr] for the preceding 30 days. A Cloudflare account
+controller or compromised code running in the tenant Durable Object can restore
+a database state that still contains the identity.
+
+[archive-pitr]:
+  https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#pitr-point-in-time-recovery-api
+
 ## Sign-in sessions
 
 When an operator signs in, the control plane issues a refresh token with the
