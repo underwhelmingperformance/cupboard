@@ -1,10 +1,16 @@
 import {
 	rootNameMaxLength,
-	rootTtlMaxSeconds
+	rootTtlMaxSeconds,
+	storePathNameMaxLength
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 import { type z } from 'zod';
 
+import {
+	buildInputsMaxJsonBytes,
+	buildInputsMaxLength,
+	pathEdgesMaxJsonBytes
+} from './build-inputs.ts';
 import {
 	blobDeclarationAttribute,
 	blobDeclarationAttributeValue,
@@ -55,6 +61,11 @@ const blobMetadata = {
 	fileSize: 456,
 	compression: 'zstd'
 };
+
+// A store path basename with the longest name that a basename can have.
+function longestBasename(index: number): string {
+	return `${String(index).padStart(32, '0')}-${'a'.repeat(storePathNameMaxLength)}`;
+}
 
 function issueLocations(result: z.ZodSafeParseResult<unknown>) {
 	return result.success
@@ -113,6 +124,125 @@ describe('uploadNegotiateRequestSchema', () => {
 			pushId,
 			paths: [{ ...negotiationPath, references: [first, second] }]
 		});
+	});
+
+	it('lists the build inputs of a path once, in order, with their version', () => {
+		const first = `${'1'.repeat(32)}-gcc`;
+		const second = `${'2'.repeat(32)}-source`;
+		const value = {
+			pushId,
+			paths: [
+				{
+					...negotiationPath,
+					buildInputs: [second, first, second],
+					buildInputsVersion: 1
+				}
+			]
+		};
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual({
+			pushId,
+			paths: [
+				{
+					...negotiationPath,
+					buildInputs: [first, second],
+					buildInputsVersion: 1
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'build inputs without a version',
+			fields: { buildInputs: [`${'1'.repeat(32)}-gcc`] },
+			issues: [{ code: 'custom', path: ['paths', 0] }]
+		},
+		{
+			name: 'a version without build inputs',
+			fields: { buildInputsVersion: 1 },
+			issues: [{ code: 'custom', path: ['paths', 0] }]
+		},
+		{
+			name: 'a version of zero',
+			fields: { buildInputs: [], buildInputsVersion: 0 },
+			issues: [{ code: 'too_small', path: ['paths', 0, 'buildInputsVersion'] }]
+		},
+		{
+			name: 'a build input named by store path instead of basename',
+			fields: {
+				buildInputs: [`/nix/store/${'1'.repeat(32)}-gcc`],
+				buildInputsVersion: 1
+			},
+			issues: [{ code: 'invalid_format', path: ['paths', 0, 'buildInputs', 0] }]
+		},
+		{
+			name: 'more build inputs than one path can have',
+			fields: {
+				buildInputs: Array.from(
+					{ length: buildInputsMaxLength + 1 },
+					(_, index) => `${String(index).padStart(32, '0')}-input`
+				),
+				buildInputsVersion: 1
+			},
+			issues: [{ code: 'too_big', path: ['paths', 0, 'buildInputs'] }]
+		},
+		{
+			name: 'build inputs whose JSON is larger than one path can store',
+			fields: {
+				buildInputs: Array.from(
+					{ length: Math.ceil(buildInputsMaxJsonBytes / 247) + 1 },
+					(_, index) => longestBasename(index)
+				),
+				buildInputsVersion: 1
+			},
+			issues: [{ code: 'custom', path: ['paths', 0, 'buildInputs'] }]
+		},
+		{
+			name: 'references and build inputs whose JSON is larger than one row can store',
+			fields: {
+				references: Array.from(
+					{ length: Math.ceil(pathEdgesMaxJsonBytes / 247 / 2) + 1 },
+					(_, index) => longestBasename(index)
+				),
+				buildInputs: Array.from(
+					{ length: Math.ceil(pathEdgesMaxJsonBytes / 247 / 2) + 1 },
+					(_, index) => longestBasename(index)
+				),
+				buildInputsVersion: 1
+			},
+			issues: [{ code: 'custom', path: ['paths', 0] }]
+		}
+	])('refuses $name', ({ fields, issues }) => {
+		const result = uploadNegotiateRequestSchema.safeParse({
+			pushId,
+			paths: [{ ...negotiationPath, ...fields }]
+		});
+
+		expect(issueLocations(result)).toStrictEqual(issues);
+	});
+
+	// A pending upload row stores the metadata that negotiation or admission
+	// accepted, and the commit reads the build inputs back from it.
+	it.each([
+		{
+			name: 'path metadata',
+			schema: storedUploadPathNegotiationSchema,
+			stored: negotiationPath
+		},
+		{
+			name: 'path and blob metadata',
+			schema: storedUploadPathMetadataSchema,
+			stored: { ...negotiationPath, ...blobMetadata }
+		}
+	])('reads stored $name with build inputs', ({ schema, stored }) => {
+		const row = {
+			...stored,
+			buildInputs: [`${'1'.repeat(32)}-gcc`],
+			buildInputsVersion: 2
+		};
+
+		expect(schema.parse(row)).toStrictEqual(row);
 	});
 
 	it.each([

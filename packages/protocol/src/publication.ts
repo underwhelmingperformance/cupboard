@@ -46,7 +46,13 @@ export async function publicationIdentity(input: PublicationIdentityInput) {
 			metadata.narSize,
 			[...new Set(metadata.references)].toSorted(byCodeUnit),
 			metadata.deriver,
-			metadata.ca
+			metadata.ca,
+			...(metadata.buildInputs === undefined
+				? []
+				: [
+						[...new Set(metadata.buildInputs)].toSorted(byCodeUnit),
+						metadata.buildInputsVersion
+					])
 		],
 		attachRoot === undefined
 			? undefined

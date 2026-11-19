@@ -49,6 +49,22 @@ describe('publication identity', () => {
 		);
 	});
 
+	it('adds the build inputs and their version after the content address', async () => {
+		const withBuildInputs = uploadPathNegotiationSchema.parse({
+			...input.metadata,
+			buildInputs: [`${'4'.repeat(32)}-d`, `${'3'.repeat(32)}-c`],
+			buildInputsVersion: 2
+		});
+
+		expect(
+			await publicationIdentity({ ...input, metadata: withBuildInputs })
+		).toStrictEqual({
+			id: 'e402b78b11680d61a1b4cd2ca94cc5489d00209e956d5a77a2276639032def28',
+			canonical:
+				'["cupboard/publication/v1","acme","named","build",1,"push-1",["00000000000000000000000000000000","/nix/store/00000000000000000000000000000000-app","sha256:1111111111111111111111111111111111111111111111111111",123,["11111111111111111111111111111111-a","22222222222222222222222222222222-b"],null,null,["33333333333333333333333333333333-c","44444444444444444444444444444444-d"],2],null]'
+		});
+	});
+
 	it.each([
 		{ label: 'push', change: { pushId: pushIdSchema.parse('push-2') } },
 		{

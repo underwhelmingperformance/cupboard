@@ -18,6 +18,14 @@ import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import {
+	buildInputsSchema,
+	buildInputsVersionSchema,
+	hasPairedBuildInputs,
+	hasStorableEdges,
+	pairedBuildInputsMessage,
+	storableEdgesMessage
+} from './build-inputs.ts';
 import { countSchema } from './internal/counts.ts';
 import { rootRetentionRequestSchema } from './retention.ts';
 import { isoTimestampSchema } from './scalars.ts';
@@ -46,7 +54,9 @@ const uploadPathNegotiationShape = {
 	// the cache's `StoreDir` supplies the directory. `CA` contains a
 	// content-address specification, not a path.
 	deriver: storePathBasenameSchema.optional(),
-	ca: uploadContentAddressSchema.optional()
+	ca: uploadContentAddressSchema.optional(),
+	buildInputs: buildInputsSchema.optional(),
+	buildInputsVersion: buildInputsVersionSchema.optional()
 };
 
 const uploadBlobMetadataShape = {
@@ -57,7 +67,9 @@ const uploadBlobMetadataShape = {
 
 export const uploadPathNegotiationSchema = z
 	.strictObject(uploadPathNegotiationShape)
-	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage)
+	.refine(hasPairedBuildInputs, pairedBuildInputsMessage)
+	.refine(hasStorableEdges, storableEdgesMessage);
 export type UploadPathNegotiation = z.output<
 	typeof uploadPathNegotiationSchema
 >;
@@ -70,7 +82,9 @@ export const uploadPathMetadataSchema = z
 		...uploadPathNegotiationShape,
 		...uploadBlobMetadataShape
 	})
-	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage)
+	.refine(hasPairedBuildInputs, pairedBuildInputsMessage)
+	.refine(hasStorableEdges, storableEdgesMessage);
 export type UploadPathMetadata = z.output<typeof uploadPathMetadataSchema>;
 
 // The server parses the metadata of an upload row with these schemas. A row
@@ -84,14 +98,18 @@ const storedUploadPathNegotiationShape = {
 
 export const storedUploadPathNegotiationSchema = z
 	.strictObject(storedUploadPathNegotiationShape)
-	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage)
+	.refine(hasPairedBuildInputs, pairedBuildInputsMessage)
+	.refine(hasStorableEdges, storableEdgesMessage);
 
 export const storedUploadPathMetadataSchema = z
 	.strictObject({
 		...storedUploadPathNegotiationShape,
 		...uploadBlobMetadataShape
 	})
-	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage)
+	.refine(hasPairedBuildInputs, pairedBuildInputsMessage)
+	.refine(hasStorableEdges, storableEdgesMessage);
 
 const referencePublicationEntrySchema = z.strictObject({
 	storePath: storePathSchema,

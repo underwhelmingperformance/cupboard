@@ -4,6 +4,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { buildInputsVersionSchema } from './build-inputs.ts';
+
 // The most hashes that one dependency-status request may contain. The tenant
 // object answers a larger request with `UPLOAD_REQUEST_LIMIT_EXCEEDED` and
 // HTTP 413 before it reads any narinfo or cache rows.
@@ -14,12 +16,6 @@ export const dependencyStatusMaxPaths = 1024;
 // limit is twice that, so a client may also send whitespace.
 export const dependencyStatusMaxRequestBytes =
 	2 * (22 + 35 * dependencyStatusMaxPaths - 1);
-
-/**
-The version of the client's build-input algorithm that produced a path's
-recorded build inputs.
-*/
-export const buildInputsVersionSchema = z.number().int().nonnegative();
 
 // A `.max` here would answer a larger request with a 400 validation error.
 // Clients expect the typed 413 that the tenant object returns.
