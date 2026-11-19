@@ -4,6 +4,7 @@ import {
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { planArchiveGrantType } from '@cupboard/protocol/plan-archive';
 import { readAccessGrantType } from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -173,7 +174,8 @@ describe('tenant routing', () => {
 				grant_types_supported: [
 					tokenExchangeGrantType,
 					refreshTokenGrantType,
-					readAccessGrantType
+					readAccessGrantType,
+					planArchiveGrantType
 				],
 				authorization_details_types_supported: [
 					'cupboard_cache',
@@ -205,7 +207,8 @@ describe('tenant routing', () => {
 				grant_types_supported: [
 					tokenExchangeGrantType,
 					refreshTokenGrantType,
-					readAccessGrantType
+					readAccessGrantType,
+					planArchiveGrantType
 				],
 				authorization_details_types_supported: [
 					'cupboard_cache',

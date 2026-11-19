@@ -11,6 +11,7 @@ import {
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { planArchiveGrantType } from '@cupboard/protocol/plan-archive';
 import { readAccessGrantType } from '@cupboard/protocol/read-access';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
@@ -176,7 +177,8 @@ export class AuthKeysService {
 			grant_types_supported: [
 				tokenExchangeGrantType,
 				refreshTokenGrantType,
-				readAccessGrantType
+				readAccessGrantType,
+				planArchiveGrantType
 			],
 			authorization_details_types_supported: [
 				'cupboard_cache',

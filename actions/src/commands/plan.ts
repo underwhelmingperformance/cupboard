@@ -75,7 +75,6 @@ import {
 	requireEnvironmentCredentialSupport,
 	resolveReadCredential
 } from '../cupboard-run.ts';
-import { exportDerivationClosure } from '../derivation-closure.ts';
 import {
 	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
@@ -112,6 +111,7 @@ import {
 	providedUrl
 } from '../options.ts';
 import { packCohorts } from '../packing.ts';
+import { exportEncryptedDerivations } from '../plan-archive.ts';
 import {
 	checkReferenceForCohorts,
 	isPublishingByReference,
@@ -363,7 +363,7 @@ export interface PlanDependencies {
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	readonly createDerivationArtifactName?: () => string;
-	readonly exportDerivationClosure?: typeof exportDerivationClosure;
+	readonly exportEncryptedDerivations?: typeof exportEncryptedDerivations;
 	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
 	/**
 	When packing is enabled, returns each surviving target's substitutable NAR
@@ -905,15 +905,16 @@ async function exportCohortDerivations(
 		return;
 	}
 
-	const exported = await reporter.phase(
+	const { ticket, ...exported } = await reporter.phase(
 		'Exporting the cohort derivations',
 		async (phase) => {
 			const result = await (
-				dependencies.exportDerivationClosure ?? exportDerivationClosure
+				dependencies.exportEncryptedDerivations ?? exportEncryptedDerivations
 			)(
 				derivations,
 				path.join(inputs.temporaryDirectory, 'cupboard-derivations'),
-				dependencies.signal
+				inputs,
+				{ signal: dependencies.signal }
 			);
 
 			phase.fact('Paths in the closure', result.paths);
@@ -921,12 +922,14 @@ async function exportCohortDerivations(
 			phase.fact('Checking the closure', formatDuration(result.checkMs));
 			phase.fact('Copying from the store', formatDuration(result.copyMs));
 			phase.fact('Packing', formatDuration(result.packMs));
+			phase.fact('Encrypting', formatDuration(result.encryptMs));
 
 			return result;
 		}
 	);
 
 	rootLogger().info('exported the cohort derivations', { ...exported });
+	await setOutput(environment, 'derivation-ticket', ticket);
 	await setOutput(environment, 'derivation-cache-file', exported.archive);
 	await setOutput(
 		environment,

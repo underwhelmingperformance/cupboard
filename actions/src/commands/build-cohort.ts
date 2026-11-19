@@ -111,7 +111,6 @@ import {
 	runCupboard as defaultRunCupboard,
 	withoutReadCredential
 } from '../cupboard-run.ts';
-import { importDerivationClosure } from '../derivation-closure.ts';
 import {
 	diskCleanupFiles,
 	type JoinDiskCleanup,
@@ -170,6 +169,7 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import { importEncryptedDerivations } from '../plan-archive.ts';
 import { assertReleasePlatformSupported } from '../release-platform.ts';
 import { rootRetention } from '../root-retention.ts';
 import { cacheUrlFor } from '../substituters.ts';
@@ -876,7 +876,7 @@ export interface BuildCohortDependencies {
 	readonly runNixCopy?: typeof runNixCopy;
 	readonly runNixDerivationShow?: typeof runNixDerivationShow;
 	readonly materialiseDerivationGraph?: typeof materialiseDerivationGraph;
-	readonly importDerivationClosure?: typeof importDerivationClosure;
+	readonly importEncryptedDerivations?: typeof importEncryptedDerivations;
 	readonly resolveLocalDerivationGraph?: typeof resolveLocalDerivationGraph;
 	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
 	readonly withLocalStoreSession?: <T>(
@@ -1075,7 +1075,7 @@ export async function buildCohortAction(
 	const materialiseGraph =
 		dependencies.materialiseDerivationGraph ?? materialiseDerivationGraph;
 	const importClosure =
-		dependencies.importDerivationClosure ?? importDerivationClosure;
+		dependencies.importEncryptedDerivations ?? importEncryptedDerivations;
 	const resolveLocalGraph =
 		dependencies.resolveLocalDerivationGraph ?? resolveLocalDerivationGraph;
 	const withLocalDerivationRoots =
@@ -1687,10 +1687,13 @@ export async function buildCohortAction(
 					inputs.derivationCacheFile,
 					[...new Set(targets.map((target) => derivationPathOf(target)))],
 					inputs.derivationCacheDirectory,
-					dependencies.signal
+					inputs,
+					environment.DERIVATION_TICKET,
+					{ signal: dependencies.signal }
 				);
 
 				phase.fact('Paths in the archive', imported.archivePaths);
+				phase.fact('Decrypting', formatDuration(imported.decryptMs));
 				phase.fact('Unpacking', formatDuration(imported.unpackMs));
 				phase.fact('Checking the archive', formatDuration(imported.verifyMs));
 				phase.fact('Copying into the store', formatDuration(imported.copyMs));

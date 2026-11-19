@@ -177,9 +177,13 @@ inputs:
       Where to write the number of targets in each group and the result of the
       disk-space check, for the receipt.
     required: false
+  derivation-ticket:
+    description: Ticket from the plan job for decrypting its derivation archive.
+    default: ''
+    required: false
   derivation-cache-file:
     description:
-      Archive of the cohort derivations from the plan action's
+      Encrypted archive of the cohort derivations from the plan action's
       derivation-cache-file output. When it is set, the action copies the
       derivations of the cohort-json entry from the archive into the runner's
       store instead of evaluating the targets. Before the copy, the action
@@ -280,6 +284,7 @@ runs:
         REFERENCE_PATHS_FILE: ${{ inputs.reference-paths-file }}
         LEFT_UPSTREAM_FILE: ${{ inputs.left-upstream-file }}
         COUNTS_FILE: ${{ inputs.counts-file }}
+        DERIVATION_TICKET: ${{ inputs.derivation-ticket }}
         DERIVATION_CACHE_FILE: ${{ inputs.derivation-cache-file }}
       run: |
         args=(build-cohort

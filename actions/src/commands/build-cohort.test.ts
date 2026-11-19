@@ -3817,7 +3817,7 @@ describe('buildCohortAction', () => {
 
 		function recordingDependencies(
 			sequence: string[],
-			importClosure: BuildCohortDependencies['importDerivationClosure']
+			importClosure: BuildCohortDependencies['importEncryptedDerivations']
 		): BuildCohortDependencies {
 			const plan = cupboardStub({
 				plan: planCohortSuccess(measuredCapacity, []),
@@ -3857,7 +3857,7 @@ describe('buildCohortAction', () => {
 					return result;
 				},
 				...(importClosure !== undefined && {
-					importDerivationClosure: importClosure
+					importEncryptedDerivations: importClosure
 				})
 			};
 		}
@@ -3880,16 +3880,18 @@ describe('buildCohortAction', () => {
 						derivationCacheFile: archive,
 						...(store !== undefined && { store })
 					},
-					environment,
+					{ ...environment, DERIVATION_TICKET: 'from-plan' },
 					recordingDependencies(
 						sequence,
-						(archiveFile, derivations, cacheDirectory) => {
+						(archiveFile, derivations, cacheDirectory, _access, ticket) => {
+							expect(ticket).toBe('from-plan');
 							sequence.push(
 								`import ${archiveFile} ${derivations.join(',')} into ${cacheDirectory}`
 							);
 
 							return Promise.resolve({
 								archivePaths: 2000,
+								decryptMs: 10,
 								unpackMs: 1,
 								verifyMs: 1,
 								copyMs: 2
@@ -7357,11 +7359,12 @@ if (args.includes('--help')) {
 				runNixBuildWithResults,
 				runNixDerivationShow,
 				materialiseDerivationGraph: materialiseGraph,
-				importDerivationClosure: (_archive, derivations) => {
+				importEncryptedDerivations: (_archive, derivations) => {
 					sequence.push('import');
 
 					return Promise.resolve({
 						archivePaths: derivations.length,
+						decryptMs: 10,
 						unpackMs: 0,
 						verifyMs: 0,
 						copyMs: 0

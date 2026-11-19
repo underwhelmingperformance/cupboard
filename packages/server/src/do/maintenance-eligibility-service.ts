@@ -175,7 +175,8 @@ export class MaintenanceEligibilityService {
 			this.earliestAuthKeyRetirement(),
 			this.earliestManagedCacheRetirement(),
 			this.earliestRefreshMaintenance(),
-			this.earliestSubjectNonceExpiry()
+			this.earliestSubjectNonceExpiry(),
+			this.context.planArchives.earliestExpiry()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];

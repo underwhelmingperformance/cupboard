@@ -1027,3 +1027,9 @@ export function authorizationDetailsInSelectorSpelling(
 		return [spelled];
 	});
 }
+
+export const uploadActions = [
+	'upload:negotiate',
+	'upload:status',
+	'upload:commit'
+] as const;

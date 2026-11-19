@@ -150,8 +150,8 @@ inputs:
   export-derivations:
     description:
       When true, copy the derivation closure of every planned cohort from the
-      runner's store into a binary cache and pack it into one archive, which the
-      cohort jobs can import instead of evaluating their targets. The action
+      runner's store into a binary cache and encrypt the packed archive, which
+      the cohort jobs can import instead of evaluating their targets. The action
       fails when the closure contains a path that has neither a content address
       nor a signature from a trusted key, because the cohort jobs would refuse
       that path. The job log and the diagnostics record how long the copy and
@@ -162,6 +162,9 @@ outputs:
   plan-file:
     description: Path to the plan, which the cohort jobs read.
     value: ${{ steps.plan.outputs.plan-file }}
+  derivation-ticket:
+    description: Ticket for requesting the archive identity in a cohort job.
+    value: ${{ steps.plan.outputs.derivation-ticket }}
   derivation-cache-file:
     description:
       Path to the archive of the cohort derivations. Empty unless

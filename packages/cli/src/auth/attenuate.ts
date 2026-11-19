@@ -5,7 +5,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
-	authorizationDetailsSchema
+	authorizationDetailsSchema,
+	uploadActions
 } from '@cupboard/protocol/grants';
 import type { ReuseViewName } from '@cupboard/protocol/reuse-views';
 
@@ -100,8 +101,6 @@ export function contentReadAuthorizationDetails(
 				])
 	]);
 }
-
-const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
 

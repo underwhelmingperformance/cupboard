@@ -18,6 +18,7 @@
 		"@opentelemetry/api": "^1.10.0",
 		"@sigstore/bundle": "catalog:",
 		"@sigstore/sign": "^5.0.0",
+		"age-encryption": "^0.3.1",
 		"commander": "catalog:",
 		"http-status-codes": "catalog:",
 		"semver": "^7.8.5",

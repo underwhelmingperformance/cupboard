@@ -1,7 +1,14 @@
 import { type Logger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { isSameCacheScope, type TtlSeconds } from '@cupboard/nix-store/scalars';
-import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import {
+	type CacheScope,
+	isSameCacheScope,
+	type TtlSeconds
+} from '@cupboard/nix-store/scalars';
+import {
+	type AuthorizationDetails,
+	uploadActions
+} from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	oidcIssuerSchema,
@@ -30,6 +37,11 @@ import {
 } from '@cupboard/protocol/oidc-trust-match';
 import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
 import {
+	type PlanArchiveGrantRequest,
+	planArchiveGrantRequestSchema,
+	planArchiveGrantType
+} from '@cupboard/protocol/plan-archive';
+import {
 	type ReadAccessGrantRequest,
 	readAccessGrantRequestSchema,
 	readAccessGrantType,
@@ -52,6 +64,7 @@ import {
 	verifyAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
+import { planArchiveBinding } from '../auth/plan-archive.ts';
 import {
 	type AuthenticatedRefreshAuthority,
 	openRefreshSuccessor,
@@ -153,7 +166,10 @@ export class TokenExchangeService {
 
 	private async exchange(
 		logger: Logger,
-		body: TokenExchangeGrantRequest | ReadAccessGrantRequest
+		body:
+			| TokenExchangeGrantRequest
+			| ReadAccessGrantRequest
+			| PlanArchiveGrantRequest
 	): Promise<Response> {
 		if (
 			body.subject_token_type !== subjectTokenTypeIdToken &&
@@ -231,6 +247,10 @@ export class TokenExchangeService {
 			body
 		);
 
+		if (body.grant_type === planArchiveGrantType) {
+			return this.planArchiveResponse(logger, verified, binding, body);
+		}
+
 		if (body.grant_type === readAccessGrantType) {
 			return this.readAccessResponse(
 				logger,
@@ -287,6 +307,76 @@ export class TokenExchangeService {
 		this.logUnpinnedGithubMatches(logger, rules, verified);
 
 		return response;
+	}
+
+	private async planArchiveResponse(
+		logger: Logger,
+		verified: VerifiedOidcClaims,
+		binding: SubjectBinding,
+		body: PlanArchiveGrantRequest
+	): Promise<Response> {
+		const archive = planArchiveBinding(
+			this.context.requireTenant(),
+			this.authKeys.authIssuer(),
+			verified,
+			body.cache
+		);
+		const cache: CacheScope =
+			body.cache === undefined
+				? { kind: 'default' }
+				: { kind: 'named', name: body.cache };
+		const requested: AuthorizationDetails = [
+			{ type: 'cupboard_cache', cache, actions: [...uploadActions] }
+		];
+		const requirePublisher = (): OidcTrustRule | undefined => {
+			const rules = this.oidcTrust.enabledOidcTrustRulesFor(logger, verified);
+			const selection = selectOidcTrust(rules, verified, requested);
+			if (selection.outcome === 'authority-unmatched') {
+				throw new InvalidAuthorizationDetailsError('not-permitted');
+			}
+			if (selection.outcome !== 'selected') {
+				throw this.verifiedUntrustedRefusal(rules, verified);
+			}
+			return selection.rule;
+		};
+		const audit = logger.with({
+			tenant: archive.tenant,
+			issuer: archive.issuer,
+			repository: archive.repository,
+			run: archive.run,
+			workflow: archive.workflow,
+			revision: archive.revision,
+			cache
+		});
+		if (body.ticket === undefined) {
+			const rule = requirePublisher();
+			const recipient = this.context.db.transaction((transaction) => {
+				if (binding.kind === 'nonce-bound') {
+					this.consumeNonce(transaction, binding.nonce);
+				}
+				return this.context.planArchives.issue(archive, transaction);
+			});
+			await this.maintenanceStateChanged?.();
+			const digest = await sha256Hex(recipient.ticket);
+			audit.info('plan archive ticket issued', {
+				...(rule ? { ruleId: rule.id } : { composed: true }),
+				ticketHash: digest.slice(0, 16)
+			});
+			return oauthJsonResponse(recipient);
+		}
+		const digest = await sha256Hex(body.ticket);
+		if (binding.kind === 'nonce-bound') {
+			requirePublisher();
+			this.consumeNonce(this.context.db, binding.nonce);
+			await this.maintenanceStateChanged?.();
+		}
+		const rule = requirePublisher();
+		const identity = this.context.planArchives.redeem(archive, body.ticket);
+		audit.info('plan archive identity released', {
+			...(rule ? { ruleId: rule.id } : { composed: true }),
+			ticketHash: digest.slice(0, 16)
+		});
+		return oauthJsonResponse(identity);
 	}
 
 	private logUnpinnedGithubMatches(
@@ -1139,6 +1229,13 @@ export class TokenExchangeService {
 
 	async handleToken(logger: Logger, request: Request): Promise<Response> {
 		const body = await parseFormBody(tokenRequestSchema, request);
+
+		if (body.grant_type === planArchiveGrantType) {
+			return this.exchange(
+				logger,
+				parseFormValue(planArchiveGrantRequestSchema, body)
+			);
+		}
 
 		if (body.grant_type === readAccessGrantType) {
 			return this.exchange(

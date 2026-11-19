@@ -12,6 +12,7 @@ import {
 	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
 import {
+	githubActionsIssuer,
 	issuedAccessTokenType,
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -24,6 +25,12 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import {
+	planArchiveGrantType,
+	planArchiveIdentitySchema,
+	type PlanArchiveRecipient,
+	planArchiveRecipientSchema
+} from '@cupboard/protocol/plan-archive';
+import {
 	readAccessGrantType,
 	readAccessResponseSchema,
 	type ReadResource,
@@ -31,6 +38,7 @@ import {
 } from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
+import { Decrypter, Encrypter } from 'age-encryption';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -5712,7 +5720,8 @@ describe('auth discovery endpoints', () => {
 				grant_types_supported: [
 					tokenExchangeGrantType,
 					refreshTokenGrantType,
-					readAccessGrantType
+					readAccessGrantType,
+					planArchiveGrantType
 				],
 				authorization_details_types_supported: [
 					'cupboard_cache',
@@ -5728,6 +5737,286 @@ describe('auth discovery endpoints', () => {
 	});
 });
 
+describe('plan archive key exchange', () => {
+	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it.each([
+		githubActionsIssuer,
+		githubActionsIssuer + '/acme',
+		'https://token.actions.acme.ghe.com',
+		'https://token.actions.acme.ghe.com/acme'
+	])('issues and redeems a ticket for %s', async (issuer) => {
+		const { sign } = await installGithubBranchRule(issuer, tenantTestIssuer);
+		const claims = {
+			...branchRuleClaims,
+			job_workflow_sha: 'a'.repeat(40),
+			run_id: '789',
+			run_attempt: '1'
+		};
+		const subject = await sign(claims);
+		const form = {
+			grant_type: planArchiveGrantType,
+			cache: 'ci',
+			subject_token_type: subjectTokenTypeIdToken
+		};
+		const capture = startCapture();
+		let opened: Response;
+		let ticket: PlanArchiveRecipient;
+		try {
+			const issued = await postToken({ ...form, subject_token: subject });
+			expect(issued.status).toBe(StatusCodes.OK);
+			ticket = planArchiveRecipientSchema.parse(await issued.json());
+			opened = await postToken({
+				...form,
+				subject_token: await sign({ ...claims, run_attempt: '2' }),
+				ticket: ticket.ticket
+			});
+		} finally {
+			capture.stop();
+		}
+		expect(ticket.ticket).toMatch(/^v1\.[\da-f]{64}$/u);
+		const digest = await sha256Hex(ticket.ticket);
+		const properties = {
+			method: 'POST',
+			path: '/token',
+			tenant: 'v1',
+			issuer,
+			repository: '1234',
+			run: '789',
+			workflow: branchRuleClaims.job_workflow_ref,
+			revision: claims.job_workflow_sha,
+			cache: { kind: 'named', name: 'ci' },
+			ruleId: 'github-main',
+			ticketHash: digest.slice(0, 16)
+		};
+		expect(
+			capture.logs
+				.filter((entry) => entry.message.startsWith('plan archive '))
+				.map(({ message, properties }) => ({ message, properties }))
+		).toStrictEqual([
+			{ message: 'plan archive ticket issued', properties },
+			{ message: 'plan archive identity released', properties }
+		]);
+		const { identity } = planArchiveIdentitySchema.parse(await opened.json());
+		const writer = new Encrypter();
+		writer.addRecipient(ticket.recipient);
+		const reader = new Decrypter();
+		reader.addIdentity(identity);
+		const ciphertext = await writer.encrypt('private evaluation product');
+		expect({
+			status: opened.status,
+			cacheControl: opened.headers.get('cache-control'),
+			plaintext: await reader.decrypt(ciphertext, 'text')
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			cacheControl: 'no-store',
+			plaintext: 'private evaluation product'
+		});
+		for (const changed of [
+			{ run_id: '790' },
+			{ job_workflow_sha: 'b'.repeat(40) }
+		]) {
+			const refused = await postToken({
+				...form,
+				subject_token: await sign({ ...claims, ...changed }),
+				ticket: ticket.ticket
+			});
+			expect(await refusalOf(refused)).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'invalid-plan-archive-ticket'
+			});
+		}
+		const replacement = ticket.ticket.endsWith('0') ? '1' : '0';
+		const altered = await postToken({
+			...form,
+			subject_token: subject,
+			ticket: ticket.ticket.slice(0, -1) + replacement
+		});
+		expect(await refusalOf(altered)).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_grant',
+			problem: 'invalid-plan-archive-ticket'
+		});
+	});
+	it.each([
+		['disabled', 'invalid_request', 'subject-token-untrusted'],
+		['deleted', 'invalid_request', 'subject-token-untrusted'],
+		['read-only', 'invalid_authorization_details', 'not-permitted'],
+		[
+			'preferred read-only rule',
+			'invalid_authorization_details',
+			'not-permitted'
+		],
+		['other cache', 'invalid_grant', 'invalid-plan-archive-ticket'],
+		['other repository', 'invalid_grant', 'invalid-plan-archive-ticket']
+	] as const)(
+		'checks the current policy and binding on redemption (%s)',
+		async (change, error, problem) => {
+			const { sign } = await installGithubBranchRule(
+				githubActionsIssuer,
+				tenantTestIssuer
+			);
+			const claims = {
+				...branchRuleClaims,
+				run_id: '789',
+				job_workflow_sha: 'a'.repeat(40)
+			};
+			const form = {
+				grant_type: planArchiveGrantType,
+				cache: 'ci',
+				subject_token_type: subjectTokenTypeIdToken
+			};
+			const subject = await sign(claims);
+			const issued = await postToken({ ...form, subject_token: subject });
+			const { ticket } = planArchiveRecipientSchema.parse(await issued.json());
+			await runInDurableObject(currentServer(), (instance) => {
+				const where = eq(oidcTrust.id, trustRuleIdSchema.parse('github-main'));
+				if (change === 'deleted') {
+					instance.context.db.delete(oidcTrust).where(where).run();
+					return;
+				}
+				if (change === 'preferred read-only rule') {
+					instance.context.db
+						.insert(oidcTrust)
+						.values({
+							id: trustRuleIdSchema.parse('github-run'),
+							issuer: githubActionsIssuer,
+							audience: tenantTestIssuer,
+							claimsJson: JSON.stringify({
+								...branchRuleClaims,
+								run_id: '789'
+							}),
+							permittedGrantsJson: JSON.stringify(trustClassGrants.read),
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+						})
+						.run();
+					return;
+				}
+				const changes = {
+					'other cache': {
+						permittedGrantsJson: JSON.stringify(
+							trustClassGrants['release-write']
+						)
+					},
+					disabled: {
+						disabledAt: isoTimestampSchema.parse('2026-11-19T00:00:00.000Z')
+					},
+					'read-only': {
+						permittedGrantsJson: JSON.stringify(trustClassGrants.read)
+					},
+					'other repository': {
+						claimsJson: JSON.stringify({
+							...branchRuleClaims,
+							repository_id: '9999'
+						})
+					}
+				};
+				instance.context.db
+					.update(oidcTrust)
+					.set(changes[change])
+					.where(where)
+					.run();
+			});
+			if (error !== 'invalid_grant') {
+				expect(
+					await refusalOf(await postToken({ ...form, subject_token: subject }))
+				).toStrictEqual({
+					status: StatusCodes.BAD_REQUEST,
+					error,
+					problem
+				});
+			}
+			const response = await postToken({
+				...form,
+				cache: change === 'other cache' ? 'release' : form.cache,
+				ticket,
+				subject_token:
+					change === 'other repository'
+						? await sign({ ...claims, repository_id: '9999' })
+						: subject
+			});
+			expect(await refusalOf(response)).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				error,
+				problem
+			});
+		}
+	);
+
+	it('consumes a separate subject nonce on issue and redemption', async () => {
+		const { sign } = await installGithubBranchRule(
+			githubActionsIssuer,
+			'custom-audience'
+		);
+		const request = async () => {
+			const { nonce, form } = await subjectTokenBinding([tenantTestIssuer]);
+			return {
+				...form,
+				cache: 'ci',
+				grant_type: planArchiveGrantType,
+				subject_token_type: subjectTokenTypeIdToken,
+				subject_token: await sign({
+					...branchRuleClaims,
+					run_id: '789',
+					job_workflow_sha: 'a'.repeat(40),
+					nonce
+				})
+			};
+		};
+		const issue = await request();
+		const issued = await postToken(issue);
+		const { ticket } = planArchiveRecipientSchema.parse(await issued.json());
+		const redeem = { ...(await request()), ticket };
+		const opened = await postToken(redeem);
+		const replay = {
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_grant',
+			problem: 'subject-token-replayed'
+		};
+		expect({
+			issue: issued.status,
+			redeem: opened.status,
+			issueReplay: await refusalOf(await postToken(issue)),
+			redeemReplay: await refusalOf(await postToken(redeem))
+		}).toStrictEqual({
+			issue: StatusCodes.OK,
+			redeem: StatusCodes.OK,
+			issueReplay: replay,
+			redeemReplay: replay
+		});
+	});
+
+	it.each([
+		'https://token.actions.githubusercontent.com.example.test/acme',
+		'https://token.actions.acme.ghe.com.example.test',
+		'https://issuer.example.test'
+	])(
+		'refuses the otherwise trusted issuer %s with a specific problem',
+		async (issuer) => {
+			const { sign } = await installGithubBranchRule(issuer, tenantTestIssuer);
+			const response = await postToken({
+				grant_type: planArchiveGrantType,
+				cache: 'ci',
+				subject_token_type: subjectTokenTypeIdToken,
+				subject_token: await sign({
+					...branchRuleClaims,
+					run_id: '789',
+					job_workflow_sha: 'a'.repeat(40)
+				})
+			});
+			expect(await refusalOf(response)).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'plan-archive-issuer-unsupported'
+			});
+		}
+	);
+});
+
 const githubIssuer = 'https://gh.test';
 const githubAudience = 'cupboard-aud';
 const branchRuleClaims = {
@@ -5738,7 +6027,10 @@ const branchRuleClaims = {
 		'owner/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main'
 };
 
-async function installGithubBranchRule(): Promise<{
+async function installGithubBranchRule(
+	issuer = githubIssuer,
+	audience = githubAudience
+): Promise<{
 	sign: (claims: Record<string, string>) => Promise<string>;
 	forge: (claims: Record<string, string>) => Promise<string>;
 }> {
@@ -5752,8 +6044,8 @@ async function installGithubBranchRule(): Promise<{
 			.insert(oidcTrust)
 			.values({
 				id: trustRuleIdSchema.parse('github-main'),
-				issuer: githubIssuer,
-				audience: githubAudience,
+				issuer,
+				audience,
 				claimsJson: JSON.stringify(branchRuleClaims),
 				permittedGrantsJson: JSON.stringify(trustClassGrants.write),
 				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
@@ -5764,11 +6056,11 @@ async function installGithubBranchRule(): Promise<{
 	vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
 		const url = input instanceof Request ? input.url : String(input);
 
-		if (url === `${githubIssuer}/.well-known/openid-configuration`) {
+		if (url === `${issuer}/.well-known/openid-configuration`) {
 			return Promise.resolve(
 				Response.json({
-					issuer: githubIssuer,
-					jwks_uri: `${githubIssuer}/jwks`,
+					issuer,
+					jwks_uri: `${issuer}/jwks`,
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
@@ -5776,7 +6068,7 @@ async function installGithubBranchRule(): Promise<{
 			);
 		}
 
-		if (url === `${githubIssuer}/jwks`) {
+		if (url === `${issuer}/jwks`) {
 			return Promise.resolve(
 				Response.json({ keys: [{ ...jwk, kid: 'idp', alg: 'RS256' }] })
 			);
@@ -5792,8 +6084,8 @@ async function installGithubBranchRule(): Promise<{
 		(claims: Record<string, string>): Promise<string> =>
 			new SignJWT(claims)
 				.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
-				.setIssuer(githubIssuer)
-				.setAudience(githubAudience)
+				.setIssuer(issuer)
+				.setAudience(audience)
 				.setSubject('repo:acme/app')
 				.setIssuedAt()
 				.setExpirationTime('5m')

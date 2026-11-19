@@ -21,11 +21,6 @@ import {
 	verifyNixPaths
 } from './nix-copy.ts';
 
-/**
-The file name of the archive in the derivation artifact. The plan job writes
-the archive under this name, and the flake publish workflow passes the same
-name to the cohort job after the download.
-*/
 export const derivationArchiveName = 'cupboard-derivations.tar';
 
 /**

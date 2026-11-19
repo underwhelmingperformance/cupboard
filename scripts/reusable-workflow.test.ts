@@ -10,6 +10,7 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 
 import { nativeEvaluationMain } from '../actions/src/evaluate-targets/native.ts';
+import { encryptedDerivationArchiveName } from '../actions/src/plan-archive.ts';
 import {
 	type NixSystem,
 	nixSystemRunners,
@@ -1086,8 +1087,11 @@ describe('cohort planning and publication', () => {
 				'run-root-ttl': '${{ inputs.run-root-ttl }}',
 				'run-root-permanent': '${{ inputs.run-root-permanent }}',
 				'fail-on-divergence': '${{ inputs.fail-on-divergence }}',
+				'derivation-ticket': '${{ needs.plan.outputs.derivation-ticket }}',
 				'derivation-cache-file':
-					"${{ needs.plan.outputs.derivation-artifact-id != '' && format('{0}/cupboard-derivations/cupboard-derivations.tar', runner.temp) || '' }}"
+					"${{ needs.plan.outputs.derivation-artifact-id != '' && format('{0}/cupboard-derivations/" +
+					encryptedDerivationArchiveName +
+					"', runner.temp) || '' }}"
 			}
 		]);
 	});

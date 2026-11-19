@@ -903,6 +903,17 @@ export const consumedSubjectNonces = sqliteTable(
 	]
 );
 
+export const planArchiveIdentities = sqliteTable(
+	'plan_archive_identity',
+	{
+		ticket: text('ticket').primaryKey(),
+		binding: text('binding').notNull(),
+		identity: text('identity').notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [index('plan_archive_identity_expiry_idx').on(table.expiresAt)]
+);
+
 export const refreshTokenMembers = sqliteTable(
 	'refresh_session_member',
 	{

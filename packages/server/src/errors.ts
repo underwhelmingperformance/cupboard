@@ -27,6 +27,7 @@ import {
 	tokenRateLimit
 } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
+import { invalidPlanArchiveTicketProblem } from '@cupboard/protocol/plan-archive';
 import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import {
@@ -1343,6 +1344,25 @@ export class ReadResourcesNotPermittedError extends OAuthError {
 export abstract class InvalidGrantError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_grant';
+}
+
+export class PlanArchiveIssuerUnsupportedError extends InvalidGrantError {
+	readonly problem = 'plan-archive-issuer-unsupported';
+	constructor() {
+		super(
+			'Plan archives require a GitHub Actions OIDC issuer on githubusercontent.com or GHE.com'
+		);
+		this.name = 'PlanArchiveIssuerUnsupportedError';
+	}
+}
+
+export class InvalidPlanArchiveTicketError extends InvalidGrantError {
+	readonly problem = invalidPlanArchiveTicketProblem;
+
+	constructor() {
+		super('Plan archive ticket is invalid or expired for this workflow run');
+		this.name = 'InvalidPlanArchiveTicketError';
+	}
 }
 
 /**
