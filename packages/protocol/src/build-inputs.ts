@@ -2,6 +2,7 @@ import {
 	positiveIntSchema,
 	referenceSet,
 	storePathBasenameSchema,
+	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { storePathHashOf } from '@cupboard/nix-store/store-path';
@@ -203,4 +204,58 @@ export const buildInputsRecordResponseSchema = z.strictObject({
 });
 export type BuildInputsRecordResponse = z.output<
 	typeof buildInputsRecordResponseSchema
+>;
+
+/**
+The most store-path hashes in one request to clear build inputs.
+*/
+export const buildInputsClearMaxPaths = 128;
+
+export const buildInputsClearBodySchema = z.strictObject({
+	storePathHashes: z
+		.array(storePathHashSchema)
+		.min(1)
+		.max(buildInputsClearMaxPaths)
+		.refine(
+			(hashes) => new Set(hashes).size === hashes.length,
+			'Each store-path hash must appear once in a request'
+		)
+});
+
+// One result for each store-path hash, in request order. `cleared` means that
+// the row had build inputs or a version and now has neither, `unchanged` that
+// it had neither, and `absent` that the cache has no narinfo row for the path.
+export const buildInputsClearResultSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	status: z.enum(['cleared', 'unchanged', 'absent'])
+});
+export type BuildInputsClearResult = z.output<
+	typeof buildInputsClearResultSchema
+>;
+
+export const buildInputsClearResponseSchema = z.strictObject({
+	entries: z.array(buildInputsClearResultSchema)
+});
+export type BuildInputsClearResponse = z.output<
+	typeof buildInputsClearResponseSchema
+>;
+
+// The build inputs of one path's row. `recorded` gives the stored set and its
+// version. `none` means that the row has neither, `absent` that the cache has
+// no narinfo row for the path, and `invalid-stored` that the stored value
+// cannot be read.
+export const buildInputsReadResponseSchema = z.discriminatedUnion('status', [
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.literal('recorded'),
+		buildInputs: z.array(storePathBasenameSchema),
+		buildInputsVersion: buildInputsVersionSchema
+	}),
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.enum(['none', 'absent', 'invalid-stored'])
+	})
+]);
+export type BuildInputsReadResponse = z.output<
+	typeof buildInputsReadResponseSchema
 >;

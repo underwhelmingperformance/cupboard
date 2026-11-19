@@ -380,10 +380,11 @@ and defers that entry and every later one, so a resent suffix reads only its own
 rows. When the union leaves the stored set as it was, it updates only
 `build_inputs_version`. The narinfo update barrier fires for every update that
 sets `build_inputs_json`, even to the same value, so writing the unchanged set
-would queue a marked path again. The mark phase walks the references and then
-the build inputs as one sequence. A retained path therefore also keeps the build
-inputs that the cache has. It also keeps the paths that those inputs keep in
-turn.
+would queue a marked path again. `POST /build-inputs/clear` sets the build
+inputs and version of up to 128 rows to NULL, and `GET /build-inputs/<hash>`
+reads them for one row. The mark phase walks the references and then the build
+inputs as one sequence. A retained path therefore also keeps the build inputs
+that the cache has. It also keeps the paths that those inputs keep in turn.
 
 The phase queues a referenced path whether or not the cache has a narinfo row
 for it, and it marks an absent one. It queues a build input only when the cache
@@ -391,6 +392,9 @@ has a narinfo row for it. An absent build input therefore costs index reads and
 writes no rows. A build input that is published later is kept from then on,
 because the row of the path that needs it still lists it. Recording build inputs
 does not set `inputs_changed`, so it does not by itself make a scan due.
+Clearing a row's build inputs sets `inputs_changed`, because the paths that only
+those build inputs kept become collectable. A scan that marked such paths before
+the clear keeps them, and the next scan decides them.
 
 Each mark step walks up to `phaseStepSize` entries of one path. The scan row's
 `reference_cursor` records the position in the sequence of the last entry

@@ -173,6 +173,23 @@ export class GarbageCollectionInputs {
 				};
 	}
 
+	/**
+	Marks the cache's inputs as changed, as the input triggers do for a write
+	that can leave a path that nothing keeps. Like the triggers, it writes
+	nothing when the inputs are already marked.
+	*/
+	recordChange(cache: ResolvedCache): void {
+		this.context.db
+			.insert(schema.garbageCollectionInputs)
+			.values({ cacheId: cache.id, inputsChanged: true })
+			.onConflictDoUpdate({
+				target: schema.garbageCollectionInputs.cacheId,
+				set: { inputsChanged: true },
+				setWhere: eq(schema.garbageCollectionInputs.inputsChanged, false)
+			})
+			.run();
+	}
+
 	clearChanged(cache: ResolvedCache): void {
 		this.write(cache, { inputsChanged: false });
 	}

@@ -8,7 +8,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import {
+	type BuildInputsClearResponse,
+	type BuildInputsClearResult,
 	buildInputsMaxLength,
+	type BuildInputsReadResponse,
 	type BuildInputsRecordBody,
 	type BuildInputsRecordEntry,
 	buildInputsRecordMaxBuildInputs,
@@ -19,7 +22,7 @@ import {
 	canStoreBuildInputs,
 	pathEdgesMaxJsonBytes
 } from '@cupboard/protocol/build-inputs';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
@@ -27,6 +30,8 @@ import { BuildInputsPageLimitExceededError } from '../errors.ts';
 
 import { CacheClosureService } from './cache-closure-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
+import { GarbageCollectionInputs } from './garbage-collection-inputs.ts';
+import { jsonValueLists } from './json-list.ts';
 
 /**
 What the server reads about one entry's row. `buildInputsCount` is undefined
@@ -43,7 +48,8 @@ interface StoredRow {
 }
 
 /**
-Records build inputs on the narinfo rows that a cache already has.
+Records, reads and clears the build inputs of the narinfo rows that a cache
+already has.
 */
 export class BuildInputsService {
 	constructor(private readonly context: ServerContext) {}
@@ -251,6 +257,148 @@ export class BuildInputsService {
 
 			return { entries: results };
 		});
+	}
+
+	/**
+	Returns the build inputs and their version from one path's row.
+	*/
+	read(
+		cacheScope: CacheScope,
+		storePathHash: StorePathHash
+	): BuildInputsReadResponse {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+		const row =
+			cache === undefined
+				? undefined
+				: this.context.db
+						.select({
+							buildInputsJson: schema.narInfos.buildInputsJson,
+							buildInputsVersion: schema.narInfos.buildInputsVersion
+						})
+						.from(schema.narInfos)
+						.where(narInfoRow(cache, storePathHash))
+						.get();
+
+		if (row === undefined) {
+			return { storePathHash, status: 'absent' };
+		}
+
+		if (row.buildInputsJson === null && row.buildInputsVersion === null) {
+			return { storePathHash, status: 'none' };
+		}
+
+		const buildInputs =
+			row.buildInputsJson === null
+				? undefined
+				: parseStoredBuildInputs(row.buildInputsJson);
+
+		if (
+			buildInputs === undefined ||
+			buildInputs.length > buildInputsMaxLength ||
+			row.buildInputsVersion === null
+		) {
+			return { storePathHash, status: 'invalid-stored' };
+		}
+
+		return {
+			storePathHash,
+			status: 'recorded',
+			buildInputs: [...buildInputs],
+			buildInputsVersion: row.buildInputsVersion
+		};
+	}
+
+	/**
+	Clears the build inputs and their version from the rows of `storePathHashes`
+	in one transaction. Paths that only those build inputs kept become
+	collectable, so a clear that changes a row marks the cache's collection
+	inputs as changed and calls `onChange`.
+	*/
+	clear(
+		cacheScope: CacheScope,
+		storePathHashes: readonly StorePathHash[],
+		onChange: () => void
+	): BuildInputsClearResponse {
+		const absent = (): BuildInputsClearResponse => ({
+			entries: storePathHashes.map((storePathHash) => ({
+				storePathHash,
+				status: 'absent'
+			}))
+		});
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return absent();
+		}
+
+		const response = this.context.db.transaction((tx) => {
+			if (this.context.cacheRepository.isRemoved(cache.id)) {
+				return absent();
+			}
+
+			const rows = new Map(
+				jsonValueLists(storePathHashes).flatMap((list) =>
+					tx
+						.select({
+							storePathHash: schema.narInfos.storePathHash,
+							hasBuildInputs: sql<number>`${schema.narInfos.buildInputsJson} IS NOT NULL OR ${schema.narInfos.buildInputsVersion} IS NOT NULL`
+						})
+						.from(schema.narInfos)
+						.where(
+							and(
+								eq(schema.narInfos.cacheId, cache.id),
+								inArray(schema.narInfos.storePathHash, list)
+							)
+						)
+						.all()
+						.map(
+							(row) => [row.storePathHash, row.hasBuildInputs === 1] as const
+						)
+				)
+			);
+			const cleared = storePathHashes.filter(
+				(storePathHash) => rows.get(storePathHash) === true
+			);
+
+			for (const list of jsonValueLists(cleared)) {
+				tx.update(schema.narInfos)
+					.set({ buildInputsJson: sql`null`, buildInputsVersion: sql`null` })
+					.where(
+						and(
+							eq(schema.narInfos.cacheId, cache.id),
+							inArray(schema.narInfos.storePathHash, list)
+						)
+					)
+					.run();
+			}
+
+			if (cleared.length > 0) {
+				new GarbageCollectionInputs(this.context).recordChange(cache);
+			}
+
+			return {
+				entries: storePathHashes.map(
+					(storePathHash): BuildInputsClearResult => {
+						const hasBuildInputs = rows.get(storePathHash);
+
+						if (hasBuildInputs === undefined) {
+							return { storePathHash, status: 'absent' };
+						}
+
+						return {
+							storePathHash,
+							status: hasBuildInputs ? 'cleared' : 'unchanged'
+						};
+					}
+				)
+			};
+		});
+
+		if (response.entries.some((entry) => entry.status === 'cleared')) {
+			onChange();
+		}
+
+		return response;
 	}
 }
 
