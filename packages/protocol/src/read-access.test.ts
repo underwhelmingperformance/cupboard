@@ -235,6 +235,7 @@ describe('read authority', () => {
 
 		expect(selectReadTrust([rule, viewRule], claims, resources)).toStrictEqual({
 			outcome: 'selected',
+			ruleIds: [rule.id, viewRule.id],
 			grants: [
 				{ type: 'cupboard_cache', cache, actions: ['cache:read'] },
 				{ type: 'cupboard_view', view, actions: ['view:content-read'] }

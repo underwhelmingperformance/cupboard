@@ -1,5 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
-import { startCapture } from '@cupboard/logger/testing';
+import {
+	type Capture,
+	type CapturedLog,
+	startCapture
+} from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import {
 	cacheNameSchema,
@@ -64,6 +68,7 @@ import {
 	cacheIdentities,
 	consumedSubjectNonces,
 	oidcTrust,
+	planArchiveIdentities,
 	refreshTokenFamilies,
 	refreshTokenMembers
 } from '../db/schema.ts';
@@ -207,13 +212,17 @@ async function untrustedToken(): Promise<string> {
 		.sign(privateKey);
 }
 
-function tokenExchangeError(body: Record<string, string>): Promise<unknown> {
+function tokenExchangeError(
+	body: Record<string, string>,
+	maintenanceStateChanged?: () => Promise<void>
+): Promise<unknown> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		const tenantIdentity = new TenantIdentityService(instance.context);
 		const service = new TokenExchangeService(
 			instance.context,
 			new AuthKeysService(instance.context, tenantIdentity),
-			new OidcTrustService(instance.context, tenantIdentity)
+			new OidcTrustService(instance.context, tenantIdentity),
+			maintenanceStateChanged
 		);
 
 		const url = new URL('/token', currentOrigin());
@@ -5737,6 +5746,14 @@ describe('auth discovery endpoints', () => {
 	});
 });
 
+function archiveAuditEvents(
+	capture: Capture
+): Pick<CapturedLog, 'message' | 'properties'>[] {
+	return capture.logs
+		.filter(({ message }) => message.startsWith('plan archive '))
+		.map(({ message, properties }) => ({ message, properties }));
+}
+
 describe('plan archive key exchange', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => {
@@ -5792,11 +5809,7 @@ describe('plan archive key exchange', () => {
 			ruleId: 'github-main',
 			ticketHash: digest.slice(0, 16)
 		};
-		expect(
-			capture.logs
-				.filter((entry) => entry.message.startsWith('plan archive '))
-				.map(({ message, properties }) => ({ message, properties }))
-		).toStrictEqual([
+		expect(archiveAuditEvents(capture)).toStrictEqual([
 			{ message: 'plan archive ticket issued', properties },
 			{ message: 'plan archive identity released', properties }
 		]);
@@ -5946,6 +5959,215 @@ describe('plan archive key exchange', () => {
 			});
 		}
 	);
+
+	it('logs the committed ticket before scheduling maintenance', async () => {
+		const { sign } = await installGithubBranchRule(
+			githubActionsIssuer,
+			tenantTestIssuer
+		);
+		const subject = await sign({
+			...branchRuleClaims,
+			run_id: '789',
+			job_workflow_sha: 'a'.repeat(40)
+		});
+		const capture = startCapture();
+		const failure = new Error('maintenance unavailable');
+		try {
+			const result = await tokenExchangeError(
+				{
+					grant_type: planArchiveGrantType,
+					subject_token_type: subjectTokenTypeIdToken,
+					subject_token: subject,
+					cache: 'ci'
+				},
+				() => Promise.reject(failure)
+			);
+			expect(result).toEqual(failure);
+			const tickets = await runInDurableObject(currentServer(), (instance) =>
+				instance.context.db
+					.select({ ticket: planArchiveIdentities.ticket })
+					.from(planArchiveIdentities)
+					.all()
+			);
+			const [committed] = tickets;
+			if (!committed || tickets.length !== 1) {
+				throw new Error('Expected one committed archive ticket');
+			}
+			const digest = await sha256Hex(committed.ticket);
+			expect(archiveAuditEvents(capture)).toStrictEqual([
+				{
+					message: 'plan archive ticket issued',
+					properties: {
+						tenant: 'v1',
+						issuer: githubActionsIssuer,
+						repository: '1234',
+						run: '789',
+						workflow: branchRuleClaims.job_workflow_ref,
+						revision: 'a'.repeat(40),
+						cache: { kind: 'named', name: 'ci' },
+						ruleId: 'github-main',
+						ticketHash: digest.slice(0, 16)
+					}
+				}
+			]);
+		} finally {
+			capture.stop();
+		}
+	});
+
+	it('records the rules that jointly permit archive access and the fingerprint of a refused redemption', async () => {
+		const { sign } = await installGithubBranchRule(
+			githubActionsIssuer,
+			tenantTestIssuer
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			const database = instance.context.db;
+			const where = eq(oidcTrust.id, trustRuleIdSchema.parse('github-main'));
+			const original = database.select().from(oidcTrust).where(where).get();
+			if (!original) {
+				throw new Error('The GitHub trust rule is missing');
+			}
+			const grants = (actions: readonly string[]) =>
+				JSON.stringify([{ ...trustClassGrants.write[0], actions }]);
+			database
+				.update(oidcTrust)
+				.set({
+					permittedGrantsJson: grants(['upload:negotiate', 'upload:status'])
+				})
+				.where(where)
+				.run();
+			database
+				.insert(oidcTrust)
+				.values([
+					{
+						...original,
+						id: trustRuleIdSchema.parse('github-commit'),
+						permittedGrantsJson: grants(['upload:commit'])
+					},
+					{
+						...original,
+						id: trustRuleIdSchema.parse('github-read'),
+						permittedGrantsJson: JSON.stringify(trustClassGrants.read)
+					}
+				])
+				.run();
+		});
+		const form = {
+			grant_type: planArchiveGrantType,
+			subject_token_type: subjectTokenTypeIdToken,
+			subject_token: await sign({
+				...branchRuleClaims,
+				run_id: '789',
+				job_workflow_sha: 'a'.repeat(40)
+			}),
+			cache: 'ci'
+		};
+		const capture = startCapture();
+		try {
+			const issued = await postToken(form);
+			const { ticket } = planArchiveRecipientSchema.parse(await issued.json());
+			const digest = await sha256Hex(ticket);
+			const opened = await postToken({ ...form, ticket });
+			const refused = await postToken({
+				...form,
+				ticket,
+				subject_token: await sign({
+					...branchRuleClaims,
+					run_id: '790',
+					job_workflow_sha: 'a'.repeat(40)
+				})
+			});
+			const events = archiveAuditEvents(capture);
+			const request = {
+				method: 'POST',
+				path: '/token',
+				tenant: 'v1',
+				ticketHash: digest.slice(0, 16)
+			};
+			const publisher = {
+				...request,
+				issuer: githubActionsIssuer,
+				repository: '1234',
+				run: '789',
+				workflow: branchRuleClaims.job_workflow_ref,
+				revision: 'a'.repeat(40),
+				cache: { kind: 'named', name: 'ci' },
+				composed: true,
+				ruleIds: ['github-commit', 'github-main']
+			};
+			const reason = {
+				error: 'invalid_grant',
+				problem: 'invalid-plan-archive-ticket'
+			};
+			expect({
+				opened: opened.status,
+				refused: await refusalOf(refused),
+				events
+			}).toStrictEqual({
+				opened: StatusCodes.OK,
+				refused: { status: StatusCodes.BAD_REQUEST, ...reason },
+				events: [
+					{ message: 'plan archive ticket issued', properties: publisher },
+					{ message: 'plan archive identity released', properties: publisher },
+					{
+						message: 'plan archive redemption failed',
+						properties: { ...request, ...reason }
+					}
+				]
+			});
+			expect(JSON.stringify(capture.logs)).not.toContain(ticket);
+		} finally {
+			capture.stop();
+		}
+	});
+
+	it('logs the ticket fingerprint when issuer verification is unavailable', async () => {
+		const { sign } = await installGithubBranchRule(
+			githubActionsIssuer,
+			tenantTestIssuer
+		);
+		const subject = await sign({
+			...branchRuleClaims,
+			run_id: '789',
+			job_workflow_sha: 'a'.repeat(40)
+		});
+		vi.stubGlobal('fetch', () =>
+			Promise.reject(new Error('issuer unavailable'))
+		);
+		const ticket = 'v1.' + 'a'.repeat(64);
+		const digest = await sha256Hex(ticket);
+		const capture = startCapture();
+		try {
+			const response = await postToken({
+				grant_type: planArchiveGrantType,
+				subject_token_type: subjectTokenTypeIdToken,
+				subject_token: subject,
+				cache: 'ci',
+				ticket
+			});
+			expect({
+				status: response.status,
+				events: archiveAuditEvents(capture)
+			}).toStrictEqual({
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				events: [
+					{
+						message: 'plan archive redemption failed',
+						properties: {
+							method: 'POST',
+							path: '/token',
+							tenant: 'v1',
+							ticketHash: digest.slice(0, 16),
+							errorName: 'IssuerUnavailableError',
+							errorStatus: StatusCodes.SERVICE_UNAVAILABLE
+						}
+					}
+				]
+			});
+		} finally {
+			capture.stop();
+		}
+	});
 
 	it('consumes a separate subject nonce on issue and redemption', async () => {
 		const { sign } = await installGithubBranchRule(

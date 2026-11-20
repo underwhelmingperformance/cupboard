@@ -96,7 +96,8 @@ function result(selection: OidcTrustSelection): {
 		case 'selected': {
 			return {
 				outcome: selection.outcome,
-				rules: selection.rule === undefined ? [] : [selection.rule.id]
+				rules:
+					selection.rule === undefined ? selection.ruleIds : [selection.rule.id]
 			};
 		}
 		case 'identity-unmatched': {
@@ -190,9 +191,12 @@ describe('selectModelledOidcTrust', () => {
 		const cacheB = rule({ id: 'cache-b', cache: 'b' });
 		const requested = [...request('a'), ...request('b')];
 
-		expect(modelledResult([cacheB, cacheA], requested)).toStrictEqual({
+		const overlapping = rule({ id: 'other-a', cache: 'a' });
+		expect(
+			modelledResult([overlapping, cacheB, cacheA], requested)
+		).toStrictEqual({
 			outcome: 'selected',
-			rules: []
+			rules: ['cache-a', 'cache-b']
 		});
 	});
 
@@ -231,7 +235,7 @@ describe('selectModelledOidcTrust', () => {
 			const requested = request('ci', ['upload:commit', 'root:set'], 'run/1');
 			expect(modelledResult(rules, requested)).toStrictEqual({
 				outcome: 'selected',
-				rules: type === 'same-rule' ? ['upload'] : []
+				rules: type === 'same-rule' ? ['upload'] : ['retain', 'upload']
 			});
 		}
 	);

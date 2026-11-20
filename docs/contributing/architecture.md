@@ -2347,6 +2347,12 @@ identity, an opaque random ticket, the run binding and the expiry in
 verified GitHub issuer, owner and repository IDs, run ID, job workflow ref and
 SHA, and cache. A retry in the same run can redeem the ticket.
 
+The tenant logs issuance after committing the identity and before scheduling
+maintenance. Issuance, release and failed redemption attempts with a valid
+request format include the first 16 hexadecimal digits of the ticket's SHA-256
+digest. Issuance and release also record the trust rule ID or the IDs of the
+rules that jointly permitted the upload.
+
 The plan receives the public recipient. GitHub retains the encrypted artifact
 for one day. The expiry index schedules tenant maintenance, which deletes due
 identities in bounded batches. A redemption at or after the 24-hour deadline
