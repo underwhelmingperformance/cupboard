@@ -112,6 +112,7 @@ under [docs/](../README.md) explain when to use each one.
 - [`cupboard check`](#cupboard-check)
 - [`cupboard plan`](#cupboard-plan)
   - [`cupboard plan cohort`](#cupboard-plan-cohort)
+  - [`cupboard plan dependencies`](#cupboard-plan-dependencies)
   - [`cupboard plan measure`](#cupboard-plan-measure)
   - [`cupboard plan reprobe`](#cupboard-plan-reprobe)
 - [`cupboard document-versions`](#cupboard-document-versions)
@@ -2616,21 +2617,32 @@ Usage: cupboard plan [options] [command]
 Automation helpers used by the flake publish workflow.
 
 Options:
-  -h, --help                       display help for command
+  -h, --help                            display help for command
 
 Commands:
-  cohort [options] <url> [cache]   Plan builds for a group of targets in the
-                                   flake publish workflow. Decide which of a
-                                   cohort's targets to build and which the cache
-                                   already has, and check that the store has
-                                   room for the build.
-  measure [options]                Automation helper for the flake publish
-                                   workflow. Measure how much this store must
-                                   download to build or fetch each target.
-  reprobe [options] <url> [cache]  Automation helper for the flake publish
-                                   workflow. Just before the build starts, check
-                                   which planned targets still need to be built.
-  help [command]                   display help for command
+  cohort [options] <url> [cache]        Plan builds for a group of targets in
+                                        the flake publish workflow. Decide which
+                                        of a cohort's targets to build and which
+                                        the cache already has, and check that
+                                        the store has room for the build.
+  dependencies [options] <url> [cache]  Automation helper for the flake publish
+                                        workflow. Keep the build-time
+                                        dependencies of the published targets in
+                                        the cache: copy the ones that another
+                                        cache of the tenant has, record the
+                                        build inputs of the ones that the cache
+                                        has, and attach the ones whose build
+                                        inputs cannot be recorded to the run
+                                        root.
+  measure [options]                     Automation helper for the flake publish
+                                        workflow. Measure how much this store
+                                        must download to build or fetch each
+                                        target.
+  reprobe [options] <url> [cache]       Automation helper for the flake publish
+                                        workflow. Just before the build starts,
+                                        check which planned targets still need
+                                        to be built.
+  help [command]                        display help for command
 ```
 
 #### cupboard plan cohort
@@ -2673,6 +2685,58 @@ Options:
   --remote-store-configured                     record in the plan that the workflow uses a remote store
   --component-publication-applicable            record in the plan that component publication applies to this cohort
   -h, --help                                    display help for command
+```
+
+#### cupboard plan dependencies
+
+```text
+Usage: cupboard plan dependencies [options] <url> [cache]
+
+Automation helper for the flake publish workflow. Keep the build-time
+dependencies of the published targets in the cache: copy the ones that another
+cache of the tenant has, record the build inputs of the ones that the cache has,
+and attach the ones whose build inputs cannot be recorded to the run root.
+
+Arguments:
+  url                              tenant URL (e.g.
+                                   https://cupboard.example.workers.dev/t/<slug>)
+  cache                            cache name, if the URL is a tenant URL
+
+Options:
+  --graph-file <path>              JSON dependency graph document, version 1, as
+                                   dependencyGraphDocumentSchema in
+                                   @cupboard/protocol defines it
+  --run-root <name>                run root for the copied paths and for the
+                                   paths whose build inputs cannot be recorded
+  --run-root-ttl <duration>        expire the run root after this duration (e.g.
+                                   7d, 12h)
+  --run-root-permanent             keep the run root permanently
+  --record-build-inputs            record build inputs on the paths that the
+                                   cache already has, which needs the
+                                   build-inputs:record grant. Without this
+                                   option, the run root keeps those paths.
+  --reference-source <url>         cache URL or reuse view URL to copy absent
+                                   dependency outputs from, read with the view
+                                   read credential
+  --read-cache <url>               another cache of the tenant to copy absent
+                                   dependency outputs from, read with the run's
+                                   read session (repeatable) (default: [])
+  --read-user <user>               user name of the read credential for a
+                                   private cache (default: $CUPBOARD_READ_USER)
+  --read-password <password>       password of the read credential for a private
+                                   cache (default: $CUPBOARD_READ_PASSWORD)
+  --view-read-user <user>          user name of the read credential for a
+                                   private reference source (default:
+                                   $CUPBOARD_VIEW_READ_USER)
+  --view-read-password <password>  password of the read credential for a private
+                                   reference source (default:
+                                   $CUPBOARD_VIEW_READ_PASSWORD)
+  --github-oidc                    sign in with the job's GitHub Actions OIDC
+                                   token instead of your saved `cupboard login`
+                                   session
+  --audience <audience>            OIDC audience to request with --github-oidc
+                                   (default: the tenant URL)
+  -h, --help                       display help for command
 ```
 
 #### cupboard plan measure

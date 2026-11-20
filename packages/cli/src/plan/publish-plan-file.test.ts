@@ -1,6 +1,7 @@
 import {
 	buildInputsDocumentVersion,
 	cohortRootsVersion,
+	dependencyGraphDocumentVersion,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
 import { describe, expect, it } from 'vitest';
@@ -11,11 +12,141 @@ import { cliExitCode } from '../cli.ts';
 import {
 	BuildInputsDocumentVersionError,
 	CohortRootsVersionError,
+	DependencyGraphDocumentVersionError,
 	parseBuildInputsDocument,
 	parseCohortRoots,
+	parseDependencyGraphDocument,
 	parsePublishPlan,
 	PublishPlanVersionError
 } from './publish-plan-file.ts';
+
+describe('parseDependencyGraphDocument', () => {
+	const libraryBasename = `${'1'.repeat(32)}-library`;
+	const library = `/nix/store/${libraryBasename}`;
+	const app = `/nix/store/${'0'.repeat(32)}-app`;
+	const source = `${'2'.repeat(32)}-source.tar.gz`;
+	const compiler = `${'3'.repeat(32)}-compiler`;
+
+	it('reads the paths of a document of the supported version in order', () => {
+		expect(
+			parseDependencyGraphDocument(
+				JSON.stringify({
+					version: dependencyGraphDocumentVersion,
+					buildInputsVersion: 1,
+					paths: [
+						{
+							storePath: `/nix/store/${source}`,
+							kind: 'dependency',
+							buildInputs: []
+						},
+						{
+							storePath: `/nix/store/${compiler}`,
+							kind: 'dependency',
+							buildInputs: []
+						},
+						{
+							storePath: library,
+							kind: 'published',
+							buildInputs: [source, compiler, source]
+						},
+						{
+							storePath: app,
+							kind: 'target',
+							buildInputs: [libraryBasename]
+						}
+					]
+				})
+			)
+		).toStrictEqual({
+			version: dependencyGraphDocumentVersion,
+			buildInputsVersion: 1,
+			paths: [
+				{
+					storePath: `/nix/store/${source}`,
+					kind: 'dependency',
+					buildInputs: []
+				},
+				{
+					storePath: `/nix/store/${compiler}`,
+					kind: 'dependency',
+					buildInputs: []
+				},
+				{
+					storePath: library,
+					kind: 'published',
+					buildInputs: [source, compiler]
+				},
+				{
+					storePath: app,
+					kind: 'target',
+					buildInputs: [libraryBasename]
+				}
+			]
+		});
+	});
+
+	it('refuses a document of another version', () => {
+		let failure: unknown;
+
+		try {
+			parseDependencyGraphDocument(
+				JSON.stringify({ version: 2, buildInputsVersion: 1, paths: [] })
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect({
+			isVersionError: failure instanceof DependencyGraphDocumentVersionError,
+			found:
+				failure instanceof DependencyGraphDocumentVersionError
+					? failure.found
+					: undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ isVersionError: true, found: 2, status: 2 });
+	});
+
+	it.each([
+		{
+			name: 'a path listed twice',
+			paths: [
+				{ storePath: app, kind: 'target', buildInputs: [] },
+				{ storePath: app, kind: 'dependency', buildInputs: [] }
+			]
+		},
+		{
+			name: 'a path that is not a store path',
+			paths: [{ storePath: 'app', kind: 'target', buildInputs: [] }]
+		},
+		{
+			name: 'an unknown kind',
+			paths: [{ storePath: app, kind: 'source', buildInputs: [] }]
+		},
+		{
+			name: 'a path before one of its build inputs',
+			paths: [
+				{ storePath: app, kind: 'target', buildInputs: [libraryBasename] },
+				{ storePath: library, kind: 'dependency', buildInputs: [] }
+			]
+		},
+		{
+			name: 'a build input that is not in the graph',
+			paths: [
+				{ storePath: app, kind: 'target', buildInputs: [libraryBasename] }
+			]
+		}
+	])('refuses a document with $name', ({ paths }) => {
+		expect(() =>
+			parseDependencyGraphDocument(
+				JSON.stringify({
+					version: dependencyGraphDocumentVersion,
+					buildInputsVersion: 1,
+					paths
+				})
+			)
+		).toThrow(z.ZodError);
+	});
+});
 
 describe('parseBuildInputsDocument', () => {
 	const app = `/nix/store/${'0'.repeat(32)}-app`;

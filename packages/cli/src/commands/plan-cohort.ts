@@ -88,6 +88,7 @@ import { parseReadUser } from '../read-user.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { registerPlanDependenciesCommand } from './plan-dependencies.ts';
 import { registerPlanMeasureCommand } from './plan-measure.ts';
 import { registerPlanReprobeCommand } from './plan-reprobe.ts';
 import { readCredentials } from './read-credentials.ts';
@@ -584,6 +585,7 @@ export function registerPlanCommands(
 			}
 		);
 
+	registerPlanDependenciesCommand(plan, program, programOptions);
 	registerPlanMeasureCommand(plan, program, programOptions);
 	registerPlanReprobeCommand(plan, program, programOptions);
 }

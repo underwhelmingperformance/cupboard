@@ -5,6 +5,9 @@ import {
 	type CohortRootsDocument,
 	cohortRootsDocumentSchema,
 	cohortRootsVersion,
+	type DependencyGraphDocument,
+	dependencyGraphDocumentSchema,
+	dependencyGraphDocumentVersion,
 	type PublishPlanDocument,
 	publishPlanDocumentSchema,
 	publishPlanVersion
@@ -58,6 +61,22 @@ export class BuildInputsDocumentVersionError extends CliUsageError {
 			`The build inputs file has version ${found === undefined ? 'none' : JSON.stringify(found)}, but this cupboard reads only version ${String(supported)}. Use the cupboard release that matches the publish workflow.`
 		);
 		this.name = 'BuildInputsDocumentVersionError';
+	}
+}
+
+/**
+The dependency graph document was written by a cupboard release with a
+different document version, so this release could misread it.
+*/
+export class DependencyGraphDocumentVersionError extends CliUsageError {
+	constructor(
+		readonly found: unknown,
+		readonly supported: number
+	) {
+		super(
+			`The dependency graph file has version ${found === undefined ? 'none' : JSON.stringify(found)}, but this cupboard reads only version ${String(supported)}. Use the cupboard release that matches the publish workflow.`
+		);
+		this.name = 'DependencyGraphDocumentVersionError';
 	}
 }
 
@@ -119,4 +138,25 @@ export function parseBuildInputsDocument(
 	}
 
 	return buildInputsDocumentSchema.parse(value);
+}
+
+/**
+Parses the JSON dependency graph document for `plan dependencies
+--graph-file`. A document of another version is refused with
+`DependencyGraphDocumentVersionError` before its other fields are read.
+*/
+export function parseDependencyGraphDocument(
+	contents: string
+): DependencyGraphDocument {
+	const value: unknown = JSON.parse(contents);
+	const found = documentVersion(value);
+
+	if (found !== dependencyGraphDocumentVersion) {
+		throw new DependencyGraphDocumentVersionError(
+			found,
+			dependencyGraphDocumentVersion
+		);
+	}
+
+	return dependencyGraphDocumentSchema.parse(value);
 }

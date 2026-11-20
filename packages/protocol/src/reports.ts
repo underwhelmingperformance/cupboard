@@ -292,6 +292,41 @@ export const buildSummarySchema = z.strictObject({
 });
 export type BuildSummary = z.output<typeof buildSummarySchema>;
 
+// The `kind` under which `cupboard plan dependencies` emits its summary.
+export const dependencyPassResultKind = 'dependency-pass';
+
+// `unsupported` means that the server has no `dependency-status` procedure, so
+// the pass changed nothing and the caller keeps build dependencies alive by
+// other means. Otherwise `record` says whether the pass recorded build inputs:
+// `not-requested` when the run did not ask for the grant, `refused` when the
+// token service refused it, and `failed` when recording failed. The counts are
+// of the paths in the graph (`paths`), the paths copied from another cache
+// (`copied`), the record results (`recorded`, `unchanged`), the paths that
+// could not be recorded because a path below them was in flight or not copied
+// (`blocked`), the paths attached to the run root because nothing else keeps
+// them (`attached`), the paths to attach that the cache did not return or
+// could not confirm, which the run root therefore does not keep
+// (`unattached`), and how many attach rounds the pass needed after rechecking
+// the rows that it relied on (`attachRounds`).
+export const dependencyPassSummarySchema = z.discriminatedUnion('status', [
+	z.strictObject({ status: z.literal('unsupported') }),
+	z.strictObject({
+		status: z.literal('completed'),
+		record: z.enum(['recorded', 'not-requested', 'refused', 'failed']),
+		paths: countSchema,
+		copied: countSchema,
+		recorded: countSchema,
+		unchanged: countSchema,
+		blocked: countSchema,
+		attached: countSchema,
+		unattached: countSchema,
+		attachRounds: countSchema
+	})
+]);
+export type DependencyPassSummary = z.output<
+	typeof dependencyPassSummarySchema
+>;
+
 // The `kind` under which `cupboard push` and `cupboard build-push` report the
 // paths whose local copy differs from the copy that the cache already served.
 // A run emits this result only when at least one path diverged. Its own

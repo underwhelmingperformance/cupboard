@@ -1202,7 +1202,8 @@ export type IncompletePushExitStatus =
 The command that the user ran. `PushIncompleteError` includes it in its
 advice.
 */
-export type PushCommand = 'cupboard push' | 'cupboard build-push';
+export type PushCommand =
+	'cupboard push' | 'cupboard build-push' | 'cupboard plan dependencies';
 
 /**
 The credential that a push uses: the owner session cached by
