@@ -28,6 +28,7 @@ import { isAbortError } from './abort.ts';
 import { translateRpcError } from './client/rpc-errors.ts';
 import { registerAttestCommands } from './commands/attest.ts';
 import { registerAuthKeyCommands } from './commands/auth-key.ts';
+import { registerBuildInputsCommands } from './commands/build-inputs.ts';
 import { registerBuildPushCommand } from './commands/build-push.ts';
 import { registerCacheCommands } from './commands/cache.ts';
 import { registerCheckCommand } from './commands/check.ts';
@@ -216,6 +217,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerPubkeyCommand(program, options);
 	registerStatsCommand(program, options);
 	registerDeleteCommand(program, options);
+	registerBuildInputsCommands(program, options);
 	registerRootCommands(program, options);
 	registerConfirmCommand(program, options);
 	registerKeyCommands(program, options);

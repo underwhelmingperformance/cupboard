@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	chunk,
+	chunkByWeight,
 	collectProgressively,
 	filterProgressively,
 	findProgressively,
@@ -35,6 +36,34 @@ describe('chunk', () => {
 			expect(() => chunk(['a'], size)).toThrow(RangeError);
 		}
 	);
+});
+
+describe('chunkByWeight', () => {
+	it.each([
+		{
+			name: 'item limit',
+			weights: [1, 1, 1, 1, 1],
+			expected: [[1, 1], [1, 1], [1]]
+		},
+		{
+			name: 'weight limit',
+			weights: [3, 3, 4, 1],
+			expected: [
+				[3, 3],
+				[4, 1]
+			]
+		},
+		{
+			name: 'item that weighs more than the limit',
+			weights: [2, 9, 2],
+			expected: [[2], [9], [2]]
+		},
+		{ name: 'empty input', weights: [], expected: [] }
+	])('splits items in order at the $name', ({ weights, expected }) => {
+		expect(
+			chunkByWeight(weights, { maxItems: 2, maxWeight: 6 }, (weight) => weight)
+		).toStrictEqual(expected);
+	});
 });
 
 function page<T>(

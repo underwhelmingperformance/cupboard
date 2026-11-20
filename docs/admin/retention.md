@@ -456,7 +456,14 @@ A tenant administrator, or another caller with a grant for the
 `recorded` with the build inputs and their version, `none` when the store path
 lists none, `absent` when the cache doesn't have it, or `invalid-stored` when
 its stored build inputs can't be read, list more than 8,192 or lack their
-version, or it has a version without build inputs.
+version, or it has a version without build inputs. `cupboard build-inputs show`
+reads them with your `cupboard login` session, or in a GitHub Actions job with
+`--github-oidc`, which requests only `cache:content-read`:
+
+```sh
+cupboard build-inputs show https://cupboard.example.workers.dev/t/acme \
+  /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app
+```
 
 A tenant administrator, or another caller with a grant for the `narinfo:delete`
 action, can clear the build inputs of up to 128 store paths:
@@ -467,7 +474,13 @@ as `unchanged` when it listed no build inputs, or as `absent` when the cache
 doesn't have it. Clear a store path that is reported as `invalid-stored` before
 recording its build inputs again. A clear counts as a change for garbage
 collection, so the next collection can delete the build inputs that nothing else
-keeps.
+keeps. `cupboard build-inputs clear` clears the build inputs of the store paths
+that it is given, 128 in each request, after it asks for confirmation:
+
+```sh
+cupboard build-inputs clear https://cupboard.example.workers.dev/t/acme \
+  /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app
+```
 
 ## Retiring empty caches
 
