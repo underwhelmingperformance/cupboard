@@ -1086,6 +1086,7 @@ describe('cohort planning and publication', () => {
 					"${{ format('{0}/_cupboard-run/{1}', needs.configure.outputs.root-prefix, github.run_id) }}",
 				'run-root-ttl': '${{ inputs.run-root-ttl }}',
 				'run-root-permanent': '${{ inputs.run-root-permanent }}',
+				'record-build-inputs': "${{ github.event_name != 'pull_request' }}",
 				'fail-on-divergence': '${{ inputs.fail-on-divergence }}',
 				'derivation-ticket': '${{ needs.plan.outputs.derivation-ticket }}',
 				'derivation-cache-file':
