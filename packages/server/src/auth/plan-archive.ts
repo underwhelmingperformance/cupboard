@@ -16,7 +16,7 @@ function isHostedActionsIssuer(issuer: string | undefined): issuer is string {
 		return true;
 	}
 	if (issuer.startsWith(githubActionsIssuer + '/')) {
-		return /^[a-z\d-]+$/iu.test(issuer.slice(githubActionsIssuer.length + 1));
+		return /^[a-z\d-]+$/u.test(issuer.slice(githubActionsIssuer.length + 1));
 	}
 	return /^https:\/\/token\.actions\.([a-z\d-]+)\.ghe\.com(?:\/\1)?$/u.test(
 		issuer

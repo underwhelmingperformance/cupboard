@@ -5991,6 +5991,8 @@ describe('plan archive key exchange', () => {
 	});
 
 	it.each([
+		githubActionsIssuer + '/Acme',
+		'https://token.actions.acme.ghe.com/other',
 		'https://token.actions.githubusercontent.com.example.test/acme',
 		'https://token.actions.acme.ghe.com.example.test',
 		'https://issuer.example.test'
