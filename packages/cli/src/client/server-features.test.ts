@@ -3,7 +3,7 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { tenantRpc } from './orpc.ts';
-import { canGrantBuildInputs } from './server-features.ts';
+import { canGrantBuildInputs, memoiseProbe } from './server-features.ts';
 
 const probePath = `/t/acme/build-inputs/${'0'.repeat(32)}`;
 
@@ -104,5 +104,62 @@ describe('canGrantBuildInputs', () => {
 				? { orpcStatus: error.status }
 				: { name: error instanceof Error ? error.name : String(error) }
 		).toStrictEqual(failure);
+	});
+});
+
+describe('memoiseProbe', () => {
+	it('reuses an answer and asks again after a failure', async () => {
+		const answers = [
+			() => Promise.reject(new Error('the edge refused the probe')),
+			() => Promise.resolve('granted')
+		];
+		let calls = 0;
+		const ask = memoiseProbe(() => {
+			const answer = answers[calls] ?? (() => Promise.resolve('unexpected'));
+			calls += 1;
+
+			return answer();
+		});
+		const outcomes: string[] = [];
+
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			try {
+				outcomes.push(await ask());
+			} catch {
+				outcomes.push('failed');
+			}
+		}
+
+		expect({ outcomes, calls }).toStrictEqual({
+			outcomes: ['failed', 'granted', 'granted'],
+			calls: 2
+		});
+	});
+
+	it('asks again after a probe that throws before it returns a promise', async () => {
+		let calls = 0;
+		const ask = memoiseProbe((): Promise<string> => {
+			calls += 1;
+
+			if (calls === 1) {
+				throw new Error('the client could not build the request');
+			}
+
+			return Promise.resolve('granted');
+		});
+		const outcomes: string[] = [];
+
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			try {
+				outcomes.push(await ask());
+			} catch {
+				outcomes.push('failed');
+			}
+		}
+
+		expect({ outcomes, calls }).toStrictEqual({
+			outcomes: ['failed', 'granted'],
+			calls: 2
+		});
 	});
 });

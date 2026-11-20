@@ -1,6 +1,7 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { type CacheListEntry } from '@cupboard/protocol/caches';
+import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import {
 	type AuthorizationDetails,
 	type CacheOperation,
@@ -34,7 +35,8 @@ import { cacheLabel } from '../../client/client.ts';
 import { cachePages, listingLimits } from '../../client/listings.ts';
 import {
 	type BuildInputsReadProbe,
-	canGrantBuildInputs
+	canGrantBuildInputs,
+	memoiseProbe
 } from '../../client/server-features.ts';
 import {
 	CliError,
@@ -52,6 +54,7 @@ import {
 } from '../oidc-trust.ts';
 import { trustGrantRows } from '../oidc-trust/format.ts';
 import { lookupRepository } from '../oidc-trust/github.ts';
+import { presetUpgradeGrants } from '../oidc-trust/preset-upgrade.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
@@ -74,12 +77,14 @@ import {
 } from './convention.ts';
 import { isDeepEqual } from './deep-equal.ts';
 import {
+	buildInputsGrantRepair,
 	canMatchRepositoryRun,
 	checkView,
 	type DiscoveredGithubCheckDependencies,
 	type DiscoveredGithubCheckResult,
 	finishDiscoveredGithubCheck,
 	inspectDiscoveredGithubCheck,
+	isBuildInputsGrantMissing,
 	isRepairOffered
 } from './discovered-check.ts';
 import {
@@ -91,6 +96,8 @@ import {
 	type WorkflowDiscovery
 } from './discovery.ts';
 import {
+	type BuildInputsGrantCause,
+	buildInputsGrantCause,
 	type CheckStatus,
 	ReadAuthenticationUnverifiedFinding,
 	ReuseViewMissingFinding
@@ -315,6 +322,87 @@ interface ModelledCase {
 	readonly publication: PublicationCase;
 	readonly read: PublicationReadAuthority;
 	readonly needsTrustRule: boolean;
+	/**
+	The rule that permits the case's publication but not `build-inputs:record`.
+	The repair extends it with that grant alone, so the rule keeps deciding the
+	case. An exact rule written for the case would take precedence over it.
+	*/
+	readonly buildInputsGrantRule?: OidcTrustRule;
+	/**
+	Why the repair cannot add `build-inputs:record` for a case that lacks it.
+	*/
+	readonly buildInputsGrantCause?: BuildInputsGrantCause;
+}
+
+// Whether new rules include `build-inputs:record`. A probe that fails leaves
+// the grant out of them, so the repair of the failures goes ahead.
+async function canGrantForNewRules(
+	canGrant: () => Promise<boolean>,
+	ui: CliUi
+): Promise<boolean> {
+	try {
+		return await canGrant();
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+
+		ui.warn(
+			'The repair could not ask the server whether it can grant build-inputs:record, so the new rules leave it out. Run the repair again to add it.'
+		);
+
+		return false;
+	}
+}
+
+// How the repair handles a case whose publication the rules permit but whose
+// build-inputs exchange they refuse. A server that cannot grant the operation
+// needs nothing, and a probe that fails leaves the case to a later repair, so
+// the repair of other cases never depends on the probe.
+async function buildInputsGrantPlan(
+	publication: PublicationCase,
+	rules: readonly OidcTrustRule[],
+	canGrant: () => Promise<boolean>
+): Promise<
+	| ReturnType<typeof buildInputsGrantRepair>
+	| { readonly kind: 'unavailable' | 'probe-failed' }
+> {
+	try {
+		if (!(await canGrant())) {
+			return { kind: 'unavailable' };
+		}
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+
+		return { kind: 'probe-failed' };
+	}
+
+	return buildInputsGrantRepair(publication, rules);
+}
+
+// The grants that let `rules` accept the case's build-inputs exchange, for
+// each requested cache that the rule does not cover yet.
+function buildInputsGrants(
+	publication: PublicationCase,
+	ruleGrants: OidcTrustSummary['permittedGrants']
+): OidcTrustAddBodyInput['permittedGrants'] {
+	return (publication.buildInputsRequests ?? []).flatMap((details) =>
+		details.flatMap((detail) =>
+			detail.type === 'cupboard_cache' &&
+			!isGrantPermittedByRule(ruleGrants, detail, publication.claims)
+				? [
+						buildCacheGrant({
+							...(detail.cache.kind === 'named' && {
+								cache: detail.cache.name
+							}),
+							allow: ['build-inputs']
+						})
+					]
+				: []
+		)
+	);
 }
 
 const cancelledMessage = 'Repair cancelled. The tenant is unchanged.';
@@ -779,7 +867,9 @@ export async function offerDiscoveredGithubRepair(
 		(ui.interactive &&
 			isRepairOffered(result) &&
 			(await ui.confirm({
-				message: 'Review a repair for the reported failures?'
+				message: result.jobs.some((job) => job.status === 'failed')
+					? 'Review a repair for the reported failures?'
+					: 'Review a repair for the reported warnings?'
 			})) === 'yes')
 	) {
 		await repair();
@@ -1128,7 +1218,8 @@ async function modelRepairableJobs(
 	existing: ReturnType<typeof activeMatcherRules>,
 	retainedGrantMissingRules: Set<string>,
 	client: GithubCheckClient,
-	dependencies: DiscoveredGithubCheckDependencies
+	dependencies: DiscoveredGithubCheckDependencies,
+	canGrant: () => Promise<boolean>
 ): Promise<ModelledCase[]> {
 	const modelled: ModelledCase[] = [];
 
@@ -1173,11 +1264,23 @@ async function modelRepairableJobs(
 				}
 			}
 
+			const grant =
+				finding.status === 'ok' &&
+				isBuildInputsGrantMissing(publication, existing)
+					? await buildInputsGrantPlan(publication, existing, canGrant)
+					: undefined;
+
 			modelled.push({
 				job,
 				publication,
 				read,
-				needsTrustRule: finding.status !== 'ok'
+				needsTrustRule: finding.status !== 'ok',
+				...(grant?.kind === 'extend' && { buildInputsGrantRule: grant.rule }),
+				...(grant !== undefined &&
+					grant.kind !== 'extend' &&
+					grant.kind !== 'unavailable' && {
+						buildInputsGrantCause: grant.kind
+					})
 			});
 		}
 	}
@@ -1193,7 +1296,10 @@ export async function runDiscoveredGithubRepair(
 	dependencies: DiscoveredGithubCheckDependencies,
 	result: DiscoveredGithubCheckResult
 ): Promise<void> {
-	if (result.jobs.every((job) => job.status === 'ready')) {
+	if (
+		result.jobs.every((job) => job.status === 'ready') &&
+		!isRepairOffered(result)
+	) {
 		ui.info('The discovered publishing jobs already pass.');
 		return;
 	}
@@ -1213,11 +1319,39 @@ export async function runDiscoveredGithubRepair(
 		);
 	}
 
-	for (const job of result.repairableJobs) {
-		if (
-			parseExactWorkflowReference(job.workflowRef).pin.kind === 'branch' &&
-			options.allowBranchWorkflow !== true
-		) {
+	const isUnacceptedBranchWorkflow = (job: DiscoveredPublishingJob): boolean =>
+		parseExactWorkflowReference(job.workflowRef).pin.kind === 'branch' &&
+		options.allowBranchWorkflow !== true;
+	// A ready job is repairable only for the advisory build-inputs warning, so
+	// a branch workflow skips that job and leaves the other repairs to run.
+	const readyJobs = new Set(
+		result.jobs
+			.filter((job) => job.status === 'ready')
+			.map((job) => jobLabel(job))
+	);
+	const skippedJobs = result.repairableJobs.filter(
+		(job) => readyJobs.has(jobLabel(job)) && isUnacceptedBranchWorkflow(job)
+	);
+
+	for (const job of skippedJobs) {
+		ui.warn(
+			`${jobLabel(job)}: the repair leaves its rule without the build-inputs grant because ${job.workflowRef} is a branch workflow; pass --allow-branch-workflow to add the grant`
+		);
+	}
+
+	const repairableJobs = result.repairableJobs.filter(
+		(job) => !skippedJobs.includes(job)
+	);
+
+	if (repairableJobs.length === 0) {
+		finishDiscoveredGithubCheck(result);
+		return;
+	}
+
+	const repairResult = { ...result, repairableJobs };
+
+	for (const job of repairableJobs) {
+		if (isUnacceptedBranchWorkflow(job)) {
 			throw new GithubCheckOptionError(
 				'A branch workflow can change after review. Pass --allow-branch-workflow to accept future edits to that workflow.'
 			);
@@ -1240,21 +1374,28 @@ export async function runDiscoveredGithubRepair(
 	]);
 	const existing = activeMatcherRules(listed.rules);
 	const retainedGrantMissingRules = new Set<string>();
+	// The repair asks the server whether it knows the grant only for a case
+	// that lacks it or a new rule that could include it, and a failed probe is
+	// a warning, so the other repairs never depend on the probe.
+	const canGrant = memoiseProbe(
+		() =>
+			dependencies.canGrantBuildInputs?.() ??
+			canGrantBuildInputs(client.buildInputs.read)
+	);
 	const modelled = await modelRepairableJobs(
 		url,
-		result,
+		repairResult,
 		existing,
 		retainedGrantMissingRules,
 		client,
-		dependencies
+		dependencies,
+		canGrant
 	);
-	// The repair asks the server whether it knows the grant only when a new
-	// rule would include it, so the other repairs never depend on the probe.
 	const shouldGrantBuildInputs =
 		modelled.some(
 			({ job, publication, needsTrustRule }) =>
 				needsTrustRule && canReceiveBuildInputsGrant(job, publication)
-		) && (await canGrantBuildInputs(client.buildInputs.read));
+		) && (await canGrantForNewRules(canGrant, ui));
 	const requiresNewTrustRule = modelled.some((item) => item.needsTrustRule);
 
 	if (!requiresNewTrustRule && options.trustScope === 'tag-pattern') {
@@ -1406,11 +1547,13 @@ export async function runDiscoveredGithubRepair(
 			);
 		}
 
-		const permittedGrants = body.permittedGrants.filter((grant) =>
-			expected.permittedGrants.every(
-				(candidate) => !isDeepEqual(candidate, grant)
-			)
-		);
+		const permittedGrants =
+			presetUpgradeGrants(expected, body) ??
+			body.permittedGrants.filter((grant) =>
+				expected.permittedGrants.every(
+					(candidate) => !isDeepEqual(candidate, grant)
+				)
+			);
 		if (permittedGrants.length === 0) {
 			continue;
 		}
@@ -1424,6 +1567,48 @@ export async function runDiscoveredGithubRepair(
 			}
 		});
 		retainedGrantMissingRules.delete(expected.id);
+	}
+
+	for (const item of modelled) {
+		const grantRule = item.buildInputsGrantRule;
+		const expected = listed.rules.find(
+			(rule) => !rule.disabled && rule.id === grantRule?.id
+		);
+
+		if (expected === undefined) {
+			if (item.buildInputsGrantCause !== undefined) {
+				ui.warn(
+					`${jobLabel(item.job)}, ${item.publication.trigger}: ${buildInputsGrantCause(item.buildInputsGrantCause)}`
+				);
+			}
+
+			continue;
+		}
+
+		const index = extensions.findIndex(
+			(extension) => extension.expected.id === expected.id
+		);
+		const current = extensions[index];
+		const ruleGrants =
+			current?.rule.permittedGrants ?? expected.permittedGrants;
+		const grants = buildInputsGrants(item.publication, ruleGrants);
+
+		if (grants.length === 0) {
+			continue;
+		}
+
+		const extension: PlannedExtension = {
+			expected,
+			permittedGrants: [...(current?.permittedGrants ?? []), ...grants],
+			rule: { ...expected, permittedGrants: [...ruleGrants, ...grants] }
+		};
+
+		if (current === undefined) {
+			extensions.push(extension);
+			continue;
+		}
+
+		extensions[index] = extension;
 	}
 
 	const planned = activeMatcherRules([
@@ -1449,7 +1634,13 @@ export async function runDiscoveredGithubRepair(
 			check: 'planned trust rules',
 			publication: item.publication,
 			rules: candidates,
-			requests: [...item.publication.requests, ...item.read.requests],
+			requests: [
+				...item.publication.requests,
+				...item.read.requests,
+				...(item.buildInputsGrantRule === undefined
+					? []
+					: (item.publication.buildInputsRequests ?? []))
+			],
 			resources: item.read.resources
 		});
 
@@ -1487,7 +1678,7 @@ export async function runDiscoveredGithubRepair(
 
 	await checkPlannedRulesKeepOtherJobs(
 		url,
-		result,
+		repairResult,
 		branches,
 		existing,
 		planned,
@@ -1652,6 +1843,17 @@ export async function runDiscoveredGithubRepair(
 		}))
 	];
 
+	if (
+		rows.length === 0 &&
+		result.jobs.every((job) => job.status !== 'failed')
+	) {
+		ui.info(
+			'The repair leaves the trust rules unchanged. The warnings above say why.'
+		);
+		finishDiscoveredGithubCheck(result);
+		return;
+	}
+
 	if (rows.length === 0) {
 		throw new GithubRepairUnavailableError(
 			'no-change',
@@ -1751,7 +1953,7 @@ export async function runDiscoveredGithubRepair(
 		dependencies.source ??
 		githubWorkflowSource({ ...lookupOptions, shouldRevalidate: true });
 
-	for (const job of result.repairableJobs) {
+	for (const job of repairableJobs) {
 		if (job.workflowRefInput === undefined) {
 			continue;
 		}
@@ -1775,7 +1977,7 @@ export async function runDiscoveredGithubRepair(
 	}
 
 	const repairReferences = new Set(
-		result.repairableJobs.map((job) => job.workflowRef)
+		repairableJobs.map((job) => job.workflowRef)
 	);
 
 	for (const reference of repairReferences) {
@@ -1907,7 +2109,7 @@ export async function runDiscoveredGithubRepair(
 		);
 	}
 
-	const repaired = new Set(result.repairableJobs.map((job) => jobLabel(job)));
+	const repaired = new Set(repairableJobs.map((job) => jobLabel(job)));
 	const stillFailing = verified.jobs.filter(
 		(job) =>
 			repaired.has(jobLabel(job)) &&

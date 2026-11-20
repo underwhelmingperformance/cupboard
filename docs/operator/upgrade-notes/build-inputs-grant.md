@@ -12,8 +12,24 @@ The CLI therefore asks the server whether it reads build inputs, and adds the
 grant only when it does. Against an earlier server, the CLI writes the rules
 that it wrote before.
 
-Rules that an earlier release wrote keep working without the grant. Run
-`cupboard github setup` again, after upgrading the server, to add it to the
+The flake publish workflow requests the grant in its own token exchange on runs
+outside pull requests, and uses it to record build inputs on store paths that
+the cache already has. Rules that an earlier release wrote keep working without
+the grant: the token service refuses only that exchange, the publication
+succeeds, and the run root keeps the paths whose build inputs the workflow can't
+record. For a flake job that publishes with `publish: built`, the default, and
+uses a workflow release that records build inputs, `cupboard github check`
+reports such a rule as a warning that doesn't fail the check. When it cannot
+read the workflow at the job's pin, it warns that it cannot tell whether the job
+records build inputs. `cupboard github check --fix` adds only
+`build-inputs:record` to the rule that accepts the job's runs, including a rule
+with other claims than the rule that setup writes, and never adds a rule for the
+warning alone. When it cannot choose that rule, the warning says why and asks
+you to add the grant yourself: several rules with the same number of claims
+accept the runs, or the check cannot tell which rule accepts every release tag.
+`--fix` also leaves the rule unchanged, and says so, when the job uses a branch
+workflow and the command runs without `--allow-branch-workflow`. Alternatively,
+run `cupboard github setup` again, after upgrading the server, to add it to the
 branch rule that an earlier setup wrote. Setup recognises that rule only when it
 has exactly the claims and grants that the earlier setup gave it, and then adds
 the grant to the rule without asking to remove it. From then on, run

@@ -11,6 +11,7 @@ import { readResourcesSchema } from '@cupboard/protocol/read-access';
 
 import {
 	attestAttachAuthorizationDetails,
+	buildInputsRecordAuthorizationDetails,
 	cacheCreateAuthorizationDetails,
 	cacheLifecycleAuthorizationDetails,
 	confirmAuthorizationDetails,
@@ -82,6 +83,12 @@ export type PublicationCase = TriggerReference & {
 	readonly mergedCloseRequests?: readonly AuthorizationDetails[];
 	readonly claims: GithubActionsClaims;
 	readonly requests: readonly AuthorizationDetails[];
+	/**
+	The authority to record build inputs, which a flake run outside pull
+	requests asks for in its own exchange. A rule without it refuses only that
+	exchange, so the publication still succeeds.
+	*/
+	readonly buildInputsRequests?: readonly AuthorizationDetails[];
 	readonly cache?: CacheScope;
 	readonly rootPrefix?: string;
 	readonly releaseRootTemplate?: string;
@@ -1243,6 +1250,12 @@ export function modelPublishingJob(
 					cache: cache.scope
 				}),
 				requests,
+				...(job.recordsBuildInputs === true &&
+					!isPullRequest && {
+						buildInputsRequests: [
+							buildInputsRecordAuthorizationDetails({ cache: publicationCache })
+						]
+					}),
 				...(isPreset &&
 					job.trustedContributorReuse === true &&
 					entry.trigger === 'push' && {

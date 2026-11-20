@@ -24,21 +24,48 @@ const repository = 'iainlane/dotfiles';
 const tenant = new URL('https://cupboard.supply/t/laney');
 const legacyPublishingWorkflow =
 	'on: workflow_call\njobs:\n  publish:\n    steps:\n      - uses: $/actions/push\n';
+const legacyFlakeWorkflow =
+	'on: workflow_call\njobs:\n  build:\n    steps:\n      - uses: $/actions/build-cohort\n';
+const recordingFlakeWorkflow =
+	'on: workflow_call\njobs:\n  build:\n    steps:\n      - uses: $/actions/build-cohort\n        with:\n          record-build-inputs: true\n';
 
 function triggers(...events: string[]): WorkflowTrigger[] {
 	return events.map((event) => ({ event, filters: {}, hasPathFilter: false }));
 }
 
-function source(files: Readonly<Record<string, string>>): WorkflowSource {
+// Serves the cupboard workflows at their pins. An `unreadable` flake workflow
+// fails as GitHub fails a read that the token may not make.
+function source(
+	files: Readonly<Record<string, string>>,
+	flakeWorkflow: string = legacyFlakeWorkflow
+): WorkflowSource {
+	const cupboardWorkflows: Readonly<Record<string, string>> = {
+		'.github/workflows/cupboard-publish.yml': legacyPublishingWorkflow,
+		'.github/workflows/cupboard-flake-publish.yml': flakeWorkflow,
+		// The trusted wrapper has no cohort step: its publication job calls the
+		// flake workflow at the same reference.
+		'.github/workflows/cupboard-flake-publish-trusted.yml':
+			'on: workflow_call\njobs:\n  publication:\n    uses: $/.github/workflows/cupboard-flake-publish.yml\n'
+	};
+
 	return {
 		resolveBranch: () => Promise.resolve('a'.repeat(40)),
 		list: () => Promise.resolve(Object.keys(files)),
 		read: (selectedRepository, path) => {
-			const content =
+			if (
+				flakeWorkflow === 'unreadable' &&
 				selectedRepository === 'underwhelmingperformance/cupboard' &&
-				path === '.github/workflows/cupboard-publish.yml'
-					? legacyPublishingWorkflow
-					: files[path];
+				path === '.github/workflows/cupboard-flake-publish.yml'
+			) {
+				return Promise.reject(
+					new WorkflowDiscoveryError('the workflow is not readable')
+				);
+			}
+
+			const content =
+				(selectedRepository === 'underwhelmingperformance/cupboard'
+					? cupboardWorkflows[path]
+					: undefined) ?? files[path];
 
 			return content === undefined
 				? Promise.reject(new Error(`Missing fixture ${path}`))
@@ -2137,6 +2164,119 @@ it.each([
 					workflowRef:
 						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
 					inputs: { url: tenant.href, preset: 'pull-request-and-branch' },
+					triggers: triggers('push')
+				}
+			],
+			unverified: []
+		});
+	}
+);
+
+it.each([
+	{
+		name: 'a workflow that records build inputs',
+		flakeWorkflow: recordingFlakeWorkflow,
+		inputs: '',
+		parsedInputs: {},
+		recordsBuildInputs: true
+	},
+	{
+		name: 'a workflow release without the input',
+		flakeWorkflow: legacyFlakeWorkflow,
+		inputs: '',
+		parsedInputs: {},
+		recordsBuildInputs: false
+	},
+	{
+		name: 'a job that publishes only its outputs',
+		flakeWorkflow: recordingFlakeWorkflow,
+		inputs: '      publish: outputs\n',
+		parsedInputs: { publish: 'outputs' },
+		recordsBuildInputs: false
+	},
+	{
+		name: 'a job that only reads',
+		flakeWorkflow: recordingFlakeWorkflow,
+		inputs: '      push: false\n',
+		parsedInputs: { push: false },
+		recordsBuildInputs: false
+	},
+	{
+		name: 'a workflow whose cohort step turns recording off',
+		flakeWorkflow: recordingFlakeWorkflow.replace(
+			'record-build-inputs: true',
+			'record-build-inputs: false'
+		),
+		inputs: '',
+		parsedInputs: {},
+		recordsBuildInputs: false
+	},
+	{
+		name: 'a workflow whose cohort step records only outside pull requests',
+		flakeWorkflow: recordingFlakeWorkflow.replace(
+			'record-build-inputs: true',
+			"record-build-inputs: ${{ github.event_name != 'pull_request' }}"
+		),
+		inputs: '',
+		parsedInputs: {},
+		recordsBuildInputs: true
+	},
+	{
+		name: 'a workflow that the check cannot read',
+		flakeWorkflow: 'unreadable',
+		inputs: '',
+		parsedInputs: {},
+		recordsBuildInputs: false,
+		unverified: 'the workflow is not readable'
+	},
+	{
+		name: 'a job that calls the trusted workflow',
+		workflow: 'cupboard-flake-publish-trusted.yml',
+		flakeWorkflow: recordingFlakeWorkflow,
+		inputs: '',
+		parsedInputs: {},
+		recordsBuildInputs: true
+	}
+])(
+	'discovers whether a flake job records build inputs for $name',
+	async ({
+		workflow = 'cupboard-flake-publish.yml',
+		flakeWorkflow,
+		inputs,
+		parsedInputs,
+		recordsBuildInputs,
+		unverified
+	}) => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source(
+				{
+					'.github/workflows/ci.yml': `on: push\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/${workflow}@v0.0.35\n    with:\n      url: ${tenant.href}\n${inputs}`
+				},
+				flakeWorkflow
+			)
+		);
+
+		expect(result).toStrictEqual({
+			revision: 'a'.repeat(40),
+			jobs: [
+				{
+					caller: '.github/workflows/ci.yml',
+					job: 'publish',
+					kind: 'flake',
+					...(workflow === 'cupboard-flake-publish-trusted.yml' && {
+						trustedContributorReuse: true,
+						pullRequestsReadPermission: 'unknown'
+					}),
+					...(recordsBuildInputs && { recordsBuildInputs: true }),
+					...(unverified !== undefined && {
+						buildInputsRecordingUnverified: unverified
+					}),
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					inputs: { url: tenant.href, ...parsedInputs },
 					triggers: triggers('push')
 				}
 			],

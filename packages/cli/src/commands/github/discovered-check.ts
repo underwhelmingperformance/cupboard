@@ -19,6 +19,7 @@ import {
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 
+import { isAbortError } from '../../abort.ts';
 import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError,
@@ -57,6 +58,10 @@ import {
 } from './finding.ts';
 import {
 	BranchWorkflowTrustFinding,
+	BuildInputsGrantMissingFinding,
+	type BuildInputsGrantRepair,
+	BuildInputsGrantUnverifiedFinding,
+	BuildInputsRecordingUnverifiedFinding,
 	CheckFinding,
 	FailedCheckFinding,
 	PassedCheckFinding,
@@ -77,7 +82,10 @@ import {
 } from './publication.ts';
 import { pullRequestLifecycleFindings } from './pull-request-lifecycle.ts';
 import { publicationReadAuthority } from './read-authority.ts';
-import { checkPublicationTrust } from './release-authority.ts';
+import {
+	checkPublicationTrust,
+	ReleaseTagCoverageFinding
+} from './release-authority.ts';
 import {
 	RepositoryTrustRuleMissingFinding,
 	TrustRuleAudienceMismatchFinding,
@@ -108,6 +116,11 @@ export interface DiscoveredGithubCheckDependencies {
 	readonly verifyWorkflowReference?: typeof verifyWorkflowReference;
 	readonly fetchCacheInfo: (url: URL) => Promise<CacheInfo>;
 	readonly fetchCacheAccess: (url: URL) => Promise<CacheAccessMode>;
+	/**
+	Whether the server knows `build-inputs:record`, so that a trust rule may
+	grant it. Without it, the check does not model the grant.
+	*/
+	readonly canGrantBuildInputs?: () => Promise<boolean>;
 	readonly signal?: AbortSignal;
 }
 
@@ -257,6 +270,14 @@ function isRepairableJob(
 	job: PublishingJobResult,
 	identity: RepositoryIdentity
 ): boolean {
+	if (job.status === 'ready') {
+		return job.findings.some(
+			({ finding }) =>
+				finding instanceof BuildInputsGrantMissingFinding &&
+				finding.repair === 'extend'
+		);
+	}
+
 	return (
 		job.status === 'failed' &&
 		job.findings.every(({ finding }) => isRepairableFinding(finding, identity))
@@ -488,6 +509,90 @@ function trustFindings(
 		: [trust];
 }
 
+/**
+Whether the rule that the server selects for `publication` would refuse the
+build-inputs exchange of a flake run.
+*/
+async function buildInputsGrantFindings(
+	publication: PublicationCase,
+	rules: readonly OidcTrustRule[],
+	dependencies: Pick<DiscoveredGithubCheckDependencies, 'canGrantBuildInputs'>
+): Promise<CheckFinding[]> {
+	let canGrant: boolean;
+
+	try {
+		canGrant = (await dependencies.canGrantBuildInputs?.()) === true;
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+
+		return [new BuildInputsGrantUnverifiedFinding(error)];
+	}
+
+	return canGrant && isBuildInputsGrantMissing(publication, rules)
+		? [
+				new BuildInputsGrantMissingFinding(
+					buildInputsGrantRepair(publication, rules).kind
+				)
+			]
+		: [];
+}
+
+/**
+How the repair can add `build-inputs:record` for a case whose rules lack it.
+It extends the rule that the server selects for the case's build-inputs
+exchange when exactly one rule accepts the exchange. A new exact rule would
+take precedence over that rule, so the repair never writes one for the grant
+alone. An interactive rule grants every operation, so it never lacks the
+grant.
+*/
+export function buildInputsGrantRepair(
+	publication: PublicationCase,
+	rules: readonly OidcTrustRule[]
+):
+	| { readonly kind: 'extend'; readonly rule: OidcTrustRule }
+	| { readonly kind: Exclude<BuildInputsGrantRepair, 'extend'> } {
+	const finding = checkPublicationTrust({
+		check: 'build inputs grant',
+		publication,
+		rules,
+		requests: publication.buildInputsRequests ?? [],
+		resources: []
+	});
+
+	if (finding instanceof ReleaseTagCoverageFinding) {
+		return { kind: 'release-coverage' };
+	}
+
+	if (
+		!(finding instanceof TrustRuleGrantMissingFinding) ||
+		finding.rules.length !== 1
+	) {
+		return { kind: 'ambiguous' };
+	}
+
+	return { kind: 'extend', rule: finding.rules[0] };
+}
+
+export function isBuildInputsGrantMissing(
+	publication: PublicationCase,
+	rules: readonly OidcTrustRule[]
+): boolean {
+	const requests = publication.buildInputsRequests ?? [];
+
+	return (
+		requests.length > 0 &&
+		checkPublicationTrust({
+			check: 'build inputs grant',
+			publication,
+			rules,
+			requests,
+			resources: []
+		}).status !== 'ok'
+	);
+}
+
 function readAuthenticationFinding(
 	resource: 'cache' | 'view',
 	wiring: ReadCredentialWiring
@@ -534,6 +639,30 @@ async function inspectPublication(
 		[...publication.requests, ...read.requests],
 		read.resources
 	);
+	const buildInputsRequests = publication.buildInputsRequests ?? [];
+
+	if (
+		buildInputsRequests.length > 0 &&
+		findings.every((finding) => finding.status === 'ok')
+	) {
+		findings.push(
+			...(await buildInputsGrantFindings(publication, rules, dependencies))
+		);
+	}
+
+	if (
+		job.buildInputsRecordingUnverified !== undefined &&
+		publication.trigger !== 'pull_request' &&
+		findings.every((finding) => finding.status === 'ok')
+	) {
+		findings.push(
+			new BuildInputsRecordingUnverifiedFinding(
+				job.workflowRef,
+				job.buildInputsRecordingUnverified
+			)
+		);
+	}
+
 	for (const [resource, access, wiring] of [
 		['cache', read.cacheAccess, read.cacheWiring],
 		['view', read.viewAccess, read.viewWiring],

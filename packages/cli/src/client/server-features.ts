@@ -66,3 +66,30 @@ export async function canGrantBuildInputs(
 		throw error;
 	}
 }
+
+/**
+Wraps a server feature probe so that later calls reuse its answer. A probe
+that fails is asked again on the next call, so a transient failure during a
+check does not decide a repair that runs afterwards.
+*/
+export function memoiseProbe<Answer>(
+	ask: () => Promise<Answer>
+): () => Promise<Answer> {
+	let pending: Promise<Answer> | undefined;
+	const settle = async (): Promise<Answer> => {
+		try {
+			// `await` suspends even when `ask` throws before it returns a
+			// promise, so the catch clears `pending` after it holds this call.
+			return await Promise.try(ask);
+		} catch (error) {
+			pending = undefined;
+			throw error;
+		}
+	};
+
+	return () => {
+		pending ??= settle();
+
+		return pending;
+	};
+}
