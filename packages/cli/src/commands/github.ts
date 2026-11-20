@@ -32,7 +32,8 @@ import { cachePages, listingLimits } from '../client/listings.ts';
 import { type CallOptions, tenantRpc } from '../client/orpc.ts';
 import {
 	type BuildInputsReadProbe,
-	canGrantBuildInputs
+	canGrantBuildInputs,
+	memoiseProbe
 } from '../client/server-features.ts';
 import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
 import {
@@ -1428,6 +1429,9 @@ export function registerGithubCommands(
 				...(programOptions.signal !== undefined && {
 					signal: programOptions.signal
 				}),
+				canGrantBuildInputs: memoiseProbe(() =>
+					canGrantBuildInputs(rpc.buildInputs.read)
+				),
 				fetchCacheAccess: cacheAccessFetcher({
 					signal: programOptions.signal
 				}),

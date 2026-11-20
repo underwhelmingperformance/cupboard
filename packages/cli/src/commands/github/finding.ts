@@ -232,6 +232,98 @@ export class RootGrantPrefixUnverifiedFinding extends CheckFinding {
 	}
 }
 
+/**
+How `cupboard github check --fix` can add `build-inputs:record` for a case:
+`extend` when it can extend the one rule that accepts the case, and otherwise
+why it cannot.
+*/
+export type BuildInputsGrantRepair =
+	'extend' | 'ambiguous' | 'release-coverage';
+
+/**
+Why the repair leaves the rules without `build-inputs:record` for a case.
+`probe-failed` means that the repair could not ask the server whether it can
+grant the operation.
+*/
+export type BuildInputsGrantCause =
+	Exclude<BuildInputsGrantRepair, 'extend'> | 'probe-failed';
+
+export function buildInputsGrantCause(cause: BuildInputsGrantCause): string {
+	switch (cause) {
+		case 'ambiguous': {
+			return 'several trust rules with the same number of claims accept these runs, so github check --fix cannot choose one to extend; add build-inputs:record to the rule that should accept them';
+		}
+		case 'release-coverage': {
+			return 'the check cannot tell which trust rule accepts every release tag, so github check --fix cannot extend one; add build-inputs:record to the rule that accepts the release runs';
+		}
+		case 'probe-failed': {
+			return 'the repair could not ask the server whether it can grant build-inputs:record, so it leaves the rules unchanged; run the repair again';
+		}
+	}
+}
+
+/**
+The trust rule permits the publication but not `build-inputs:record`. The
+flake workflow then keeps dependency outputs through the run root, and the
+publication still succeeds, so the finding does not fail the job.
+*/
+export class BuildInputsGrantMissingFinding extends CheckFinding {
+	readonly status = 'ok' as const;
+
+	constructor(
+		public readonly repair: BuildInputsGrantRepair = 'extend',
+		check = 'build inputs grant'
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `warning: the trust rule does not grant build-inputs:record, so the run root keeps the dependency outputs whose build inputs the workflow cannot record; ${
+			this.repair === 'extend'
+				? 'run github check with --fix to add the grant'
+				: buildInputsGrantCause(this.repair)
+		}`;
+	}
+}
+
+/**
+The check cannot ask the server whether it knows `build-inputs:record`. The
+grant only affects which build inputs the cache records, so the finding does
+not fail the job.
+*/
+export class BuildInputsGrantUnverifiedFinding extends CheckFinding {
+	readonly status = 'ok' as const;
+
+	constructor(public readonly reason: unknown) {
+		super('build inputs grant');
+	}
+
+	detail(): string {
+		return 'warning: the check cannot tell whether the server can grant build-inputs:record, so it does not check the grant';
+	}
+}
+
+/**
+The check cannot read the flake workflow at the job's pinned reference, so it
+cannot tell whether the job's runs request `build-inputs:record`. The grant
+only affects which build inputs the cache records, so the finding does not
+fail the job.
+*/
+export class BuildInputsRecordingUnverifiedFinding extends CheckFinding {
+	readonly status = 'ok' as const;
+
+	constructor(
+		public readonly workflowReference: string,
+		public readonly reason: string
+	) {
+		super('build inputs grant');
+	}
+
+	detail(): string {
+		return `warning: the check cannot read ${this.workflowReference}, so it cannot tell whether these runs request build-inputs:record: ${this.reason}`;
+	}
+}
+
 export class TrustedContributorReuseFinding extends CheckFinding {
 	readonly status = 'ok' as const;
 	constructor(public readonly isEnabled: boolean) {

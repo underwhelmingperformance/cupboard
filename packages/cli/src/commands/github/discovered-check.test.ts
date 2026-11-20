@@ -51,7 +51,7 @@ import {
 	SharedPullRequestCacheFinding,
 	WorkflowPinFailedFinding
 } from './discovered-check.ts';
-import { type WorkflowSource } from './discovery.ts';
+import { WorkflowDiscoveryError, type WorkflowSource } from './discovery.ts';
 import {
 	PassedCheckFinding,
 	PullRequestCacheAccessMismatchFinding,
@@ -789,6 +789,159 @@ const source: WorkflowSource = {
 	list: () => Promise.resolve([path]),
 	read: () => Promise.resolve(workflow)
 };
+
+const recordingFlakeWorkflow =
+	'on: workflow_call\njobs:\n  build:\n    steps:\n      - uses: $/actions/build-cohort\n        with:\n          record-build-inputs: true\n';
+
+it.each([
+	{
+		name: 'a rule without the grant on a server that knows it',
+		shouldRuleGrant: false,
+		canGrant: true,
+		findings: [
+			{
+				check: 'build inputs grant',
+				status: 'ok',
+				detail:
+					'warning: the trust rule does not grant build-inputs:record, so the run root keeps the dependency outputs whose build inputs the workflow cannot record; run github check with --fix to add the grant'
+			}
+		],
+		repairable: 1
+	},
+	{
+		name: 'a rule with the grant',
+		shouldRuleGrant: true,
+		canGrant: true,
+		findings: [],
+		repairable: 0
+	},
+	{
+		name: 'a server that does not know the grant',
+		shouldRuleGrant: false,
+		canGrant: false,
+		findings: [],
+		repairable: 0
+	},
+	{
+		name: 'a workflow release that does not record build inputs',
+		shouldRuleGrant: false,
+		canGrant: true,
+		flakeWorkflow:
+			'on: workflow_call\njobs:\n  build:\n    steps:\n      - uses: $/actions/build-cohort\n',
+		probes: [],
+		findings: [],
+		repairable: 0
+	},
+	{
+		name: 'a workflow that the check cannot read',
+		shouldRuleGrant: false,
+		canGrant: true,
+		flakeWorkflow: 'unreadable',
+		probes: [],
+		findings: [
+			{
+				check: 'build inputs grant',
+				status: 'ok',
+				detail:
+					'warning: the check cannot read underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35, so it cannot tell whether these runs request build-inputs:record: the workflow is not readable'
+			}
+		],
+		repairable: 0
+	},
+	{
+		name: 'a probe that fails',
+		shouldRuleGrant: false,
+		canGrant: true,
+		isProbeFailing: true,
+		findings: [
+			{
+				check: 'build inputs grant',
+				status: 'ok',
+				detail:
+					'warning: the check cannot tell whether the server can grant build-inputs:record, so it does not check the grant'
+			}
+		],
+		repairable: 0
+	}
+])(
+	'checks the build-inputs grant of a flake branch job for $name',
+	async ({
+		shouldRuleGrant,
+		canGrant,
+		isProbeFailing = false,
+		flakeWorkflow = recordingFlakeWorkflow,
+		probes: expectedProbes = ['probe'],
+		findings,
+		repairable
+	}) => {
+		const workflowReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+		const branch = githubBranchAddBody(
+			tenant,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{
+				repo: repository,
+				branch: 'main',
+				jobWorkflowRef: workflowReference,
+				shouldGrantBuildInputs: shouldRuleGrant
+			}
+		);
+		const probes: string[] = [];
+		const { client, dependencies } = fixture({
+			rules: [{ ...branch, id: 'branch', disabled: false }],
+			dependencies: {
+				canGrantBuildInputs: () => {
+					probes.push('probe');
+
+					return isProbeFailing
+						? Promise.reject(new Error('edge refused the probe'))
+						: Promise.resolve(canGrant);
+				},
+				source: {
+					...source,
+					read: (selectedRepository) =>
+						selectedRepository === 'underwhelmingperformance/cupboard' &&
+						flakeWorkflow === 'unreadable'
+							? Promise.reject(
+									new WorkflowDiscoveryError('the workflow is not readable')
+								)
+							: Promise.resolve(
+									selectedRepository === 'underwhelmingperformance/cupboard'
+										? flakeWorkflow
+										: `on:\n  push:\n    branches: [main]\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35\n    with:\n      url: ${tenant.href}\n      root-prefix: github:${repository}/main\n`
+								)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+
+		expect({
+			probes,
+			jobs: result.jobs.map((job) => ({
+				status: job.status,
+				findings: job.findings
+					.filter(({ finding }) => finding.check === 'build inputs grant')
+					.map(({ finding }) => finding.toJSON())
+			})),
+			repairable: result.repairableJobs.length
+		}).toStrictEqual({
+			probes: expectedProbes,
+			jobs: [{ status: 'ready', findings }],
+			repairable
+		});
+	}
+);
 
 it('models existing branch workflow trust and reports future edits', async () => {
 	const workflowReference =

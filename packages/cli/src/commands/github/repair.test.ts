@@ -99,6 +99,8 @@ jobs:
 `;
 const legacyPublishingWorkflow =
 	'on: workflow_call\njobs:\n  publish:\n    steps:\n      - uses: $/actions/push\n';
+const recordingFlakeWorkflow =
+	'on: workflow_call\njobs:\n  build:\n    steps:\n      - uses: $/actions/build-cohort\n        with:\n          record-build-inputs: true\n';
 const unmergedBranchContent = content.replace(
 	'branches: [main]',
 	'branches: [feature/publish]'
@@ -149,6 +151,7 @@ async function fixture(
 		fetchCacheAccess?: (target: URL) => Promise<CacheAccessMode>;
 		isEarlierServer?: boolean;
 		isProbeFailing?: boolean;
+		canCheckGrantBuildInputs?: boolean;
 	} = {}
 ) {
 	const { ui, captured } = fakeCliUi(
@@ -175,7 +178,9 @@ async function fixture(
 		read: (selectedRepository: string, selectedPath: string) =>
 			Promise.resolve(
 				selectedRepository === 'underwhelmingperformance/cupboard'
-					? (options.publishingWorkflow ?? legacyPublishingWorkflow)
+					? selectedPath === '.github/workflows/cupboard-flake-publish.yml'
+						? recordingFlakeWorkflow
+						: (options.publishingWorkflow ?? legacyPublishingWorkflow)
 					: (options.workflowFiles?.[selectedPath] ?? workflowContent)
 			)
 	};
@@ -278,7 +283,11 @@ async function fixture(
 		},
 		fetchCacheAccess:
 			options.fetchCacheAccess ??
-			(() => Promise.resolve(options.cacheAccess ?? 'public'))
+			(() => Promise.resolve(options.cacheAccess ?? 'public')),
+		...(options.canCheckGrantBuildInputs !== undefined && {
+			canGrantBuildInputs: () =>
+				Promise.resolve(options.canCheckGrantBuildInputs === true)
+		})
 	};
 	const check = await inspectDiscoveredGithubCheck(
 		url,
@@ -1876,6 +1885,57 @@ it.each([
 	}).toStrictEqual(expected);
 });
 
+it('offers a repair for a reported warning when no job failed', async () => {
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{
+				repo: repository,
+				branch: 'main',
+				jobWorkflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+			}
+		),
+		id: 'branch',
+		disabled: false
+	});
+	const { check } = await fixture(
+		undefined,
+		`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`,
+		{ rules: [existing], canCheckGrantBuildInputs: true }
+	);
+	const { ui, captured } = fakeCliUi({ interactive: true, confirm: 'no' });
+	const failure = await rejection(
+		offerDiscoveredGithubRepair(check, ui, false, () => Promise.resolve())
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => job.status),
+		confirms: captured.confirms.map((entry) => entry.message),
+		failure
+	}).toStrictEqual({
+		statuses: ['ready'],
+		confirms: ['Review a repair for the reported warnings?'],
+		failure: undefined
+	});
+});
+
 const prefixViewPushWorkflow = `
 on:
   push:
@@ -2339,6 +2399,638 @@ jobs:
 		});
 	}
 );
+
+it('adds the build-inputs grant to the rule of a flake branch job that publishes without it', async () => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: reference }
+		),
+		id: 'branch',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`,
+		{ rules: [existing], canCheckGrantBuildInputs: true }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => job.status),
+		error,
+		added,
+		extended: extended.map(({ expected, permittedGrants }) => ({
+			rule: expected.id,
+			actions: permittedGrants.flatMap((grant) =>
+				grant.type === 'cupboard_cache' ? grant.actions : []
+			)
+		}))
+	}).toStrictEqual({
+		statuses: ['ready'],
+		error: undefined,
+		added: [],
+		extended: [{ rule: 'branch', actions: ['build-inputs:record'] }]
+	});
+});
+
+it('skips a warning-only job on a branch workflow and repairs the other jobs', async () => {
+	const flakeReference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main';
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: flakeReference }
+		),
+		id: 'branch',
+		disabled: false
+	});
+	const { ui, captured, added, extended, client, dependencies, check } =
+		await fixture(
+			{ interactive: true, confirm: 'yes' },
+			`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: systems
+`,
+			{ rules: [existing], canCheckGrantBuildInputs: true }
+		);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => [job.job, job.status]),
+		error,
+		added: added.map((body) => body.claims.job_workflow_ref),
+		extended,
+		warnings: captured.warnings
+	}).toStrictEqual({
+		statuses: [
+			['publish', 'ready'],
+			['packages', 'failed']
+		],
+		error: undefined,
+		added: [
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35'
+		],
+		extended: [],
+		warnings: [
+			`${path}, publish: the repair leaves its rule without the build-inputs grant because ${flakeReference} is a branch workflow; pass --allow-branch-workflow to add the grant`
+		]
+	});
+});
+
+it('extends the operator rule that accepts a warning-only job with only the build-inputs grant', async () => {
+	const pattern =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: pattern }
+		),
+		id: 'tag-pattern',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`,
+		{ rules: [existing], canCheckGrantBuildInputs: true }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => job.status),
+		error,
+		added,
+		extended: extended.map(({ expected, permittedGrants }) => ({
+			rule: expected.id,
+			permittedGrants
+		}))
+	}).toStrictEqual({
+		statuses: ['ready'],
+		error: undefined,
+		added: [],
+		extended: [
+			{
+				rule: 'tag-pattern',
+				permittedGrants: [buildCacheGrant({ allow: ['build-inputs'] })]
+			}
+		]
+	});
+});
+
+function equalBranchRules(): OidcTrustSummary[] {
+	const body = githubBranchAddBody(
+		url,
+		{
+			repositoryId: 1234,
+			repositoryOwnerId: 5678,
+			fullName: repository,
+			defaultBranch: 'main'
+		},
+		{
+			repo: repository,
+			branch: 'main',
+			jobWorkflowRef:
+				'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+		}
+	);
+
+	return ['branch', 'manual'].map((id) =>
+		oidcTrustSummarySchema.parse({ ...body, id, disabled: false })
+	);
+}
+
+const flakePushWorkflow = `
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`;
+
+it('leaves the rules unchanged and says why when two rules of equal specificity accept a warning-only job', async () => {
+	const { ui, captured, added, extended, client, dependencies, check } =
+		await fixture({ interactive: true, confirm: 'yes' }, flakePushWorkflow, {
+			rules: equalBranchRules(),
+			canCheckGrantBuildInputs: true
+		});
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		jobs: check.jobs.map((job) => ({
+			status: job.status,
+			findings: job.findings
+				.filter(({ finding }) => finding.check === 'build inputs grant')
+				.map(({ finding }) => finding.toJSON())
+		})),
+		repairable: check.repairableJobs.length,
+		error,
+		added,
+		extended,
+		infos: captured.infos
+	}).toStrictEqual({
+		jobs: [
+			{
+				status: 'ready',
+				findings: [
+					{
+						check: 'build inputs grant',
+						status: 'ok',
+						detail:
+							'warning: the trust rule does not grant build-inputs:record, so the run root keeps the dependency outputs whose build inputs the workflow cannot record; several trust rules with the same number of claims accept these runs, so github check --fix cannot choose one to extend; add build-inputs:record to the rule that should accept them'
+					}
+				]
+			}
+		],
+		repairable: 0,
+		error: undefined,
+		added: [],
+		extended: [],
+		infos: ['The discovered publishing jobs already pass.']
+	});
+});
+
+it('adds no separate build-inputs grant when the extension for a failed job already covers it', async () => {
+	const [branch] = equalBranchRules();
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		`${flakePushWorkflow}  other:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/other
+`,
+		{
+			rules: branch === undefined ? [] : [branch],
+			canCheckGrantBuildInputs: true
+		}
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => [job.job, job.status]),
+		error,
+		added,
+		extended: extended.map(({ expected, permittedGrants }) => ({
+			rule: expected.id,
+			grants: permittedGrants.map((grant) =>
+				grant.type === 'cupboard_cache' ? grant.actions : grant.type
+			)
+		}))
+	}).toStrictEqual({
+		statuses: [
+			['publish', 'ready'],
+			['other', 'failed']
+		],
+		error: undefined,
+		added: [],
+		extended: [
+			{
+				rule: 'branch',
+				grants: [
+					[
+						'upload:negotiate',
+						'upload:status',
+						'upload:commit',
+						'upload:confirm',
+						'build-inputs:record',
+						'attestation:negotiate',
+						'attestation:attach',
+						'root:set',
+						'root:list',
+						'root:attach'
+					]
+				]
+			}
+		]
+	});
+});
+
+it('ends with a message and changes nothing when its probe fails for a warning-only job', async () => {
+	const [branch] = equalBranchRules();
+	const { ui, captured, added, extended, client, dependencies, check } =
+		await fixture({ interactive: true, confirm: 'yes' }, flakePushWorkflow, {
+			rules: branch === undefined ? [] : [branch],
+			canCheckGrantBuildInputs: true
+		});
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			{
+				...dependencies,
+				canGrantBuildInputs: () =>
+					Promise.reject(new Error('the edge refused the probe'))
+			},
+			check
+		)
+	);
+
+	expect({
+		repairable: check.repairableJobs.length,
+		error,
+		added,
+		extended,
+		infos: captured.infos,
+		probeWarnings: captured.warnings.filter((warning) =>
+			warning.includes('could not ask the server')
+		).length
+	}).toStrictEqual({
+		repairable: 1,
+		error: undefined,
+		added: [],
+		extended: [],
+		infos: [
+			'The repair leaves the trust rules unchanged. The warnings above say why.'
+		],
+		probeWarnings: 1
+	});
+});
+
+it('still fails for an unrepairable sibling after it skips an advisory job on a branch workflow', async () => {
+	const flakeReference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main';
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: flakeReference }
+		),
+		id: 'branch',
+		disabled: false
+	});
+	const packagesPath = '.github/workflows/packages.yml';
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		undefined,
+		{
+			rules: [existing],
+			canCheckGrantBuildInputs: true,
+			workflowFiles: {
+				[path]: flakePushWorkflow.replace('@v0.0.35', '@main'),
+				[packagesPath]: `
+on: [push, pull_request]
+jobs:
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+`
+			}
+		}
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => [job.caller, job.status]),
+		failed: error instanceof GithubCheckFailedError ? error.checks : error,
+		added,
+		extended
+	}).toStrictEqual({
+		statuses: [
+			[packagesPath, 'failed'],
+			[path, 'ready']
+		],
+		failed: [`${packagesPath}, packages`],
+		added: [],
+		extended: []
+	});
+});
+
+it('still reports an unverified sibling when the repair has nothing to change', async () => {
+	const [branch] = equalBranchRules();
+	const { ui, captured, added, extended, client, dependencies, check } =
+		await fixture(
+			{ interactive: true, confirm: 'yes' },
+			`${flakePushWorkflow}  dynamic:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: \${{ vars.CUPBOARD_URL }}
+`,
+			{
+				rules: branch === undefined ? [] : [branch],
+				canCheckGrantBuildInputs: true
+			}
+		);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			{
+				...dependencies,
+				canGrantBuildInputs: () =>
+					Promise.reject(new Error('the edge refused the probe'))
+			},
+			check
+		)
+	);
+
+	expect({
+		incomplete:
+			error instanceof GithubCheckIncompleteError ? error.checks : error,
+		added,
+		extended,
+		infos: captured.infos
+	}).toStrictEqual({
+		incomplete: [`${path}, dynamic`],
+		added: [],
+		extended: [],
+		infos: [
+			'The repair leaves the trust rules unchanged. The warnings above say why.'
+		]
+	});
+});
+
+it('repairs a failed release case when the build-inputs probe fails', async () => {
+	const pattern =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: pattern }
+		),
+		id: 'tag-pattern',
+		disabled: false
+	});
+	const { ui, captured, added, extended, client, dependencies, check } =
+		await fixture(
+			undefined,
+			`
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`,
+			{ rules: [existing], isProbeFailing: true }
+		);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		error,
+		added: added.map((body) => ({
+			trigger: body.claims.event_name ?? body.claims.ref,
+			actions: body.permittedGrants.flatMap((grant) =>
+				grant.type === 'cupboard_cache' ? grant.actions : []
+			)
+		})),
+		extended,
+		probeWarnings: captured.warnings.filter((warning) =>
+			warning.includes('could not ask the server')
+		).length
+	}).toStrictEqual({
+		error: undefined,
+		added: [
+			{
+				trigger: 'release',
+				actions: [
+					'upload:negotiate',
+					'upload:status',
+					'upload:commit',
+					'upload:confirm',
+					'attestation:negotiate',
+					'attestation:attach',
+					'root:set',
+					'root:list',
+					'root:attach'
+				]
+			}
+		],
+		extended: [],
+		probeWarnings: 2
+	});
+});
+
+it('adds no rule for a missing build-inputs grant that an earlier server cannot grant', async () => {
+	const pattern =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+	const existing = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: pattern }
+		),
+		id: 'tag-pattern',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		`
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`,
+		{ rules: [existing], isEarlierServer: true }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		error,
+		triggers: added.map((body) => body.claims.event_name ?? body.claims.ref),
+		extended
+	}).toStrictEqual({ error: undefined, triggers: ['release'], extended: [] });
+});
 
 const upgradeWorkflow = `
 on:

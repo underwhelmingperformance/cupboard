@@ -85,6 +85,18 @@ export interface DiscoveredPublishingJob {
 	Set only when the referenced push step specifies a nonempty run-root input.
 	*/
 	readonly installableRunRoot?: true;
+	/**
+	Set for a flake job whose cohort step at the pinned workflow reference
+	accepts `record-build-inputs`, so that its runs request
+	`build-inputs:record`.
+	*/
+	readonly recordsBuildInputs?: true;
+	/**
+	Set for a flake job when the check cannot read the flake workflow at its
+	pinned reference, with the reason. The check then cannot tell whether the
+	job's runs request `build-inputs:record`.
+	*/
+	readonly buildInputsRecordingUnverified?: string;
 	readonly workflowRef: string;
 	readonly workflowRefInput?: string;
 	readonly inputs: WorkflowInputs;
@@ -807,6 +819,47 @@ export async function discoverPublishingJobs(
 		return workflow;
 	}
 
+	async function flakeWorkflowRecording(
+		workflowReference: string
+	): Promise<'records' | 'does-not-record' | { readonly unreadable: string }> {
+		const selected = parseExactWorkflowReference(workflowReference);
+		let flakeWorkflow: Workflow;
+
+		try {
+			flakeWorkflow = await readWorkflow(
+				selected.path,
+				selected.pin.value,
+				`${selected.owner}/${selected.repo}`
+			);
+		} catch (error) {
+			if (
+				error instanceof WorkflowDiscoveryError ||
+				error instanceof GithubPermissionError
+			) {
+				return { unreadable: error.message };
+			}
+
+			throw error;
+		}
+
+		// A literal false turns recording off. An expression, such as the
+		// workflow's check of the event name, can turn it on.
+		const doesRecord = Object.values(flakeWorkflow.jobs ?? {})
+			.flatMap((job) => job.steps ?? [])
+			.some((step) => {
+				const value = step.with?.['record-build-inputs'];
+
+				return (
+					step.uses === '$/actions/build-cohort' &&
+					value !== undefined &&
+					value !== false &&
+					value !== 'false'
+				);
+			});
+
+		return doesRecord ? 'records' : 'does-not-record';
+	}
+
 	function readAction(
 		directory: string,
 		reference: string
@@ -1205,6 +1258,13 @@ export async function discoverPublishingJobs(
 				);
 			}
 
+			const recording =
+				kind === 'flake' &&
+				(supplied.publish ?? 'built') === 'built' &&
+				supplied.push !== false
+					? await flakeWorkflowRecording(workflowReference)
+					: 'does-not-record';
+
 			const keys = secretKeys(job.secrets, context.secretKeys);
 			const readSecrets = readCredentialWiring(keys);
 
@@ -1217,6 +1277,10 @@ export async function discoverPublishingJobs(
 					pullRequestsReadPermission: pullRequestsPermission
 				}),
 				...(hasInstallableRunRoot && { installableRunRoot: true as const }),
+				...(recording === 'records' && { recordsBuildInputs: true as const }),
+				...(typeof recording === 'object' && {
+					buildInputsRecordingUnverified: recording.unreadable
+				}),
 				workflowRef: workflowReference,
 				...(!pin.startsWith('refs/') &&
 					parseExactWorkflowReference(workflowReference).pin.kind ===

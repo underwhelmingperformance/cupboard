@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	attestAttachAuthorizationDetails,
+	buildInputsRecordAuthorizationDetails,
 	cacheCreateAuthorizationDetails,
 	cacheLifecycleAuthorizationDetails,
 	confirmAuthorizationDetails,
@@ -869,6 +870,22 @@ describe('modelPublishingJob', () => {
 		}
 	);
 
+	it('requests no build-inputs grant for a flake job that does not record build inputs', () => {
+		const recording = modelPublishingJob(
+			{ ...job, recordsBuildInputs: true },
+			identity,
+			tenant,
+			'main'
+		);
+
+		expect(modelPublishingJob(job, identity, tenant, 'main')).toStrictEqual({
+			...recording,
+			cases: recording.cases.map(
+				({ buildInputsRequests: _requests, ...publication }) => publication
+			)
+		});
+	});
+
 	it('models the installable workflow with explicit attest: true', () => {
 		const baseline = modelPublishingJob(
 			{ ...installableJob, triggers: triggers('schedule') },
@@ -891,7 +908,12 @@ describe('modelPublishingJob', () => {
 	});
 
 	it('models both publications from the flake preset', () => {
-		const result = modelPublishingJob(job, identity, tenant, 'main');
+		const result = modelPublishingJob(
+			{ ...job, recordsBuildInputs: true },
+			identity,
+			tenant,
+			'main'
+		);
 		const prCache = {
 			kind: 'named' as const,
 			name: cacheNameSchema.parse('gh-1234-pr-1')
@@ -935,6 +957,9 @@ describe('modelPublishingJob', () => {
 							root: branchRoot
 						}),
 						confirmAuthorizationDetails({ cache: branchCache })
+					],
+					buildInputsRequests: [
+						buildInputsRecordAuthorizationDetails({ cache: branchCache })
 					]
 				},
 				{
