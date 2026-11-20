@@ -27,6 +27,9 @@ under [docs/](../README.md) explain when to use each one.
 - [`cupboard stats`](#cupboard-stats)
 - [`cupboard usage`](#cupboard-usage)
 - [`cupboard delete`](#cupboard-delete)
+- [`cupboard build-inputs`](#cupboard-build-inputs)
+  - [`cupboard build-inputs show`](#cupboard-build-inputs-show)
+  - [`cupboard build-inputs clear`](#cupboard-build-inputs-clear)
 - [`cupboard root`](#cupboard-root)
   - [`cupboard root ensure`](#cupboard-root-ensure)
   - [`cupboard root set`](#cupboard-root-set)
@@ -147,6 +150,7 @@ Commands:
   stats <url> [cache]                             Show how many store paths a cache has and how much storage they use.
   usage <url>                                     Show the tenant's storage usage and quota across all its caches.
   delete [options] <url> <arguments...>           Delete one store path from a cache immediately, even if a root keeps it.
+  build-inputs                                    Show or clear the build inputs recorded for store paths in a cache.
   root                                            Manage retention roots, which keep named sets of store paths in a cache.
   confirm [options] <url> [arguments...]          Check that store paths are already in a cache and refresh their grace period, without uploading anything.
   key                                             Manage and rotate the keys that sign the tenant's Nix cache metadata.
@@ -948,6 +952,63 @@ Arguments:
 
 Options:
   -y, --yes   delete without the confirmation prompt
+  -h, --help  display help for command
+```
+
+### cupboard build-inputs
+
+```text
+Usage: cupboard build-inputs [options] [command]
+
+Show or clear the build inputs recorded for store paths in a cache.
+
+Options:
+  -h, --help                            display help for command
+
+Commands:
+  show [options] <url> <arguments...>   Show the build inputs of one store path
+                                        in a cache.
+  clear [options] <url> <arguments...>  Clear the build inputs of store paths in
+                                        a cache, so that garbage collection no
+                                        longer keeps those build inputs for
+                                        them.
+  help [command]                        display help for command
+```
+
+#### cupboard build-inputs show
+
+```text
+Usage: cupboard build-inputs show [options] <url> <arguments...>
+
+Show the build inputs of one store path in a cache.
+
+Arguments:
+  url                    tenant URL (e.g.
+                         https://cupboard.example.workers.dev/t/<slug>)
+  arguments              an optional cache name, then the store path to show
+
+Options:
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
+  --audience <audience>  OIDC audience to request with --github-oidc (default:
+                         the tenant URL)
+  -h, --help             display help for command
+```
+
+#### cupboard build-inputs clear
+
+```text
+Usage: cupboard build-inputs clear [options] <url> <arguments...>
+
+Clear the build inputs of store paths in a cache, so that garbage collection no
+longer keeps those build inputs for them.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+  arguments   an optional cache name, then the store paths to clear
+
+Options:
+  -y, --yes   clear without the confirmation prompt
   -h, --help  display help for command
 ```
 

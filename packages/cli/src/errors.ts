@@ -1106,6 +1106,35 @@ export class UploadNegotiationMismatchError extends CliError {
 	}
 }
 
+/**
+A response of a paged procedure that does not answer, in order, every store
+path of its request. `storePath` is the first store path, or store-path hash,
+that the response did not answer as requested.
+*/
+export class PathResponseMismatchError extends CliError {
+	constructor(
+		public readonly procedure: string,
+		public readonly storePath: string
+	) {
+		super(
+			`The ${procedure} response does not match its request at ${storePath}`
+		);
+		this.name = 'PathResponseMismatchError';
+	}
+}
+
+/**
+Build inputs to record list two entries for store paths with the same hash.
+The server refuses such entries in one request, and the results of entries in
+different requests could not be told apart.
+*/
+export class DuplicateBuildInputsEntryError extends CliError {
+	constructor(public readonly storePath: string) {
+		super(`The build inputs to record list ${storePath} more than once`);
+		this.name = 'DuplicateBuildInputsEntryError';
+	}
+}
+
 export type UploadVerificationStatus = 'mismatch' | 'over-quota' | 'absent';
 
 export class UploadVerificationFailedError extends CliError {

@@ -15,6 +15,53 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
 }
 
 /**
+The limits of each run that {@link chunkByWeight} makes.
+*/
+export interface WeightedChunkLimits {
+	readonly maxItems: number;
+	readonly maxWeight: number;
+}
+
+/**
+Splits `items` into consecutive runs of at most `limits.maxItems` items whose
+weights add up to at most `limits.maxWeight`. An item that weighs more than
+`limits.maxWeight` on its own gets a run of its own.
+*/
+export function chunkByWeight<T>(
+	items: readonly T[],
+	limits: WeightedChunkLimits,
+	weight: (item: T) => number
+): T[][] {
+	const maxItems = positiveSafeInteger(limits.maxItems, 'chunk size');
+	const chunks: T[][] = [];
+	let current: T[] = [];
+	let currentWeight = 0;
+
+	for (const item of items) {
+		const itemWeight = weight(item);
+
+		if (
+			current.length > 0 &&
+			(current.length === maxItems ||
+				currentWeight + itemWeight > limits.maxWeight)
+		) {
+			chunks.push(current);
+			current = [];
+			currentWeight = 0;
+		}
+
+		current.push(item);
+		currentWeight += itemWeight;
+	}
+
+	if (current.length > 0) {
+		chunks.push(current);
+	}
+
+	return chunks;
+}
+
+/**
 One page of a collection and the operation that fetches its continuation.
 */
 export interface ProgressivePage<T> {
