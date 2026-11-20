@@ -89,6 +89,33 @@ it.each([
 	}
 );
 
+it('gives the build inputs to the client that reads a private source', async () => {
+	const buildInputs = {
+		version: 1 as const,
+		buildInputsVersion: 1,
+		paths: {}
+	};
+	const createClient = vi.fn<typeof pushClientFor>(() => replacement);
+
+	await referenceBuildPushClient(
+		[new URL(`${tenantUrl}/cache/pr`)],
+		{ ...options, buildInputs },
+		{
+			authenticate: () =>
+				Promise.resolve({
+					get: () => Promise.resolve('replacement'),
+					refresh: () => Promise.resolve('replacement')
+				}),
+			createClient,
+			fetchAccess: () => Promise.resolve('private')
+		}
+	);
+
+	expect(createClient.mock.calls.map((call) => call[2])).toStrictEqual([
+		{ cache: defaultCache, signal: undefined, buildInputs }
+	]);
+});
+
 it('reports refused private-source read authority without dropping the grant', async () => {
 	const source = new URL(`${tenantUrl}/reuse/prs`);
 	const refusal = new CupboardHttpError(

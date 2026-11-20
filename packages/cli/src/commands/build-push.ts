@@ -75,6 +75,7 @@ import {
 } from '../errors.ts';
 import { NarArchive } from '../nix/nar.ts';
 import { reportUnknownSettings } from '../nix/settings.ts';
+import { parseBuildInputsDocument } from '../plan/publish-plan-file.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -110,6 +111,7 @@ interface BuildPushOptions {
 	readonly receiptFile?: string;
 	readonly aggregateReceiptV3?: boolean;
 	readonly cohortsFile?: string;
+	readonly buildInputsFile?: string;
 	readonly gcBetweenCohorts?: boolean;
 	readonly keepGoingCohorts?: boolean;
 }
@@ -558,6 +560,10 @@ export function registerBuildPushCommand(
 			'JSON file of builds to run in order, each {"command": [...]} or {"installables": [...]}. Use it instead of a build command after --.'
 		)
 		.option(
+			'--build-inputs-file <path>',
+			'JSON build inputs document, as `cupboard push --build-inputs-file` reads it. build-push sends the listed build inputs with each of those paths that it publishes, and only to a server that accepts them.'
+		)
+		.option(
 			'--gc-between-cohorts',
 			'run garbage collection on the local Nix store between cohorts, so that a later cohort downloads shared outputs of earlier cohorts from the cache (off by default; there is no collection after the last cohort)'
 		)
@@ -654,6 +660,12 @@ export function registerBuildPushCommand(
 						: parseStorePathFile(
 								await readFile(options.intermediatePathsFile, 'utf8')
 							);
+				const buildInputs =
+					options.buildInputsFile === undefined
+						? undefined
+						: parseBuildInputsDocument(
+								await readFile(options.buildInputsFile, 'utf8')
+							);
 				const reporter = commandUi(program, programOptions).reporter();
 				const cache = target.cache;
 				const authorizationDetails = pushAuthorizationDetails({
@@ -666,7 +678,8 @@ export function registerBuildPushCommand(
 				});
 				const pushClient = pushClientFor(target.tenantUrl, credential, {
 					cache,
-					signal: programOptions.signal
+					signal: programOptions.signal,
+					...(buildInputs !== undefined && { buildInputs })
 				});
 
 				const config = discoverNixStoreConfig();
@@ -763,7 +776,8 @@ export function registerBuildPushCommand(
 											audienceSchema.parse(target.tenantUrl),
 										authorizationDetails
 									},
-									signal: programOptions.signal
+									signal: programOptions.signal,
+									...(buildInputs !== undefined && { buildInputs })
 								}),
 							credential:
 								options.githubOidc === true ? 'github-oidc' : 'cupboard-login',

@@ -811,6 +811,11 @@ Options:
                                     {"command": [...]} or {"installables":
                                     [...]}. Use it instead of a build command
                                     after --.
+  --build-inputs-file <path>        JSON build inputs document, as `cupboard
+                                    push --build-inputs-file` reads it.
+                                    build-push sends the listed build inputs
+                                    with each of those paths that it publishes,
+                                    and only to a server that accepts them.
   --gc-between-cohorts              run garbage collection on the local Nix
                                     store between cohorts, so that a later
                                     cohort downloads shared outputs of earlier
