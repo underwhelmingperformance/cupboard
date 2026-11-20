@@ -1,4 +1,7 @@
 import {
+	type BuildInputsDocument,
+	buildInputsDocumentSchema,
+	buildInputsDocumentVersion,
 	type CohortRootsDocument,
 	cohortRootsDocumentSchema,
 	cohortRootsVersion,
@@ -42,6 +45,22 @@ export class CohortRootsVersionError extends CliUsageError {
 	}
 }
 
+/**
+The build inputs document was written by a cupboard release with a different
+document version, so this release could misread it.
+*/
+export class BuildInputsDocumentVersionError extends CliUsageError {
+	constructor(
+		readonly found: unknown,
+		readonly supported: number
+	) {
+		super(
+			`The build inputs file has version ${found === undefined ? 'none' : JSON.stringify(found)}, but this cupboard reads only version ${String(supported)}. Use the cupboard release that matches the publish workflow.`
+		);
+		this.name = 'BuildInputsDocumentVersionError';
+	}
+}
+
 const versionedDocumentSchema = z.looseObject({ version: z.unknown() });
 
 function documentVersion(value: unknown): unknown {
@@ -79,4 +98,25 @@ export function parseCohortRoots(contents: string): CohortRootsDocument {
 	}
 
 	return cohortRootsDocumentSchema.parse(value);
+}
+
+/**
+Parses the JSON build inputs document for `push --build-inputs-file`. A
+document of another version is refused with `BuildInputsDocumentVersionError`
+before its other fields are read.
+*/
+export function parseBuildInputsDocument(
+	contents: string
+): BuildInputsDocument {
+	const value: unknown = JSON.parse(contents);
+	const found = documentVersion(value);
+
+	if (found !== buildInputsDocumentVersion) {
+		throw new BuildInputsDocumentVersionError(
+			found,
+			buildInputsDocumentVersion
+		);
+	}
+
+	return buildInputsDocumentSchema.parse(value);
 }

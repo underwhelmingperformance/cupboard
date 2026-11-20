@@ -59,6 +59,7 @@ import {
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadIdSchema,
+	uploadPlanMaxPaths,
 	uploadRequestMaxBodyBytes,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
@@ -162,10 +163,7 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
-import {
-	directUploadPageSize,
-	uploadPlanMaxPaths
-} from '../policy/upload-pages.ts';
+import { directUploadPageSize } from '../policy/upload-pages.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest

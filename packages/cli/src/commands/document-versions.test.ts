@@ -1,4 +1,5 @@
 import {
+	buildInputsDocumentVersion,
 	cohortRootsVersion,
 	documentVersionsSchema,
 	publishPlanVersion
@@ -28,7 +29,8 @@ describe('cupboard document-versions', () => {
 
 		expect(documentVersionsSchema.parse(printed)).toStrictEqual({
 			publishPlan: publishPlanVersion,
-			cohortRoots: cohortRootsVersion
+			cohortRoots: cohortRootsVersion,
+			buildInputs: buildInputsDocumentVersion
 		});
 	});
 });

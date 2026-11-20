@@ -30,6 +30,7 @@ import {
 	type UploadNegotiateResponse,
 	type UploadPathMetadata,
 	type UploadPathNegotiation,
+	uploadPlanMaxPaths,
 	type UploadPlanResponse,
 	type UploadPreviewDecision,
 	type UploadPreviewRequest,
@@ -68,7 +69,6 @@ import {
 } from '../http/http.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
-import { uploadPlanMaxPaths } from '../policy/upload-pages.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';

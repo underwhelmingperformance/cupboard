@@ -1,5 +1,6 @@
 import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
+	buildInputsUploadMaxPaths,
 	uploadCapabilitiesHeader,
 	type UploadDecision,
 	uploadNegotiateMaxPaths,
@@ -57,17 +58,6 @@ function maximumRequestSends(paths: number): number {
 	);
 }
 
-// The bytes of one path's entry that the advertised maximum allows for, for a
-// client that accepts `build-inputs-v1`. The fixed fields of an entry take
-// about 250 bytes, which leaves room for about 60 references of 60-character
-// basenames. A path whose build inputs are larger than this needs the client
-// to page by bytes, which such a client must do.
-const advertisedPathBytes = 4096;
-
-// The bytes of a request that are not path entries: the push ID, a run root and
-// the JSON around them.
-const uploadRequestEnvelopeBytes = 4096;
-
 /**
 Whether an upload request comes from a client that accepts `build-inputs-v1`.
 Only such a client sends build inputs, and only its requests have the body
@@ -83,8 +73,7 @@ export function isBuildInputsRequest(request: Request): boolean {
 The most paths that one negotiation or preview request may contain, which the
 Worker advertises in `x-cupboard-upload-max-paths`. The Worker must be able to
 send every page and every split within `availableSubrequests`. For a client
-that accepts build inputs, a request of that many paths at
-`advertisedPathBytes` each must also stay within `uploadRequestMaxBodyBytes`.
+that accepts build inputs, it is also at most `buildInputsUploadMaxPaths`.
 */
 export function uploadRequestMaxPathsFor(
 	availableSubrequests: number,
@@ -92,13 +81,7 @@ export function uploadRequestMaxPathsFor(
 ): number {
 	let lower = 0;
 	let upper = isBuildInputsClient
-		? Math.min(
-				uploadNegotiateMaxPaths,
-				Math.floor(
-					(uploadRequestMaxBodyBytes - uploadRequestEnvelopeBytes) /
-						advertisedPathBytes
-				)
-			)
+		? Math.min(uploadNegotiateMaxPaths, buildInputsUploadMaxPaths)
 		: uploadNegotiateMaxPaths;
 	while (lower < upper) {
 		const middle = Math.ceil((lower + upper) / 2);
