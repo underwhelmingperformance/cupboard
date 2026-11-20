@@ -1,6 +1,9 @@
 import type { Derivation } from '@cupboard/nix-store/derivation';
-import type { StorePathString } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import type {
+	StorePathBasename,
+	StorePathString
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import {
@@ -22,12 +25,58 @@ export interface DependencyOutputOptions {
 }
 
 /**
+The version of the rule in {@link dependencyGraph} that decides which outputs
+are the build inputs of an output. A client sends it with every set of build
+inputs that it records. A change to the rule must raise it, so a cache can
+tell which of its paths have build inputs from the new rule.
+*/
+export const buildInputsAlgorithmVersion = 1;
+
+/**
+The dependency outputs of a set of root derivations, and the direct build
+inputs of the roots' outputs and of each dependency output.
+*/
+export interface DependencyGraph {
+	readonly dependencyOutputs: readonly DependencyOutput[];
+	/**
+	The direct build inputs of each output whose path is known before it is
+	built, each list in code-unit order. The map lists every output after its
+	build inputs, so a client that records them in this order records a path's
+	inputs before the path. The build inputs of an input-addressed output
+	are the outputs that its derivation requests from its input derivations,
+	when their paths are known before they are built; its input sources are
+	not build inputs. A fixed-output derivation's outputs have none. The
+	outputs of a floating content-addressed or impure derivation, and of a
+	derivation that depends on one, have no known path and no entry.
+	*/
+	readonly buildInputs: ReadonlyMap<
+		StorePathString,
+		readonly StorePathString[]
+	>;
+}
+
+/**
 Required derivation outputs, including build-only inputs, grouped by target.
 */
 export async function dependencyOutputs(
 	roots: readonly StorePathString[],
 	options: DependencyOutputOptions
 ): Promise<readonly DependencyOutput[]> {
+	const graph = await dependencyGraph(roots, options);
+
+	return graph.dependencyOutputs;
+}
+
+/**
+Walks the derivations of `roots` and their input derivations. Returns the
+outputs that the roots require, each with the roots that require it, and
+the direct build inputs of every output of a root and of every required
+output.
+*/
+export async function dependencyGraph(
+	roots: readonly StorePathString[],
+	options: DependencyOutputOptions
+): Promise<DependencyGraph> {
 	const graph = new Map<StorePathString, Derivation>();
 	const scheduled = new Set(roots);
 	const outputs = new Map<StorePathString, Set<StorePathString>>();
@@ -122,12 +171,84 @@ export async function dependencyOutputs(
 		throw new DependencyGraphCycleError();
 	}
 
-	return [...outputs]
+	const dependencies = [...outputs]
 		.toSorted(([left], [right]) => byCodeUnit(left, right))
 		.map(([storePath, owners]) => ({
 			storePath,
 			requiredBy: [...owners].toSorted(byCodeUnit)
 		}));
+	const rootSet = new Set(roots);
+	const required = new Set(outputs.keys());
+	const buildInputs = new Map<StorePathString, readonly StorePathString[]>();
+
+	// `ready` lists each derivation after every derivation that depends on it,
+	// so its reverse lists inputs first.
+	for (const path of ready.toReversed()) {
+		const term = graph.get(path);
+
+		if (term === undefined) {
+			continue;
+		}
+
+		const isRoot = rootSet.has(path);
+		const keyed = term.outputs
+			.values()
+			.filter(
+				(output): output is StorePathString =>
+					output !== undefined && (isRoot || required.has(output))
+			)
+			.toArray();
+
+		if (keyed.length === 0) {
+			continue;
+		}
+
+		const inputs = term.isSandboxed ? directBuildInputs(term, graph) : [];
+
+		for (const output of keyed) {
+			buildInputs.set(output, inputs);
+		}
+	}
+
+	return { dependencyOutputs: dependencies, buildInputs };
+}
+
+/**
+Returns `buildInputs` in the same order with each build input as a store path
+basename, the form in which a client sends build inputs to a cache.
+*/
+export function buildInputBasenames(
+	buildInputs: DependencyGraph['buildInputs']
+): ReadonlyMap<StorePathString, readonly StorePathBasename[]> {
+	return new Map(
+		buildInputs
+			.entries()
+			.map(([output, inputs]) => [
+				output,
+				inputs.map((input) => StorePath.basename(input))
+			])
+	);
+}
+
+function directBuildInputs(
+	term: Derivation,
+	graph: ReadonlyMap<StorePathString, Derivation>
+): readonly StorePathString[] {
+	const inputs = new Set<StorePathString>();
+
+	for (const [input, names] of term.inputDerivations) {
+		const derivation = graph.get(input);
+
+		for (const name of names) {
+			const output = derivation?.outputs.get(name);
+
+			if (output !== undefined) {
+				inputs.add(output);
+			}
+		}
+	}
+
+	return [...inputs].toSorted(byCodeUnit);
 }
 
 class DependencyGraphCycleError extends Error {

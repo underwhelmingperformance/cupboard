@@ -14,10 +14,16 @@ export {
 	readActivityLog
 } from './activity-log-file.ts';
 export type {
+	DependencyGraph,
 	DependencyOutput,
 	DependencyOutputOptions
 } from './dependency-outputs.ts';
-export { dependencyOutputs } from './dependency-outputs.ts';
+export {
+	buildInputBasenames,
+	buildInputsAlgorithmVersion,
+	dependencyGraph,
+	dependencyOutputs
+} from './dependency-outputs.ts';
 export { NarFileTooLargeError, UnexpectedNarShapeError } from './nar-file.ts';
 export type { NetrcCredential } from './netrc.ts';
 export { netrcCredentialFor } from './netrc.ts';
