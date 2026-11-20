@@ -5,11 +5,14 @@ import { env } from 'node:process';
 
 import { rootLogger } from '@cupboard/logger';
 import {
+	buildInputBasenames,
+	buildInputsAlgorithmVersion,
 	copySources,
 	createProcessNixDaemonConnector,
 	type DaemonCommandRunner,
+	type DependencyGraph,
+	dependencyGraph,
 	type DependencyOutput,
-	dependencyOutputs,
 	discoverNixStoreConfig,
 	Nix,
 	type NixBuildMode,
@@ -51,12 +54,18 @@ import {
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
 import {
+	buildInputsDocumentSchema,
+	buildInputsDocumentVersion,
 	type CohortRootInput,
 	cohortRootsDocumentSchema,
 	cohortRootsVersion,
+	type DependencyGraphDocument,
+	dependencyGraphDocumentSchema,
+	dependencyGraphDocumentVersion,
 	type DocumentVersions
 } from '@cupboard/protocol/publish-plan';
 import {
+	dependencyPassResultKind,
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
@@ -132,6 +141,7 @@ import {
 	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
+	DependencyPassResultMissingError,
 	FailOnDivergenceUnsupportedError,
 	FallbackReadPasswordRequiredError,
 	FallbackReadUserRequiredError,
@@ -462,6 +472,7 @@ export interface BuildCohortOptions {
 	readonly runRoot?: string;
 	readonly runRootTtl?: string;
 	readonly runRootPermanent?: string;
+	readonly recordBuildInputs?: string;
 	readonly receiptFile?: string;
 	readonly targetPathsFile?: string;
 	readonly intermediatePathsFile?: string;
@@ -497,6 +508,11 @@ export interface BuildCohortInputs {
 	readonly runRoot: string;
 	readonly runRootTtl: string;
 	readonly runRootPermanent: boolean;
+	/**
+	Whether the dependency pass may request `build-inputs:record`. The flake
+	workflow enables it outside pull requests, whose trust rules never grant it.
+	*/
+	readonly recordBuildInputs: boolean;
 	readonly receiptFile: string;
 	readonly targetPathsFile: string;
 	readonly intermediatePathsFile: string;
@@ -710,6 +726,11 @@ export function resolveBuildCohortInputs(
 		runRoot,
 		runRootTtl,
 		runRootPermanent: isRunRootPermanent,
+		recordBuildInputs: isEnabled(
+			'record-build-inputs',
+			options.recordBuildInputs,
+			false
+		),
 		receiptFile: outputPath('receipt.json', options.receiptFile),
 		targetPathsFile: outputPath('target-paths.txt', options.targetPathsFile),
 		intermediatePathsFile: outputPath(
@@ -828,6 +849,11 @@ export function registerBuildCohortCommand(
 		.option(
 			'--run-root-permanent <value>',
 			'retain the run root permanently: true or false',
+			'false'
+		)
+		.option(
+			'--record-build-inputs <value>',
+			'record build inputs on dependency outputs that the cache already has, which needs the build-inputs:record grant: true or false',
 			'false'
 		)
 		.option(
@@ -1109,6 +1135,11 @@ export async function buildCohortAction(
 					signal: dependencies.signal
 				};
 
+	const dependencySupport =
+		inputs.push && inputs.publish === 'built'
+			? await dependencyPublicationSupport(inputs, dependencies, reporter)
+			: noDependencyPublicationSupport;
+
 	const planAndBuild = async (execution: CohortExecution): Promise<void> => {
 		// The capacity check and every build need the space that the prepare
 		// action frees in the background on macOS.
@@ -1126,6 +1157,12 @@ export async function buildCohortAction(
 			execution.kind === 'remote'
 				? execution.preparation.graph
 				: execution.graph;
+		const buildInputsFile = await writeBuildInputsFile(
+			inputs,
+			plannedGraph,
+			dependencySupport,
+			environment
+		);
 		const planQueryableMembers = async (): Promise<PlanCohortResultData> => {
 			try {
 				return await planCohort(
@@ -1244,7 +1281,8 @@ export async function buildCohortAction(
 					environment,
 					runCupboard,
 					cupboardRunDependencies,
-					inputs.publish === 'built' ? localDependencyBuilds : []
+					inputs.publish === 'built' ? localDependencyBuilds : [],
+					dependencySupport.isBuildPushReading ? buildInputsFile : undefined
 				);
 				buildUploads = uploadTally(results);
 				diverged = divergedPaths(results);
@@ -1291,6 +1329,11 @@ export async function buildCohortAction(
 
 		const context: SettleCohortBuildContext = {
 			dependencyOutputs: plannedGraph?.dependencyOutputs ?? [],
+			graph: plannedGraph,
+			dependencySupport,
+			buildInputsFile: dependencySupport.isPushReading
+				? buildInputsFile
+				: undefined,
 			tenantDependencyReferences:
 				dependencies.tenantDependencyReferences ?? tenantDependencyReferences,
 			fetcher: dependencies.fetcher,
@@ -1981,6 +2024,13 @@ function remotePublicationDerivation(
 
 interface SettleCohortBuildContext {
 	readonly dependencyOutputs: readonly DependencyOutput[];
+	readonly graph: LocalDerivationGraph | undefined;
+	readonly dependencySupport: DependencyPublicationSupport;
+	/**
+	The build inputs file that the cohort's pushes send, when the installed
+	cupboard reads it.
+	*/
+	readonly buildInputsFile: string | undefined;
 	readonly tenantDependencyReferences: typeof tenantDependencyReferences;
 	readonly fetcher: typeof fetch | undefined;
 	readonly selectPublicationPaths: typeof selectPublicationPaths;
@@ -2001,6 +2051,149 @@ interface SettleCohortBuildContext {
 	readonly diverged: readonly DivergedPath[];
 	readonly inspectDocumentVersions: typeof inspectDocumentVersions;
 	readonly signal: AbortSignal | undefined;
+}
+
+/**
+The paths that the cohort publishes itself, from the paths that its build
+streamed or that it would publish, without the targets that it leaves
+upstream.
+*/
+export function cohortPublishedPaths(
+	paths: readonly string[],
+	leftUpstream: readonly string[]
+): ReadonlySet<string> {
+	const excluded = new Set(leftUpstream);
+
+	return new Set(paths.filter((storePath) => !excluded.has(storePath)));
+}
+
+/**
+Keeps the build-time dependencies of the cohort's completed and retained
+targets: with `plan dependencies` when the cupboard and the server support
+it, and otherwise by probing every tenant cache for each dependency output
+and republishing the paths that it finds into the run root.
+*/
+async function keepDependencies(
+	context: SettleCohortBuildContext,
+	settled: {
+		readonly published: ReadonlySet<string>;
+		readonly publishedTargets: readonly string[];
+		readonly localBuilds: readonly CohortOwnedBuild[];
+	}
+): Promise<void> {
+	const { inputs, members, partition, closureReferences } = context;
+	const cached = new Set([
+		...(partition?.attachOnly ?? []),
+		...(partition?.publishByReference ?? [])
+	]);
+	const requiredSelections = members.flatMap((member) => {
+		if (member.queryInstallable === undefined) {
+			return [];
+		}
+		const isRetained =
+			member.expectedPath !== undefined && cached.has(member.expectedPath);
+		const isCompleted = settled.localBuilds.some(
+			(owned) =>
+				owned.installable === member.installable &&
+				owned.outputs.some((output) =>
+					settled.publishedTargets.includes(storePathSchema.parse(output))
+				)
+		);
+		return isRetained || isCompleted
+			? nixDerivedPathSchema.parse(member.queryInstallable)
+			: [];
+	});
+	const requiredRoots = new Set(
+		requiredSelections.map((selection) => derivationPathOf(selection))
+	);
+	// The cohort publishes these paths itself: its build streamed them, or a
+	// later push publishes them by reference. The pass never copies them, and
+	// decides from each path's status whether its row lists build inputs.
+	const published = new Set([
+		...settled.published,
+		...(partition?.publishByReference ?? [])
+	]);
+
+	if (
+		(await keepDependenciesWithPass(context, requiredSelections, published)) ===
+		'kept'
+	) {
+		return;
+	}
+
+	const paths = context.dependencyOutputs
+		.filter(
+			(dependency) =>
+				dependency.requiredBy.some((root) => requiredRoots.has(root)) &&
+				!settled.published.has(dependency.storePath)
+		)
+		.map((dependency) => dependency.storePath);
+
+	if (paths.length === 0) {
+		return;
+	}
+
+	const sources = tenantReferenceSources(
+		parseTenantCacheUrl(inputs.url).tenantUrl,
+		[
+			{
+				url: cacheUrlFor(inputs.url, inputs.cache),
+				paths: [],
+				...(inputs.readUser !== '' && {
+					credential: {
+						user: readUserInputSchema.parse(inputs.readUser),
+						password: inputs.readPassword
+					}
+				})
+			},
+			...(cohortReferenceSource(inputs) === ''
+				? []
+				: [
+						{
+							url: new URL(cohortReferenceSource(inputs)),
+							paths: [],
+							...(inputs.fallbackReadUser !== '' && {
+								credential: {
+									user: readUserInputSchema.parse(inputs.fallbackReadUser),
+									password: inputs.fallbackReadPassword
+								}
+							})
+						}
+					])
+		]
+	);
+	const signal = context.cupboardRunDependencies?.signal;
+	const references = await context.reporter.phase(
+		'Checking tenant dependency metadata',
+		(phase) =>
+			context.tenantDependencyReferences(paths, {
+				tenantUrl: parseTenantCacheUrl(inputs.url).tenantUrl,
+				sources,
+				onProgress(progress) {
+					phase.fact('traceId', progress.traceId);
+					phase.fact('source', progress.source);
+					phase.fact('mode', progress.mode);
+					phase.fact(
+						'checked',
+						`${String(progress.checked)}/${String(progress.total)}`
+					);
+					phase.fact('found', progress.found);
+					phase.fact('requests', progress.requests);
+					phase.fact('inFlight', progress.inFlight);
+					phase.fact('elapsed', formatDuration(progress.elapsedMs));
+				},
+				...(context.fetcher !== undefined && { fetch: context.fetcher }),
+				...(signal !== undefined && { signal })
+			})
+	);
+	const grouped = Map.groupBy(references, (reference) => reference.source);
+
+	for (const [source, entries] of grouped) {
+		closureReferences.set(source, [
+			...(closureReferences.get(source) ?? []),
+			...entries
+		]);
+	}
 }
 
 // Complete every operation that reads realised paths before returning. Remote
@@ -2117,105 +2310,14 @@ async function settleCohortBuild(
 		inputs.publish === 'built' &&
 		context.dependencyOutputs.length > 0
 	) {
-		const published = new Set([
-			...(streamedReceipt?.paths ?? []),
-			...publicationPaths
-		]);
-		const cached = new Set([
-			...(partition?.attachOnly ?? []),
-			...(partition?.publishByReference ?? [])
-		]);
-		const requiredRoots = new Set(
-			members.flatMap((member) => {
-				if (member.queryInstallable === undefined) {
-					return [];
-				}
-				const isRetained =
-					member.expectedPath !== undefined && cached.has(member.expectedPath);
-				const isCompleted = localBuilds.some(
-					(owned) =>
-						owned.installable === member.installable &&
-						owned.outputs.some((output) =>
-							selection.published.includes(storePathSchema.parse(output))
-						)
-				);
-				return isRetained || isCompleted
-					? derivationPathOf(
-							nixDerivedPathSchema.parse(member.queryInstallable)
-						)
-					: [];
-			})
-		);
-		const paths = context.dependencyOutputs
-			.filter(
-				(dependency) =>
-					dependency.requiredBy.some((root) => requiredRoots.has(root)) &&
-					!published.has(dependency.storePath)
-			)
-			.map((dependency) => dependency.storePath);
-		if (paths.length > 0) {
-			const sources = tenantReferenceSources(
-				parseTenantCacheUrl(inputs.url).tenantUrl,
-				[
-					{
-						url: cacheUrlFor(inputs.url, inputs.cache),
-						paths: [],
-						...(inputs.readUser !== '' && {
-							credential: {
-								user: readUserInputSchema.parse(inputs.readUser),
-								password: inputs.readPassword
-							}
-						})
-					},
-					...(cohortReferenceSource(inputs) === ''
-						? []
-						: [
-								{
-									url: new URL(cohortReferenceSource(inputs)),
-									paths: [],
-									...(inputs.fallbackReadUser !== '' && {
-										credential: {
-											user: readUserInputSchema.parse(inputs.fallbackReadUser),
-											password: inputs.fallbackReadPassword
-										}
-									})
-								}
-							])
-				]
-			);
-			const references = await context.reporter.phase(
-				'Checking tenant dependency metadata',
-				(phase) =>
-					context.tenantDependencyReferences(paths, {
-						tenantUrl: parseTenantCacheUrl(inputs.url).tenantUrl,
-						sources,
-						onProgress(progress) {
-							phase.fact('traceId', progress.traceId);
-							phase.fact('source', progress.source);
-							phase.fact('mode', progress.mode);
-							phase.fact(
-								'checked',
-								`${String(progress.checked)}/${String(progress.total)}`
-							);
-							phase.fact('found', progress.found);
-							phase.fact('requests', progress.requests);
-							phase.fact('inFlight', progress.inFlight);
-							phase.fact('elapsed', formatDuration(progress.elapsedMs));
-						},
-						...(context.fetcher !== undefined && { fetch: context.fetcher }),
-						...(cupboardRunDependencies?.signal !== undefined && {
-							signal: cupboardRunDependencies.signal
-						})
-					})
-			);
-			const grouped = Map.groupBy(references, (reference) => reference.source);
-			for (const [source, entries] of grouped) {
-				closureReferences.set(source, [
-					...(closureReferences.get(source) ?? []),
-					...entries
-				]);
-			}
-		}
+		await keepDependencies(context, {
+			published: cohortPublishedPaths(
+				[...(streamedReceipt?.paths ?? []), ...publicationPaths],
+				selection.leftUpstream
+			),
+			publishedTargets: selection.published,
+			localBuilds
+		});
 	}
 	const selectedTargets = selection.published;
 	const excludedTargets = new Set(selection.leftUpstream);
@@ -2330,7 +2432,12 @@ async function settleCohortBuild(
 		await writeFile(publicationPathsFile, linesOf(selectedPublicationPaths));
 		const results = await runCupboard(
 			inputs.cupboardPath,
-			cohortReceiptPushArguments(inputs, publicationPathsFile, copiedFromFile),
+			cohortReceiptPushArguments(
+				inputs,
+				publicationPathsFile,
+				copiedFromFile,
+				context.buildInputsFile
+			),
 			environment,
 			cupboardRunDependencies
 		);
@@ -2418,7 +2525,10 @@ async function settleCohortBuild(
 					localBuilds,
 					incompleteRoots,
 					inspectDocumentVersions: context.inspectDocumentVersions,
-					signal: context.signal
+					signal: context.signal,
+					...(context.buildInputsFile !== undefined && {
+						buildInputsFile: context.buildInputsFile
+					})
 				},
 				record
 			);
@@ -2582,7 +2692,8 @@ export function cohortBuildPushArguments(
 		| 'substituter'
 		| 'failOnDivergence'
 	>,
-	cohortsFile: string
+	cohortsFile: string,
+	buildInputsFile?: string
 ): readonly string[] {
 	return [
 		'--no-colour',
@@ -2607,7 +2718,10 @@ export function cohortBuildPushArguments(
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
 		...(inputs.runRootPermanent ? ['--run-root-permanent'] : []),
-		...(inputs.failOnDivergence ? ['--fail-on-divergence'] : [])
+		...(inputs.failOnDivergence ? ['--fail-on-divergence'] : []),
+		...(buildInputsFile === undefined
+			? []
+			: ['--build-inputs-file', buildInputsFile])
 	];
 }
 
@@ -2645,7 +2759,8 @@ async function runBuildPushCohort(
 	environment: Environment,
 	runCupboard: typeof defaultRunCupboard,
 	cupboardRunDependencies: CupboardRunDependencies | undefined,
-	dependencyBuilds: readonly RemoteDependencyBuild[] = []
+	dependencyBuilds: readonly RemoteDependencyBuild[] = [],
+	buildInputsFile?: string
 ): Promise<readonly ReporterResultEvent[]> {
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const cohortsFile = path.join(
@@ -2681,7 +2796,7 @@ async function runBuildPushCohort(
 	}));
 	return runCupboard(
 		inputs.cupboardPath,
-		cohortBuildPushArguments(inputs, cohortsFile),
+		cohortBuildPushArguments(inputs, cohortsFile, buildInputsFile),
 		{
 			...environment,
 			CUPBOARD_BUILD_CONTEXTS: JSON.stringify(buildContexts)
@@ -2713,7 +2828,8 @@ export function cohortReceiptPushArguments(
 		| 'receiptFile'
 	>,
 	pathsFile: string,
-	copiedFromFile: string
+	copiedFromFile: string,
+	buildInputsFile?: string
 ): readonly string[] {
 	return [
 		'--no-colour',
@@ -2732,7 +2848,10 @@ export function cohortReceiptPushArguments(
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
-		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
+		...(inputs.runRootPermanent ? ['--run-root-permanent'] : []),
+		...(buildInputsFile === undefined
+			? []
+			: ['--build-inputs-file', buildInputsFile])
 	];
 }
 
@@ -2892,6 +3011,7 @@ interface CohortPushExtras {
 	groups in place of the group's `--root`.
 	*/
 	readonly rootsFile?: string;
+	readonly buildInputsFile?: string;
 }
 
 /**
@@ -2997,7 +3117,10 @@ export function cohortPushInvocation(
 			: ['--reference-receipt-file', extras.referenceReceiptFile]),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
-		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
+		...(inputs.runRootPermanent ? ['--run-root-permanent'] : []),
+		...(extras.buildInputsFile === undefined
+			? []
+			: ['--build-inputs-file', extras.buildInputsFile])
 	];
 
 	return { arguments: arguments_, environment: credential.environment };
@@ -3048,6 +3171,7 @@ interface PublishCohortOptions {
 	readonly incompleteRoots: ReadonlySet<string>;
 	readonly inspectDocumentVersions: typeof inspectDocumentVersions;
 	readonly signal: AbortSignal | undefined;
+	readonly buildInputsFile?: string;
 }
 
 async function writeReferenceManifest(
@@ -3412,7 +3536,10 @@ async function cohortPushFor(
 			...(receipt === 'reference' && {
 				referenceReceiptFile: files.receiptFile
 			}),
-			...(rootsFile !== undefined && { rootsFile })
+			...(rootsFile !== undefined && { rootsFile }),
+			...(options.buildInputsFile !== undefined && {
+				buildInputsFile: options.buildInputsFile
+			})
 		}
 	);
 
@@ -4030,6 +4157,361 @@ function viewReadCredential(
 		inputs.fallbackReadPassword,
 		'view'
 	);
+}
+
+/**
+The documents about build inputs that the installed cupboard reads: the build
+inputs document of `push` and `build-push`, and the dependency graph document
+of `plan dependencies`.
+*/
+interface DependencyPublicationSupport {
+	readonly isPushReading: boolean;
+	readonly isBuildPushReading: boolean;
+	readonly isPassAvailable: boolean;
+}
+
+const noDependencyPublicationSupport: DependencyPublicationSupport = {
+	isPushReading: false,
+	isBuildPushReading: false,
+	isPassAvailable: false
+};
+
+/**
+Asks the installed cupboard which build input documents it reads. A release
+from before a document cannot read it, and `build-push --build-inputs-file`
+arrived in a later release than `push --build-inputs-file`, so each is
+detected on its own. A cupboard that cannot report its document versions
+reads none of them.
+*/
+export async function dependencyPublicationSupport(
+	inputs: Pick<BuildCohortInputs, 'cupboardPath'>,
+	dependencies: Pick<
+		BuildCohortDependencies,
+		'inspectDocumentVersions' | 'inspectCommandOptions' | 'signal'
+	>,
+	reporter: Reporter
+): Promise<DependencyPublicationSupport> {
+	let versions: DocumentVersions;
+
+	try {
+		versions = await (
+			dependencies.inspectDocumentVersions ?? inspectDocumentVersions
+		)(inputs.cupboardPath, dependencies.signal);
+	} catch (error) {
+		dependencies.signal?.throwIfAborted();
+		reporter.info(
+			`Publishing without build inputs, because cupboard could not report the document versions that it reads: ${error instanceof Error ? error.message : String(error)}`
+		);
+
+		return noDependencyPublicationSupport;
+	}
+
+	const isPushReading = versions.buildInputs === buildInputsDocumentVersion;
+	let isBuildPushReading = false;
+
+	if (isPushReading) {
+		try {
+			const options = await (
+				dependencies.inspectCommandOptions ?? inspectCommandOptions
+			)(inputs.cupboardPath, ['build-push'], dependencies.signal);
+
+			isBuildPushReading = options.has('--build-inputs-file');
+		} catch (error) {
+			dependencies.signal?.throwIfAborted();
+			reporter.info(
+				`Publishing without build inputs from build-push, because cupboard could not report the options of build-push: ${error instanceof Error ? error.message : String(error)}`
+			);
+		}
+	}
+
+	return {
+		isPushReading,
+		isBuildPushReading,
+		isPassAvailable: versions.dependencyGraph === dependencyGraphDocumentVersion
+	};
+}
+
+/**
+Writes the build inputs of every output in the cohort's derivation graph for
+`--build-inputs-file`, and returns the file. Returns `undefined` when no
+publication of this cohort reads the file.
+*/
+async function writeBuildInputsFile(
+	inputs: Pick<BuildCohortInputs, 'cohort'>,
+	graph: LocalDerivationGraph | undefined,
+	support: DependencyPublicationSupport,
+	environment: Environment
+): Promise<string | undefined> {
+	if (
+		(!support.isPushReading && !support.isBuildPushReading) ||
+		graph?.buildInputs === undefined ||
+		graph.buildInputs.size === 0
+	) {
+		return undefined;
+	}
+
+	const file = path.join(
+		requireEnvironment(environment, 'RUNNER_TEMP'),
+		`cupboard-build-inputs-${inputs.cohort.key}.json`
+	);
+	const document = buildInputsDocumentSchema.parse({
+		version: buildInputsDocumentVersion,
+		buildInputsVersion: buildInputsAlgorithmVersion,
+		paths: Object.fromEntries(buildInputBasenames(graph.buildInputs))
+	});
+
+	await writeFile(file, `${JSON.stringify(document)}\n`);
+
+	return file;
+}
+
+// The output names that a derived path selects, or `undefined` for all of
+// them.
+// The output names that a selection lists, or undefined for every output,
+// which `^*` selects. A derivation path without a selection also counts as
+// every output.
+function selectedOutputNames(
+	selection: NixDerivedPathString
+): ReadonlySet<string> | undefined {
+	const separator = selection.indexOf('^');
+	const names = selection.slice(separator + 1);
+
+	return separator === -1 || names === '*'
+		? undefined
+		: new Set(names.split(','));
+}
+
+/**
+The part of the cohort's derivation graph that `plan dependencies` keeps: the
+selected outputs of the targets in `selections`, and the dependency outputs
+that those targets need, each after its build inputs. A path in `published`
+is one that the cohort publishes itself and keeps with a root, so the pass
+never copies it, and decides from its status whether to record it. A selected
+output that another target needs is a dependency, so the pass records it in
+graph order.
+*/
+export function cohortDependencyGraph(
+	graph: LocalDerivationGraph,
+	selections: readonly NixDerivedPathString[],
+	published: ReadonlySet<string>
+): DependencyGraphDocument | undefined {
+	if (graph.buildInputs === undefined) {
+		return undefined;
+	}
+
+	const requiredRoots = new Set(
+		selections.map((selection) => derivationPathOf(selection))
+	);
+	const dependencies = new Set(
+		(graph.dependencyOutputs ?? [])
+			.filter((output) =>
+				output.requiredBy.some((root) => requiredRoots.has(root))
+			)
+			.map((output) => output.storePath)
+	);
+	const targets = new Set(
+		graph.outputs
+			.filter((output) =>
+				selections.some((selection) => {
+					const names = selectedOutputNames(selection);
+					const name = output.installable.slice(
+						output.installable.indexOf('^') + 1
+					);
+
+					return (
+						derivationPathOf(selection) ===
+							derivationPathOf(output.installable) &&
+						(names === undefined || names.has(name))
+					);
+				})
+			)
+			.map((output) => output.path)
+	);
+	const kindOf = (
+		storePath: StorePathString
+	): 'published' | 'dependency' | 'target' =>
+		published.has(storePath)
+			? 'published'
+			: dependencies.has(storePath)
+				? 'dependency'
+				: 'target';
+	const paths = buildInputBasenames(graph.buildInputs)
+		.entries()
+		.filter(
+			([storePath]) => dependencies.has(storePath) || targets.has(storePath)
+		)
+		.map(([storePath, buildInputs]) => ({
+			storePath,
+			kind: kindOf(storePath),
+			buildInputs: [...buildInputs]
+		}))
+		.toArray();
+
+	return dependencyGraphDocumentSchema.parse({
+		version: dependencyGraphDocumentVersion,
+		buildInputsVersion: buildInputsAlgorithmVersion,
+		paths
+	});
+}
+
+/**
+The `cupboard plan dependencies` invocation for one cohort. It reads the
+destination and the reference source with the run's read credentials and
+exchanges the job's OIDC token for its own grants.
+*/
+export function planDependenciesInvocation(
+	inputs: Pick<
+		BuildCohortInputs,
+		| 'url'
+		| 'cache'
+		| 'audience'
+		| 'reuseView'
+		| 'referenceSource'
+		| 'readUser'
+		| 'readPassword'
+		| 'fallbackReadUser'
+		| 'fallbackReadPassword'
+		| 'runRoot'
+		| 'runRootTtl'
+		| 'runRootPermanent'
+		| 'recordBuildInputs'
+	>,
+	graphFile: string,
+	readCaches: readonly string[] = []
+): CupboardInvocation {
+	const view = viewReadCredential(inputs);
+	const destination = readCredentialInvocation(
+		inputs.readUser,
+		inputs.readPassword
+	);
+	const referenceSource = cohortReferenceSource(inputs);
+
+	return {
+		arguments: [
+			'--no-colour',
+			'plan',
+			'dependencies',
+			canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
+			'--graph-file',
+			graphFile,
+			'--run-root',
+			inputs.runRoot,
+			...(inputs.runRootTtl === ''
+				? []
+				: ['--run-root-ttl', inputs.runRootTtl]),
+			...(inputs.runRootPermanent ? ['--run-root-permanent'] : []),
+			...(inputs.recordBuildInputs ? ['--record-build-inputs'] : []),
+			...(referenceSource === ''
+				? []
+				: ['--reference-source', referenceSource]),
+			...readCaches.flatMap((readCache) => ['--read-cache', readCache]),
+			...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+			'--github-oidc',
+			...view.arguments,
+			...destination.arguments
+		],
+		environment: { ...view.environment, ...destination.environment }
+	};
+}
+
+/**
+The other caches of the tenant that the job's Nix configuration substitutes
+from, such as the flake workflow's `read-caches`: the tenant caches that the
+reference probe also asked, without the destination and the reference
+source.
+*/
+function tenantReadCaches(
+	inputs: Pick<
+		BuildCohortInputs,
+		'url' | 'cache' | 'reuseView' | 'referenceSource'
+	>
+): readonly string[] {
+	const destination = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
+	const referenceSource = cohortReferenceSource(inputs);
+
+	return tenantReferenceSources(parseTenantCacheUrl(inputs.url).tenantUrl, [])
+		.map((source) => canonicalHref(source.url))
+		.filter(
+			(source) =>
+				source !== destination &&
+				(referenceSource === '' ||
+					source !== canonicalHref(new URL(referenceSource)))
+		);
+}
+
+const dependencyPassStatusSchema = z.looseObject({ status: z.string() });
+
+/**
+Keeps the build dependencies of `requiredRoots` with `cupboard plan
+dependencies`. Returns `unavailable` when the cohort must keep them with the
+reference probe: the installed cupboard has no such command, the job has no
+run root, or the server does not report dependency status.
+*/
+async function keepDependenciesWithPass(
+	context: SettleCohortBuildContext,
+	selections: readonly NixDerivedPathString[],
+	published: ReadonlySet<string>
+): Promise<'kept' | 'unavailable'> {
+	const { inputs, environment, reporter } = context;
+
+	if (
+		!context.dependencySupport.isPassAvailable ||
+		inputs.runRoot === '' ||
+		context.graph === undefined
+	) {
+		return 'unavailable';
+	}
+
+	const document = cohortDependencyGraph(context.graph, selections, published);
+
+	if (document === undefined) {
+		return 'unavailable';
+	}
+
+	if (document.paths.length === 0) {
+		return 'kept';
+	}
+
+	const graphFile = path.join(
+		requireEnvironment(environment, 'RUNNER_TEMP'),
+		`cupboard-dependency-graph-${inputs.cohort.key}.json`
+	);
+
+	await writeFile(graphFile, `${JSON.stringify(document)}\n`);
+
+	const invocation = planDependenciesInvocation(
+		inputs,
+		graphFile,
+		tenantReadCaches(inputs)
+	);
+	const results = await reporter.phase('Keeping build dependencies', () =>
+		context.runCupboard(
+			inputs.cupboardPath,
+			invocation.arguments,
+			{ ...environment, ...invocation.environment },
+			context.cupboardRunDependencies
+		)
+	);
+	// Only the status decides what the cohort does next, so a summary with
+	// fields that a later cupboard adds still counts.
+	const summary = results
+		.filter((event) => event.kind === dependencyPassResultKind)
+		.map((event) => dependencyPassStatusSchema.safeParse(event.data))
+		.find((parsed) => parsed.success)?.data;
+
+	if (summary === undefined) {
+		throw new DependencyPassResultMissingError();
+	}
+
+	if (summary.status === 'unsupported') {
+		reporter.info(
+			'Keeping build dependencies through the run root, because the cache does not report dependency status.'
+		);
+
+		return 'unavailable';
+	}
+
+	return 'kept';
 }
 
 function planReprobeResult(
@@ -4794,6 +5276,11 @@ The local derivation graph that the action passes to cohort planning.
 export interface LocalDerivationGraph {
 	readonly dependencyOutputs?: readonly DependencyOutput[];
 	/**
+	The direct build inputs of the top-level derivations' outputs and of each
+	dependency output, each output after its build inputs.
+	*/
+	readonly buildInputs?: DependencyGraph['buildInputs'];
+	/**
 	The closure of the top-level derivations.
 	*/
 	readonly closure: readonly StorePathString[];
@@ -4849,6 +5336,7 @@ export async function resolveLocalDerivationGraph(
 	if (derivations.length === 0) {
 		return {
 			dependencyOutputs: [],
+			buildInputs: new Map(),
 			closure: [],
 			floatingOutputs: [],
 			substitutableDerivations: [],
@@ -4875,7 +5363,7 @@ export async function resolveLocalDerivationGraph(
 	const terms = new Map(
 		parsedDerivations.map(({ derivation, term }) => [derivation, term])
 	);
-	const requiredOutputs = await dependencyOutputs(derivations, {
+	const graph = await dependencyGraph(derivations, {
 		readDerivation: (path) => {
 			const term = terms.get(path);
 			return term === undefined
@@ -4885,7 +5373,8 @@ export async function resolveLocalDerivationGraph(
 		...(signal !== undefined && { signal })
 	});
 	return {
-		dependencyOutputs: requiredOutputs,
+		dependencyOutputs: graph.dependencyOutputs,
+		buildInputs: graph.buildInputs,
 		closure: closure.map(({ storePath }) => storePath),
 		floatingOutputs: parsedDerivations.flatMap(({ derivation, term }) =>
 			term.outputs

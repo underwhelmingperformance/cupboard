@@ -166,11 +166,20 @@ Each cohort job goes through these steps:
    the output was already available.
 6. It builds the requested outputs that the selected build mode requires. With
    `publish: outputs`, it publishes the selected outputs. With `publish: built`,
-   it also publishes intermediates built during the run and required dependency
-   outputs already available from configured tenant caches or reuse views.
-   Dependencies absent from those sources cause no additional build or download.
-   With `publish: closure`, it also publishes their runtime references. With
-   `publish: none`, it publishes nothing.
+   it also publishes intermediates built during the run with their build inputs,
+   and keeps the required dependency outputs of its targets in the cache. It
+   copies the dependency outputs that the destination cache doesn't have from
+   the reference source, the reuse view or the tenant read caches. Outside pull
+   requests, it also records the build inputs of the paths that the destination
+   already has, including targets and intermediates from earlier runs, so that a
+   garbage collection keeps the dependency outputs through the targets. This
+   needs the `build-inputs:record` grant in the trust rule. The run root keeps
+   every dependency output that the recorded build inputs don't keep. With a
+   cupboard release or a server from before build inputs, the job republishes
+   into the run root the required dependency outputs that configured tenant
+   caches or reuse views have. Dependencies absent from those sources cause no
+   additional build or download. With `publish: closure`, it also publishes
+   their runtime references. With `publish: none`, it publishes nothing.
 7. After publication succeeds, it sets each published target's retention root.
    The root groups' pushes of the same kind that read from the same source and
    record the same kind of receipt run as one `cupboard push`. That push sets

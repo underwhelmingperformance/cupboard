@@ -1893,6 +1893,17 @@ export class CohortPlanResultMissingError extends CodedError {
 	}
 }
 
+/**
+`cupboard plan dependencies` exited successfully without reporting its
+summary, so the cohort cannot tell whether it kept the build dependencies.
+*/
+export class DependencyPassResultMissingError extends CodedError {
+	constructor() {
+		super('Cupboard recorded no plan dependencies result');
+		this.name = 'DependencyPassResultMissingError';
+	}
+}
+
 export class CohortPlanResultInvalidError extends CodedError {
 	constructor(
 		public readonly cohortKey: string,

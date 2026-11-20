@@ -186,11 +186,16 @@ on:
         description: >-
           Control which paths are published. `none` publishes no paths.
           `outputs` publishes selected requested outputs. `built` also publishes
-          intermediates built during this run and required dependency outputs
-          already available from configured tenant caches. `closure` also
-          publishes their runtime references. With publication enabled, a
-          successful run with no selected outputs replaces its retention roots
-          with empty path lists.
+          intermediates built during this run, and keeps the required dependency
+          outputs that the cache has or can copy. It copies the ones that the
+          destination lacks from the reference source, reuse view or tenant read
+          caches. Outside pull requests it records their build inputs when the
+          trust rule grants build-inputs:record, and it keeps in the run root
+          the ones whose build inputs it does not record. A dependency output
+          that neither the destination nor those sources have is not kept.
+          `closure` also publishes their runtime references. With publication
+          enabled, a successful run with no selected outputs replaces its
+          retention roots with empty path lists.
         required: false
         default: built
         type: string
@@ -836,6 +841,8 @@ jobs:
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
           run-root-permanent: ${{ inputs.run-root-permanent }}
+          # Pull-request trust rules never grant build-inputs:record.
+          record-build-inputs: ${{ github.event_name != 'pull_request' }}
           fail-on-divergence: ${{ inputs.fail-on-divergence }}
 
       - uses: $/actions/attest

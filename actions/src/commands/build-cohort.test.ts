@@ -35,16 +35,21 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { buildReceiptV3Schema } from '@cupboard/protocol/build';
 import {
 	describeUnknownPathsRefusal,
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
-import { type DocumentVersions } from '@cupboard/protocol/publish-plan';
+import {
+	type DependencyGraphDocument,
+	dependencyGraphDocumentSchema,
+	type DocumentVersions
+} from '@cupboard/protocol/publish-plan';
 import {
 	buildSummarySchema,
+	dependencyPassResultKind,
 	pushSummaryResultKind
 } from '@cupboard/protocol/reports';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
@@ -62,6 +67,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { buildProgram } from '../../../packages/cli/src/cli.ts';
+import {
+	type BuildInputsRecordOutcome,
+	dependencyRecordPlan,
+	dependencyWalk
+} from '../../../packages/cli/src/plan/dependency-pass.ts';
 import { FakeDaemonChild } from '../../../tests/support/fake-daemon-child.ts';
 import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transport.ts';
 import { runCupboard } from '../cupboard-run.ts';
@@ -118,8 +128,12 @@ import {
 	canonicalNixDerivedPath,
 	type CapturedNixProcess,
 	cohortBuildPushArguments,
+	cohortDependencyGraph,
+	cohortPublishedPaths,
 	cohortPushInvocation,
 	cohortReceiptPushArguments,
+	dependencyPublicationSupport,
+	type LocalDerivationGraph,
 	materialiseDerivationGraph,
 	mergedCohortPushes,
 	nixBuildArguments,
@@ -1889,7 +1903,7 @@ describe('nixDerivationShowArguments', () => {
 });
 
 describe('resolveLocalDerivationGraph', () => {
-	it('retains every output and records only derivations that permit substitution', async () => {
+	it('retains every output, records the derivations that permit substitution and lists build inputs', async () => {
 		const appDerivation = storePathSchema.parse(
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
 		);
@@ -1945,6 +1959,13 @@ describe('resolveLocalDerivationGraph', () => {
 					requiredBy: [appDerivation]
 				}
 			],
+			buildInputs: new Map([
+				[storePathSchema.parse(libraryBuiltPath), []],
+				[
+					storePathSchema.parse(appPath),
+					[storePathSchema.parse(libraryBuiltPath)]
+				]
+			]),
 			closure: [appDerivation, libraryDerivation],
 			floatingOutputs: [derivedPath(`${libraryDerivation}^dev`)],
 			substitutableDerivations: [appDerivation],
@@ -5908,6 +5929,7 @@ describe('cohortReceiptPushArguments', () => {
 			BuildCohortInputs,
 			'audience' | 'cache' | 'runRoot' | 'runRootTtl' | 'runRootPermanent'
 		>;
+		readonly buildInputsFile?: string;
 		readonly extra: readonly string[];
 	}>([
 		{
@@ -5949,8 +5971,20 @@ describe('cohortReceiptPushArguments', () => {
 				'--run-root-ttl',
 				'2d'
 			]
+		},
+		{
+			name: 'a cupboard that reads build inputs gets them for the rows that the push creates',
+			inputs: {
+				audience: '',
+				cache: defaultCache,
+				runRoot: '',
+				runRootTtl: '',
+				runRootPermanent: false
+			},
+			buildInputsFile: '/tmp/build-inputs.json',
+			extra: ['--build-inputs-file', '/tmp/build-inputs.json']
 		}
-	])('$name', ({ inputs, extra }) => {
+	])('$name', ({ inputs, buildInputsFile, extra }) => {
 		expect(
 			cohortReceiptPushArguments(
 				{
@@ -5960,7 +5994,8 @@ describe('cohortReceiptPushArguments', () => {
 					...inputs
 				},
 				pathsFile,
-				'/tmp/observed-copies.json'
+				'/tmp/observed-copies.json',
+				buildInputsFile
 			)
 		).toStrictEqual([
 			'--no-colour',
@@ -6800,6 +6835,8 @@ if (args.includes('--help')) {
 			readonly rootPushResults?: readonly ReporterResultEvent[];
 			readonly rootPushFailure?: readonly ReporterResultEvent[];
 			readonly documentVersions?: DocumentVersions;
+			readonly buildPushOptions?: readonly string[];
+			readonly dependencyPass?: Record<string, unknown>;
 		} = {}
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
@@ -6834,6 +6871,24 @@ if (args.includes('--help')) {
 
 				if (isRemoteConnectionOpen && arguments_[1] === 'push') {
 					sequence.push('publish');
+				}
+
+				if (arguments_[1] === 'plan' && arguments_[2] === 'dependencies') {
+					return [
+						{
+							kind: dependencyPassResultKind,
+							data: flowPlan.dependencyPass ?? {
+								status: 'completed',
+								record: 'recorded',
+								paths: 2,
+								copied: 0,
+								recorded: 2,
+								unchanged: 0,
+								blocked: 0,
+								attached: 0
+							}
+						}
+					];
 				}
 
 				if (arguments_[1] === 'plan') {
@@ -7161,6 +7216,15 @@ if (args.includes('--help')) {
 				dependencyOutputs: (flowPlan.dependencyReferences ?? []).map(
 					(storePath) => ({ storePath, requiredBy: derivations })
 				),
+				buildInputs: new Map([
+					...(flowPlan.dependencyReferences ?? []).map(
+						(storePath) => [storePath, []] as const
+					),
+					[
+						storePathSchema.parse(appPath),
+						flowPlan.dependencyReferences ?? []
+					] as const
+				]),
 				closure: [...derivations, storePathSchema.parse(referencePath)],
 				floatingOutputs: [],
 				substitutableDerivations: derivations,
@@ -7299,6 +7363,16 @@ if (args.includes('--help')) {
 				...(flowPlan.documentVersions !== undefined && {
 					inspectDocumentVersions: () =>
 						Promise.resolve(flowPlan.documentVersions ?? {})
+				}),
+				...(flowPlan.buildPushOptions !== undefined && {
+					inspectCommandOptions: (_binaryPath, command) =>
+						Promise.resolve(
+							new Set(
+								command.join(' ') === 'build-push'
+									? flowPlan.buildPushOptions
+									: []
+							)
+						)
 				}),
 				tenantDependencyReferences: (paths, referenceOptions) => {
 					flowPlan.inspectDependencySources?.(
@@ -7894,6 +7968,571 @@ if (args.includes('--help')) {
 			});
 		}
 	);
+	describe('with plan dependencies', () => {
+		const passVersions: DocumentVersions = {
+			buildInputs: 1,
+			dependencyGraph: 1
+		};
+		const runRoot = 'github:owner/repo/run/1';
+		const destination = 'https://cache.example.test/t/acme';
+		const cohortOptions = (
+			overrides: Partial<BuildCohortOptions> = {}
+		): BuildCohortOptions => ({
+			...baseOptions(),
+			publish: 'built',
+			reuseView: 'prs',
+			runRoot,
+			fallbackReadUser: 'source-reader',
+			fallbackReadPassword: 'source-secret',
+			cohortJson: remotelyQueryableCohortJson({
+				remote: false,
+				attrs: ['.#packages.x86_64-linux.app'],
+				installables: ['.#packages.x86_64-linux.app^out'],
+				queryInstallables: [appQueryInstallable],
+				expectedPaths: [appPath],
+				roots: ['github:owner/repo/main/app']
+			}),
+			...overrides
+		});
+
+		async function runWithPass(
+			source: 'destination' | 'reuse' | 'build',
+			options: BuildCohortOptions,
+			flowPlan: {
+				readonly documentVersions?: DocumentVersions;
+				readonly buildPushOptions?: readonly string[];
+				readonly dependencyPass?: Record<string, unknown>;
+				readonly streamedLeftUpstream?: readonly string[];
+			}
+		): Promise<{
+			readonly run: PublicationRun;
+			readonly probePaths: readonly (readonly StorePathString[])[];
+		}> {
+			const probePaths: (readonly StorePathString[])[] = [];
+			const run = await runPublicationFlow(
+				options,
+				source === 'build' ? [appPath] : [],
+				[],
+				source === 'build' ? [appQueryInstallable] : [],
+				undefined,
+				new Map(),
+				{
+					attachOnly: source === 'destination' ? [appPath] : [],
+					publishByReference: source === 'reuse' ? [appPath] : [],
+					dependencyReferences: [storePathSchema.parse(referencePath)],
+					inspectDependencySources: (paths) => {
+						probePaths.push(paths);
+					},
+					...(source === 'build' && { streamedBuilt: [appPath] }),
+					...flowPlan
+				}
+			);
+
+			return { run, probePaths };
+		}
+
+		it.each([
+			{ source: 'destination', record: 'false' },
+			{ source: 'reuse', record: 'true' },
+			{ source: 'build', record: 'true' }
+		] as const)(
+			'keeps the build dependencies of a $source target without the reference probe (record $record)',
+			async ({ source, record }) => {
+				const { run, probePaths } = await runWithPass(
+					source,
+					cohortOptions({ recordBuildInputs: record }),
+					{ documentVersions: passVersions }
+				);
+				const passCalls = run.calls.filter(
+					(call) => call[1] === 'plan' && call[2] === 'dependencies'
+				);
+				const graphFile = argumentValue(passCalls[0] ?? [], '--graph-file');
+				const program = buildProgram();
+				program.exitOverride();
+				program.configureOutput({
+					writeErr() {
+						return;
+					},
+					writeOut() {
+						return;
+					}
+				});
+				const passCommand = program.commands
+					.find((command) => command.name() === 'plan')
+					?.commands.find((command) => command.name() === 'dependencies');
+				passCommand?.action(() => {
+					return;
+				});
+				await program.parseAsync(['node', 'cupboard', ...(passCalls[0] ?? [])]);
+
+				expect({
+					passCalls,
+					graph: await readJsonFile(graphFile ?? ''),
+					probePaths,
+					manifestPushes: run.calls.filter((call) =>
+						call.includes('--reference-manifest')
+					),
+					error: run.actionError
+				}).toStrictEqual({
+					passCalls: [
+						[
+							'--no-colour',
+							'plan',
+							'dependencies',
+							destination,
+							'--graph-file',
+							graphFile,
+							'--run-root',
+							runRoot,
+							...(record === 'true' ? ['--record-build-inputs'] : []),
+							'--reference-source',
+							`${destination}/reuse/prs`,
+							'--github-oidc',
+							'--view-read-user',
+							'source-reader'
+						]
+					],
+					graph: {
+						version: 1,
+						buildInputsVersion: 1,
+						paths: [
+							{ storePath: referencePath, kind: 'dependency', buildInputs: [] },
+							{
+								storePath: appPath,
+								// The cohort publishes a reused or built target itself.
+								kind: source === 'destination' ? 'target' : 'published',
+								buildInputs: [path.basename(referencePath)]
+							}
+						]
+					},
+					probePaths: [],
+					manifestPushes: [],
+					error: undefined
+				});
+			}
+		);
+
+		it.each([
+			{
+				name: 'a server without dependency status',
+				versions: passVersions,
+				dependencyPass: { status: 'unsupported' },
+				runRootOption: runRoot,
+				passCalls: 1
+			},
+			{
+				name: 'a cupboard without the dependency graph document',
+				versions: { buildInputs: 1 },
+				dependencyPass: undefined,
+				runRootOption: runRoot,
+				passCalls: 0
+			},
+			{
+				name: 'a cohort without a run root',
+				versions: passVersions,
+				dependencyPass: undefined,
+				runRootOption: '',
+				passCalls: 0
+			}
+		])(
+			'keeps build dependencies through the reference probe for $name',
+			async ({ versions, dependencyPass, runRootOption, passCalls }) => {
+				const { run, probePaths } = await runWithPass(
+					'destination',
+					cohortOptions({ runRoot: runRootOption }),
+					{
+						documentVersions: versions,
+						...(dependencyPass !== undefined && { dependencyPass })
+					}
+				);
+
+				expect({
+					passCalls: run.calls.filter(
+						(call) => call[1] === 'plan' && call[2] === 'dependencies'
+					).length,
+					probePaths,
+					manifestPushes: run.calls.filter((call) =>
+						call.includes('--reference-manifest')
+					).length
+				}).toStrictEqual({
+					passCalls,
+					probePaths: [[storePathSchema.parse(referencePath)]],
+					manifestPushes: 1
+				});
+			}
+		);
+
+		it.each([
+			{
+				name: 'a cupboard whose push and build-push read build inputs',
+				versions: passVersions,
+				buildPushOptions: ['--build-inputs-file'],
+				isPushSending: true,
+				isBuildPushSending: true
+			},
+			{
+				name: 'a cupboard whose build-push does not read build inputs',
+				versions: passVersions,
+				buildPushOptions: [],
+				isPushSending: true,
+				isBuildPushSending: false
+			},
+			{
+				name: 'a cupboard that reads no build inputs',
+				versions: {},
+				buildPushOptions: ['--build-inputs-file'],
+				isPushSending: false,
+				isBuildPushSending: false
+			}
+		])(
+			'sends build inputs with each publication for $name',
+			async ({
+				versions,
+				buildPushOptions,
+				isPushSending,
+				isBuildPushSending
+			}) => {
+				const { run } = await runWithPass('build', cohortOptions(), {
+					documentVersions: versions,
+					buildPushOptions
+				});
+				const publications = run.calls.filter(
+					(call) => call[1] === 'push' || call[1] === 'build-push'
+				);
+				const files = [
+					...new Set(
+						publications.flatMap(
+							(call) => argumentValue(call, '--build-inputs-file') ?? []
+						)
+					)
+				];
+
+				expect({
+					commands: [...new Set(publications.map((call) => call[1]))],
+					sending: publications.map((call) => [
+						call[1],
+						call.includes('--build-inputs-file')
+					]),
+					documents: await Promise.all(files.map((file) => readJsonFile(file)))
+				}).toStrictEqual({
+					commands: ['build-push', 'push'],
+					sending: publications.map((call) => [
+						call[1],
+						call[1] === 'build-push' ? isBuildPushSending : isPushSending
+					]),
+					documents:
+						isPushSending || isBuildPushSending
+							? [
+									{
+										version: 1,
+										buildInputsVersion: 1,
+										paths: {
+											[referencePath]: [],
+											[appPath]: [path.basename(referencePath)]
+										}
+									}
+								]
+							: []
+				});
+			}
+		);
+
+		it('copies from the tenant read caches of a job without a reuse view', async () => {
+			vi.stubEnv(
+				'NIX_CONFIG',
+				`builders =\nsubstituters = ${destination}/cache/shared https://cache.nixos.org\n`
+			);
+			const { run } = await runWithPass(
+				'destination',
+				cohortOptions({
+					reuseView: '',
+					fallbackReadUser: '',
+					fallbackReadPassword: ''
+				}),
+				{ documentVersions: passVersions }
+			);
+
+			expect(
+				run.calls
+					.filter((call) => call[1] === 'plan' && call[2] === 'dependencies')
+					.map((call) => call.slice(5))
+			).toStrictEqual([
+				[
+					argumentValue(
+						run.calls.find((call) => call[2] === 'dependencies') ?? [],
+						'--graph-file'
+					),
+					'--run-root',
+					runRoot,
+					'--read-cache',
+					`${destination}/cache/shared`,
+					'--github-oidc'
+				]
+			]);
+		});
+
+		async function passDocument(
+			run: PublicationRun
+		): Promise<DependencyGraphDocument | undefined> {
+			const passCall = run.calls.find(
+				(call) => call[1] === 'plan' && call[2] === 'dependencies'
+			);
+
+			return passCall === undefined
+				? undefined
+				: dependencyGraphDocumentSchema.parse(
+						await readJsonFile(argumentValue(passCall, '--graph-file') ?? '')
+					);
+		}
+
+		// The destination already has every path, and no row lists build
+		// inputs, as after a run of an earlier release.
+		it.each([
+			{ record: 'true', attached: [] },
+			{ record: 'false', attached: [referencePath] }
+		] as const)(
+			'records or attaches the inputs of a rebuilt target that the destination already has (record $record)',
+			async ({ record, attached }) => {
+				const { run } = await runWithPass(
+					'build',
+					cohortOptions({ build: 'rebuild', recordBuildInputs: record }),
+					{ documentVersions: passVersions }
+				);
+				const document = await passDocument(run);
+				const nodes = document?.paths ?? [];
+				const statuses = new Map(
+					nodes.map(({ storePath }) => [
+						StorePath.hash(storePath),
+						{
+							storePathHash: StorePath.hash(storePath),
+							state: 'present' as const
+						}
+					])
+				);
+				const plan = dependencyRecordPlan(nodes, statuses, new Set(), 1);
+				const outcome: BuildInputsRecordOutcome =
+					record === 'true'
+						? {
+								kind: 'recorded',
+								results: plan.records.map(({ storePath }) => ({
+									storePath,
+									status: 'recorded'
+								}))
+							}
+						: { kind: 'not-requested' };
+
+				expect({
+					error: run.actionError,
+					kinds: nodes.map(({ storePath, kind }) => [storePath, kind]),
+					records: plan.records.map(({ storePath }) => storePath),
+					attached: dependencyWalk(nodes, statuses, new Set(), outcome, 1)
+						.attached
+				}).toStrictEqual({
+					error: undefined,
+					kinds: [
+						[referencePath, 'dependency'],
+						[appPath, 'published']
+					],
+					records: [referencePath, appPath],
+					attached
+				});
+			}
+		);
+
+		// `lib` is a member that the cohort builds but leaves upstream, and a
+		// build input of `app`, which the cohort publishes.
+		it('marks the paths that the cohort publishes, and not one that it leaves upstream, in the graph document', async () => {
+			const run = await runPublicationFlow(
+				cohortOptions({
+					cohortJson: remotelyQueryableCohortJson({
+						remote: false,
+						attrs: [
+							'.#packages.x86_64-linux.app',
+							'.#packages.x86_64-linux.lib'
+						],
+						installables: [
+							'.#packages.x86_64-linux.app^out',
+							'.#packages.x86_64-linux.lib^out'
+						],
+						queryInstallables: [appQueryInstallable, libraryQueryInstallable],
+						expectedPaths: [appPath, libraryBuiltPath],
+						roots: ['github:owner/repo/main/app', 'github:owner/repo/main/lib']
+					})
+				}),
+				[appPath, libraryBuiltPath],
+				[],
+				[appQueryInstallable, libraryQueryInstallable],
+				undefined,
+				new Map(),
+				{
+					attachOnly: [],
+					publishByReference: [],
+					dependencyReferences: [storePathSchema.parse(libraryBuiltPath)],
+					streamedBuilt: [appPath],
+					streamedLeftUpstream: [libraryBuiltPath],
+					documentVersions: passVersions
+				}
+			);
+			const document = await passDocument(run);
+
+			expect({
+				error: run.actionError,
+				kinds: document?.paths.map(({ storePath, kind }) => [storePath, kind])
+			}).toStrictEqual({
+				error: undefined,
+				kinds: [
+					[libraryBuiltPath, 'dependency'],
+					[appPath, 'published']
+				]
+			});
+		});
+
+		it('accepts a summary with fields that a later cupboard adds', async () => {
+			const { run } = await runWithPass('destination', cohortOptions(), {
+				documentVersions: passVersions,
+				dependencyPass: {
+					status: 'completed',
+					record: 'recorded',
+					paths: 2,
+					copied: 0,
+					recorded: 2,
+					unchanged: 0,
+					blocked: 0,
+					attached: 0,
+					skipped: 1
+				}
+			});
+
+			expect({
+				error: run.actionError,
+				manifestPushes: run.calls.filter((call) =>
+					call.includes('--reference-manifest')
+				)
+			}).toStrictEqual({ error: undefined, manifestPushes: [] });
+		});
+	});
+
+	it('does not count a target that the cohort leaves upstream as published', () => {
+		expect([
+			...cohortPublishedPaths([appPath, referencePath, appPath], [appPath])
+		]).toStrictEqual([referencePath]);
+	});
+
+	describe('cohortDependencyGraph', () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const developmentOutput = storePathSchema.parse(
+			'/nix/store/7123456789abcdfghijklmnpqrsvwxyz-app-dev'
+		);
+		const reference = storePathSchema.parse(referencePath);
+		const app = storePathSchema.parse(appPath);
+		const graph: LocalDerivationGraph = {
+			dependencyOutputs: [
+				{ storePath: reference, requiredBy: [appDerivation] }
+			],
+			buildInputs: new Map([
+				[reference, []],
+				[app, [reference]],
+				[developmentOutput, [reference]]
+			]),
+			closure: [appDerivation],
+			floatingOutputs: [],
+			substitutableDerivations: [],
+			outputs: [
+				{ path: app, installable: derivedPath(`${appDerivation}^out`) },
+				{
+					path: developmentOutput,
+					installable: derivedPath(`${appDerivation}^dev`)
+				}
+			]
+		};
+
+		it.each([
+			{ name: 'a retained target', published: [], kind: 'target' },
+			{
+				name: 'a target that the cohort publishes',
+				published: [app],
+				kind: 'published'
+			}
+		] as const)(
+			'lists only the selected outputs of $name',
+			({ published, kind }) => {
+				expect(
+					cohortDependencyGraph(
+						graph,
+						[derivedPath(`${appDerivation}^out`)],
+						new Set(published)
+					)
+				).toStrictEqual({
+					version: 1,
+					buildInputsVersion: 1,
+					paths: [
+						{ storePath: reference, kind: 'dependency', buildInputs: [] },
+						{
+							storePath: app,
+							kind,
+							buildInputs: [path.basename(referencePath)]
+						}
+					]
+				});
+			}
+		);
+
+		it.each([
+			{ name: 'every output', selection: `${appDerivation}^*` },
+			{
+				name: 'a derivation path without an output selection',
+				selection: appDerivation
+			}
+		])('lists every output of $name as a target', ({ selection }) => {
+			expect(
+				cohortDependencyGraph(graph, [derivedPath(selection)], new Set())
+			).toStrictEqual({
+				version: 1,
+				buildInputsVersion: 1,
+				paths: [
+					{ storePath: reference, kind: 'dependency', buildInputs: [] },
+					{
+						storePath: app,
+						kind: 'target',
+						buildInputs: [path.basename(referencePath)]
+					},
+					{
+						storePath: developmentOutput,
+						kind: 'target',
+						buildInputs: [path.basename(referencePath)]
+					}
+				]
+			});
+		});
+	});
+
+	it('reports a build-push that cannot list its options and publishes without build inputs there', async () => {
+		const information: string[] = [];
+		const support = await dependencyPublicationSupport(
+			{ cupboardPath: '/opt/cupboard/cupboard' },
+			{
+				inspectDocumentVersions: () =>
+					Promise.resolve({ buildInputs: 1, dependencyGraph: 1 }),
+				inspectCommandOptions: () =>
+					Promise.reject(new Error('build-push --help failed'))
+			},
+			recordingReporter([], [], information)
+		);
+
+		expect({ support, information }).toStrictEqual({
+			support: {
+				isPushReading: true,
+				isBuildPushReading: false,
+				isPassAvailable: true
+			},
+			information: [
+				'Publishing without build inputs from build-push, because cupboard could not report the options of build-push: build-push --help failed'
+			]
+		});
+	});
+
 	it('publishes cached dependencies alongside a streamed target without retaining dependency roots', async () => {
 		const run = await runPublicationFlow(
 			{
