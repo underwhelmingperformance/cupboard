@@ -1,4 +1,5 @@
 import type { CacheAccessMode, CacheScope } from '@cupboard/nix-store/scalars';
+import type { BuildInputsDocument } from '@cupboard/protocol/publish-plan';
 
 import { contentReadAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, type PushAuthOptions } from '../auth/auth.ts';
@@ -18,6 +19,7 @@ interface ReferenceClientOptions {
 	readonly client: PushClient;
 	readonly auth: PushAuthOptions;
 	readonly signal?: AbortSignal;
+	readonly buildInputs?: BuildInputsDocument;
 }
 interface ReferenceClientDependencies {
 	readonly authenticate?: typeof authenticateForPush;
@@ -60,7 +62,10 @@ export async function referenceBuildPushClient(
 			credential,
 			{
 				cache: options.cache,
-				signal: options.signal
+				signal: options.signal,
+				...(options.buildInputs !== undefined && {
+					buildInputs: options.buildInputs
+				})
 			}
 		);
 	} catch (error) {

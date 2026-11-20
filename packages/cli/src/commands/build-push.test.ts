@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import {
 	defaultFileTransferSettings,
 	defaultSignatureSettings,
@@ -55,6 +59,26 @@ vi.mock('../build-push/build-push.ts', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../build-push/build-push.ts')>()),
 	runBuildPush: handlerMocks.runBuildPush
 }));
+
+const pushClientMocks = vi.hoisted(() => ({
+	options: [] as unknown[]
+}));
+
+vi.mock('../push/push-client.ts', async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import('../push/push-client.ts')>();
+
+	return {
+		...original,
+		pushClientFor: (
+			...arguments_: Parameters<typeof original.pushClientFor>
+		) => {
+			pushClientMocks.options.push(arguments_[2]);
+
+			return original.pushClientFor(...arguments_);
+		}
+	};
+});
 
 vi.mock('@cupboard/nix', async (importOriginal) => ({
 	...(await importOriginal<typeof import('@cupboard/nix')>()),
@@ -521,6 +545,67 @@ describe('registerBuildPushCommand', () => {
 					([options]) => options.divergencePolicy
 				)
 			).toStrictEqual([policy]);
+		}
+	);
+
+	it.each([
+		{ name: 'without a build inputs file', hasFile: false },
+		{ name: 'with a build inputs file', hasFile: true }
+	])(
+		'gives the push client the build inputs to send $name',
+		async ({ hasFile }) => {
+			handlerMocks.runBuildPush.mockReset();
+			handlerMocks.runBuildPush.mockResolvedValue(
+				buildReceiptV3Schema.parse({ version: 3, paths: [], subjects: [] })
+			);
+			pushClientMocks.options.length = 0;
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-push-test-')
+			);
+			const buildInputsFile = path.join(directory, 'build-inputs.json');
+			await writeFile(
+				buildInputsFile,
+				JSON.stringify({
+					version: 1,
+					buildInputsVersion: 1,
+					paths: { [pathA]: [path.basename(pathC), path.basename(pathB)] }
+				})
+			);
+
+			try {
+				await silentProgram().parseAsync(
+					[
+						'build-push',
+						tenantUrl,
+						...(hasFile ? ['--build-inputs-file', buildInputsFile] : []),
+						'--',
+						'true'
+					],
+					{ from: 'user' }
+				);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+
+			expect(
+				pushClientMocks.options.map((options) =>
+					typeof options === 'object' &&
+					options !== null &&
+					'buildInputs' in options
+						? options.buildInputs
+						: undefined
+				)
+			).toStrictEqual([
+				hasFile
+					? {
+							version: 1,
+							buildInputsVersion: 1,
+							paths: {
+								[pathA]: [path.basename(pathB), path.basename(pathC)]
+							}
+						}
+					: undefined
+			]);
 		}
 	);
 
