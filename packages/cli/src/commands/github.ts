@@ -7,6 +7,7 @@ import {
 import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import {
 	type OidcTrustAddBodyInput,
+	type OidcTrustExtendBodyInput,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary
@@ -29,6 +30,10 @@ import { type TokenProvider } from '../client/client.ts';
 import { bearerAttempt } from '../client/credentials.ts';
 import { cachePages, listingLimits } from '../client/listings.ts';
 import { type CallOptions, tenantRpc } from '../client/orpc.ts';
+import {
+	type BuildInputsReadProbe,
+	canGrantBuildInputs
+} from '../client/server-features.ts';
 import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
 import {
 	CacheInfoRateLimitedError,
@@ -80,6 +85,10 @@ import {
 	parseRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
+import {
+	isUpgradedPresetRule,
+	presetUpgradeGrants
+} from './oidc-trust/preset-upgrade.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
 
 const maximumCacheInfoBytes = 1024 * 1024;
@@ -192,10 +201,14 @@ export interface GithubSetupClient {
 		}>;
 	};
 	readonly reuseViews: Pick<ReuseViewClient, 'list' | 'set'>;
+	readonly buildInputs: { readonly read: BuildInputsReadProbe };
 	readonly oidcTrust: {
 		list(): Promise<OidcTrustListResponse>;
 		add(input: OidcTrustAddBodyInput): Promise<OidcTrustSummary>;
 		remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
+		extend(
+			input: OidcTrustExtendBodyInput & { readonly id: string }
+		): Promise<OidcTrustSummary>;
 	};
 }
 
@@ -212,7 +225,13 @@ export interface GithubSetupDependencies {
 export interface SetupStep {
 	readonly step: string;
 	readonly outcome:
-		'created' | 'removed' | 'retained' | 'unchanged' | 'drift' | 'missing';
+		| 'created'
+		| 'extended'
+		| 'removed'
+		| 'retained'
+		| 'unchanged'
+		| 'drift'
+		| 'missing';
 	readonly detail?: string;
 }
 
@@ -334,10 +353,11 @@ function isRuleMatchingBody(
 	body: OidcTrustAddBodyInput
 ): boolean {
 	return (
-		rule.issuer === body.issuer &&
-		rule.audience === body.audience &&
-		isDeepEqual(rule.claims, body.claims) &&
-		isDeepEqual(rule.permittedGrants, body.permittedGrants)
+		(rule.issuer === body.issuer &&
+			rule.audience === body.audience &&
+			isDeepEqual(rule.claims, body.claims) &&
+			isDeepEqual(rule.permittedGrants, body.permittedGrants)) ||
+		isUpgradedPresetRule(rule, body)
 	);
 }
 
@@ -444,13 +464,20 @@ interface ClassifiedTrustRule {
 }
 
 // Remove `conflicts` before setup completes because the modelled claims match
-// them. Never remove `uncertain` automatically: they contain claims outside the
-// model and require an explicit interactive selection. `superseded` rules use a
-// different workflow reference and can coexist with the new rules.
+// them. `earlier` rules are the preset's rules as an earlier release wrote them,
+// and setup extends them with the operations added since. Never remove
+// `uncertain` automatically: they contain claims outside the model and require
+// an explicit interactive selection. `superseded` rules use a different
+// workflow reference and can coexist with the new rules.
 interface TrustRuleClassification {
 	readonly conflicts: readonly ClassifiedTrustRule[];
+	readonly earlier: readonly EarlierTrustRule[];
 	readonly uncertain: readonly ClassifiedTrustRule[];
 	readonly superseded: readonly ClassifiedTrustRule[];
+}
+
+interface EarlierTrustRule extends ClassifiedTrustRule {
+	readonly permittedGrants: OidcTrustAddBodyInput['permittedGrants'];
 }
 
 type TrustRuleBucket = 'conflict' | 'uncertain' | 'superseded';
@@ -524,20 +551,64 @@ function classifyTrustRule(
 	entries.set(rule.id, entry);
 }
 
+function firstEarlierCopy(
+	rules: readonly OidcTrustSummary[],
+	desired: DesiredTrustRule
+): EarlierTrustRule | undefined {
+	for (const rule of rules) {
+		const permittedGrants = rule.disabled
+			? undefined
+			: presetUpgradeGrants(rule, desired.body);
+
+		if (permittedGrants !== undefined) {
+			return {
+				rule,
+				triggers: [desired.trigger],
+				unknownClaims: [],
+				permittedGrants
+			};
+		}
+	}
+
+	return undefined;
+}
+
 function classifyTrustRules(
 	rules: readonly OidcTrustSummary[],
 	desiredRules: readonly DesiredTrustRule[]
 ): TrustRuleClassification {
 	const entries = new Map<string, TrustRuleEntry>();
-	const currentRuleIds = new Set(
-		rules
+	const earlier: EarlierTrustRule[] = [];
+	// Setup extends at most one earlier copy for each preset rule, and none when
+	// the tenant already has the preset's rule or an extended copy. Every other
+	// earlier copy is a conflict, so setup never leaves two rules for the same
+	// runs.
+	const upgradable = desiredRules.filter((desired) =>
+		rules.every(
+			(rule) => rule.disabled || !isRuleMatchingBody(rule, desired.body)
+		)
+	);
+
+	for (const desired of upgradable) {
+		const copy = firstEarlierCopy(rules, desired);
+
+		if (copy !== undefined) {
+			earlier.push(copy);
+		}
+	}
+
+	// A rule that an earlier release wrote from a preset is the preset's rule
+	// once setup extends it, so it is current, as a rule equal to the preset is.
+	const currentRuleIds = new Set([
+		...rules
 			.filter(
 				(rule) =>
 					!rule.disabled &&
 					desiredRules.some((desired) => isRuleMatchingBody(rule, desired.body))
 			)
-			.map((rule) => rule.id)
-	);
+			.map((rule) => rule.id),
+		...earlier.map(({ rule }) => rule.id)
+	]);
 
 	for (const desired of desiredRules) {
 		for (const rule of rules) {
@@ -564,6 +635,7 @@ function classifyTrustRules(
 
 	return {
 		conflicts: inBucket('conflict'),
+		earlier,
 		uncertain: inBucket('uncertain'),
 		superseded: inBucket('superseded')
 	};
@@ -818,6 +890,10 @@ export async function runGithubSetup(
 		'Reading pull-request cache access',
 		() => planPullRequestCacheAccess(client, identity, access)
 	);
+	const shouldGrantBuildInputs = await reporter.phase(
+		'Checking server features',
+		() => canGrantBuildInputs(client.buildInputs.read)
+	);
 	const prBody = githubPrAddBody(url, identity, {
 		repo: options.repo,
 		jobWorkflowRef: publishingReference,
@@ -829,7 +905,8 @@ export async function runGithubSetup(
 		branch: options.branch,
 		jobWorkflowRef: publishingReference,
 		readCache: defaultCache.access === 'private',
-		readPullRequestCaches: isTrustedContributorReuse && access === 'private'
+		readPullRequestCaches: isTrustedContributorReuse && access === 'private',
+		shouldGrantBuildInputs
 	});
 	// These are the default claims that setup can determine without seeing a
 	// token. GitHub environments and custom subject templates can change `sub`,
@@ -991,11 +1068,32 @@ export async function runGithubSetup(
 				await plan.apply?.();
 			}
 
+			const extendedRules = new Map<string, OidcTrustSummary>();
+			const earlierSteps: SetupStep[] = [];
+
+			for (const earlier of classification.earlier) {
+				extendedRules.set(
+					earlier.rule.id,
+					await client.oidcTrust.extend({
+						id: earlier.rule.id,
+						expected: earlier.rule,
+						permittedGrants: earlier.permittedGrants
+					})
+				);
+				earlierSteps.push({
+					step: `earlier trust rule ${earlier.rule.id}`,
+					outcome: 'extended',
+					detail: `${earlier.triggers.join(' and ')}; added ${earlier.permittedGrants
+						.flatMap((grant) => ('actions' in grant ? grant.actions : []))
+						.join(', ')}`
+				});
+			}
+
 			// Add the new rules before removing old ones. A partial failure must not
 			// leave the repository without a matching trust rule.
-			const remainingRules = rules.filter(
-				(rule) => !removedRuleIds.has(rule.id)
-			);
+			const remainingRules = rules
+				.filter((rule) => !removedRuleIds.has(rule.id))
+				.map((rule) => extendedRules.get(rule.id) ?? rule);
 			const trustPlans = desiredRules.map((desired) =>
 				planTrustRule(client, remainingRules, desired.step, desired.body)
 			);
@@ -1032,6 +1130,7 @@ export async function runGithubSetup(
 
 			return [
 				...configurationPlans.map(({ step }) => step),
+				...earlierSteps,
 				...conflictSteps,
 				...trustPlans.map(({ step }) => step)
 			];
@@ -1197,6 +1296,7 @@ export function registerGithubCommands(
 				{
 					caches: rpc.caches,
 					reuseViews: rpc.reuseViews,
+					buildInputs: rpc.buildInputs,
 					oidcTrust: rpc.oidcTrust
 				},
 				{
@@ -1321,6 +1421,7 @@ export function registerGithubCommands(
 			const client = {
 				caches: rpc.caches,
 				reuseViews: rpc.reuseViews,
+				buildInputs: rpc.buildInputs,
 				oidcTrust: rpc.oidcTrust
 			};
 			const dependencies = {

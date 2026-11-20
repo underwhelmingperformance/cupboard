@@ -2353,7 +2353,7 @@ Options:
   --audience <audience>                     audience that the token must have (required unless you use --from-file)
   --claim <key=value>                       a claim that the token must have, with exactly this value (repeatable) (default: [])
   --workflow-ref, --job-workflow-ref <ref>  require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check
-  --allow <action>                          a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen or remove (default: [])
+  --allow <action>                          a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen, remove or build-inputs (default: [])
   --cache <name>                            the cache that the grants apply to (default: the tenant's default cache)
   --cache-template <template>               make the cache name from values in the token, such as "pr-{pr}" (see --template-source and --capture)
   --root <name>                             the root that publication grants cover, or a root prefix ending in /

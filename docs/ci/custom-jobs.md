@@ -300,7 +300,8 @@ That rule accepts every workflow in the repository that runs on `main`. To
 accept only the job's workflow file, write the rule by hand and pin
 `workflow_ref`. If the job above is in `.github/workflows/publish.yml`, the
 repository ID is `123456` and the owner ID is `654321`, this rule gives the same
-grants as the branch preset:
+grants as the branch preset, except `build-inputs`, which only the flake publish
+workflow is meant to use:
 
 ```sh
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \

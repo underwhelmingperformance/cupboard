@@ -42,6 +42,8 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 // root binding, while an ordinary push does not.
 //
 // Keep cache creation and deletion separate from upload permissions.
+// `build-inputs` changes what the cache keeps of paths it already has, so no
+// other shorthand includes it.
 const allowExpansions = {
 	read: ['cache:content-read'],
 	push: [
@@ -56,7 +58,8 @@ const allowExpansions = {
 	create: ['cache:create'],
 	remove: ['cache:delete'],
 	close: ['cache:close'],
-	reopen: ['cache:reopen']
+	reopen: ['cache:reopen'],
+	'build-inputs': ['build-inputs:record']
 } as const;
 
 export type AllowShorthand = keyof typeof allowExpansions;

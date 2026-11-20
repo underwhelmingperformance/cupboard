@@ -447,7 +447,12 @@ The response reports each store path as one of:
 - `deferred` when the request reached its budget before it
 
 A closed cache refuses the request. Build inputs change what the cache keeps, so
-no trust rule that the CLI creates grants this action.
+only a trust rule that grants `build-inputs` allows this action. The branch and
+tag presets of `cupboard oidc-trust` grant it, as do the branch rule that
+`cupboard github setup` writes and the rules that `cupboard github check --fix`
+writes for a flake publish job that runs on a branch push, a tag push, a
+release, a manual dispatch or a schedule. The pull-request rules don't. See
+[What a rule can grant](../ci/trust-rules.md#what-a-rule-can-grant).
 
 A tenant administrator, or another caller with a grant for the
 `cache:content-read` action, can read the build inputs of one store path:

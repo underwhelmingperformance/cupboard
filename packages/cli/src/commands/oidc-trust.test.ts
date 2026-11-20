@@ -17,7 +17,9 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { ResultPayload, ResultRow } from '@cupboard/reporter';
+import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildProgram } from '../cli.ts';
@@ -47,6 +49,7 @@ import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
 const mocks = vi.hoisted(() => ({
 	add: vi.fn<OidcTrustClient['add']>(),
+	readBuildInputs: vi.fn<(input: { hash: string }) => Promise<unknown>>(),
 	lookup: vi.fn<(repository: string) => Promise<RepositoryIdentity>>(),
 	verify:
 		vi.fn<
@@ -71,7 +74,10 @@ vi.mock('./github/workflow-reference.ts', () => ({
 // parsed from argv sends its rule to `mocks.add`.
 vi.mock('../client/orpc.ts', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../client/orpc.ts')>()),
-	tenantRpc: () => ({ oidcTrust: { add: mocks.add } }),
+	tenantRpc: () => ({
+		oidcTrust: { add: mocks.add },
+		buildInputs: { read: { inDefaultCache: mocks.readBuildInputs } }
+	}),
 	controlRpc: () => ({ oidcTrust: { add: mocks.add } })
 }));
 
@@ -79,6 +85,13 @@ vi.mock('./oidc-trust/github.ts', async (importOriginal) => ({
 	...(await importOriginal<typeof import('./oidc-trust/github.ts')>()),
 	lookupRepository: mocks.lookup
 }));
+
+// A current server answers the probe for build inputs, so the presets include
+// the `build-inputs` grant unless a test answers as an earlier server.
+beforeEach(() => {
+	mocks.readBuildInputs.mockReset();
+	mocks.readBuildInputs.mockResolvedValue({ status: 'absent' });
+});
 
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
@@ -95,6 +108,9 @@ const uploadActions = [
 	'upload:confirm'
 ];
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
+// The branch and tag presets publish trusted builds, so they may add build
+// inputs to paths that the cache already has. The pull-request preset may not.
+const buildInputsActions = ['build-inputs:record'];
 // A preset rule covers a run's whole retention conversation: replacing a
 // target root's list, reading that list, and attaching to the run root every
 // push binds.
@@ -826,6 +842,7 @@ describe('githubTagAddBody', () => {
 	it('includes an exact content-read grant for the per-tag cache when requested', () => {
 		expect(
 			githubTagAddBody(tenantBase, identity, {
+				shouldGrantBuildInputs: true,
 				repo: 'acme/infra',
 				readCache: true
 			})
@@ -840,7 +857,12 @@ describe('githubTagAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, ...rootActions],
+					actions: [
+						...uploadActions,
+						...buildInputsActions,
+						...attestActions,
+						...rootActions
+					],
 					resources: { cache: tagCacheBinding, root: tagRootBinding }
 				},
 				{
@@ -854,7 +876,10 @@ describe('githubTagAddBody', () => {
 	});
 	it('grants the upload, retention and attestation operations a publication performs, scoped to the per-tag cache and root', () => {
 		expect(
-			githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' })
+			githubTagAddBody(tenantBase, identity, {
+				shouldGrantBuildInputs: true,
+				repo: 'acme/infra'
+			})
 		).toStrictEqual({
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: tenantUrl,
@@ -866,7 +891,12 @@ describe('githubTagAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, ...rootActions],
+					actions: [
+						...uploadActions,
+						...buildInputsActions,
+						...attestActions,
+						...rootActions
+					],
 					resources: { cache: tagCacheBinding, root: tagRootBinding }
 				}
 			],
@@ -874,8 +904,24 @@ describe('githubTagAddBody', () => {
 		});
 	});
 
+	it('leaves out the build-inputs grant for a server without it', () => {
+		expect(
+			githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' })
+				.permittedGrants
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: [...uploadActions, ...attestActions, ...rootActions],
+				resources: { cache: tagCacheBinding, root: tagRootBinding }
+			}
+		]);
+	});
+
 	it('pins the tag ref type so the rule matches only tag tokens', () => {
-		const body = githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' });
+		const body = githubTagAddBody(tenantBase, identity, {
+			shouldGrantBuildInputs: true,
+			repo: 'acme/infra'
+		});
 
 		expect(body.claims.ref_type).toBe('tag');
 	});
@@ -883,6 +929,7 @@ describe('githubTagAddBody', () => {
 	it('omits attestation operations when --no-attest is given', () => {
 		expect(
 			githubTagAddBody(tenantBase, identity, {
+				shouldGrantBuildInputs: true,
 				repo: 'acme/infra',
 				attest: false
 			})
@@ -897,7 +944,7 @@ describe('githubTagAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...rootActions],
+					actions: [...uploadActions, ...buildInputsActions, ...rootActions],
 					resources: { cache: tagCacheBinding, root: tagRootBinding }
 				}
 			],
@@ -909,10 +956,12 @@ describe('githubTagAddBody', () => {
 describe('githubBranchAddBody', () => {
 	it('adds exact cache and view content-read grants to a private branch rule', () => {
 		const original = githubBranchAddBody(tenantBase, identity, {
+			shouldGrantBuildInputs: true,
 			repo: 'acme/infra',
 			branch: 'main'
 		});
 		const privateRule = githubBranchAddBody(tenantBase, identity, {
+			shouldGrantBuildInputs: true,
 			repo: 'acme/infra',
 			branch: 'main',
 			readCache: true,
@@ -939,6 +988,7 @@ describe('githubBranchAddBody', () => {
 	it('gates the branch via the ref claim and matches the workflow file at any ref', () => {
 		expect(
 			githubBranchAddBody(tenantBase, identity, {
+				shouldGrantBuildInputs: true,
 				repo: 'acme/infra',
 				branch: 'main',
 				jobWorkflowRef: 'acme/infra/.github/workflows/cupboard-publish.yml'
@@ -957,7 +1007,12 @@ describe('githubBranchAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, ...rootActions],
+					actions: [
+						...uploadActions,
+						...buildInputsActions,
+						...attestActions,
+						...rootActions
+					],
 					resources: {
 						cache: { kind: 'default' },
 						root: {
@@ -973,6 +1028,7 @@ describe('githubBranchAddBody', () => {
 
 	it('matches the job_workflow_ref exactly when the value carries an @ref', () => {
 		const body = githubBranchAddBody(tenantBase, identity, {
+			shouldGrantBuildInputs: true,
 			repo: 'acme/infra',
 			branch: 'release',
 			jobWorkflowRef:
@@ -990,7 +1046,7 @@ describe('githubBranchAddBody', () => {
 		expect(body.permittedGrants).toStrictEqual([
 			{
 				type: 'cupboard_cache',
-				actions: [...uploadActions, ...rootActions],
+				actions: [...uploadActions, ...buildInputsActions, ...rootActions],
 				resources: {
 					cache: { kind: 'default' },
 					root: { validate: 'rootName', exact: 'github:acme/infra/release/' }
@@ -1001,6 +1057,7 @@ describe('githubBranchAddBody', () => {
 
 	it('gates only the branch when no job_workflow_ref is given', () => {
 		const body = githubBranchAddBody(tenantBase, identity, {
+			shouldGrantBuildInputs: true,
 			repo: 'acme/infra',
 			branch: 'main'
 		});
@@ -1419,10 +1476,12 @@ describe('parsed GitHub read presets', () => {
 						})
 					: command === 'add-github-tag'
 						? githubTagAddBody(tenantBase, identity, {
+								shouldGrantBuildInputs: true,
 								repo: identity.fullName,
 								jobWorkflowRef: reference
 							})
 						: githubBranchAddBody(tenantBase, identity, {
+								shouldGrantBuildInputs: true,
 								repo: identity.fullName,
 								branch: 'main',
 								jobWorkflowRef: reference
@@ -1669,6 +1728,83 @@ describe('parsed GitHub read presets', () => {
 		}
 	);
 
+	const probeAnswers = [
+		{
+			server: 'a server without the procedure',
+			// oRPC keeps the raw response of a plain 404 in the error data.
+			failure: new ORPCError('NOT_FOUND', {
+				status: StatusCodes.NOT_FOUND,
+				data: {
+					status: StatusCodes.NOT_FOUND,
+					headers: {},
+					body: 'Not found\n'
+				}
+			}),
+			shouldGrantBuildInputs: false
+		},
+		{
+			server: 'a token without cache:content-read',
+			failure: new ORPCError('FORBIDDEN', {
+				status: StatusCodes.FORBIDDEN
+			}),
+			shouldGrantBuildInputs: true
+		}
+	];
+
+	it.each(
+		probeAnswers.flatMap(({ server, failure, shouldGrantBuildInputs }) => [
+			{
+				command: 'add-github-branch',
+				server,
+				failure,
+				args: ['--branch', 'main'],
+				body: githubBranchAddBody(tenantBase, identity, {
+					shouldGrantBuildInputs,
+					repo: identity.fullName,
+					branch: 'main'
+				})
+			},
+			{
+				command: 'add-github-tag',
+				server,
+				failure,
+				args: [],
+				body: githubTagAddBody(tenantBase, identity, {
+					shouldGrantBuildInputs,
+					repo: identity.fullName
+				})
+			}
+		])
+	)(
+		'decides the build-inputs grant of $command for $server',
+		async ({ command, failure, args, body }) => {
+			mocks.add.mockReset();
+			mocks.add.mockImplementation((input) =>
+				Promise.resolve(summary({ ...input, id: 'rule-1' }))
+			);
+			mocks.lookup.mockReset();
+			mocks.lookup.mockResolvedValue(identity);
+			mocks.readBuildInputs.mockRejectedValue(failure);
+
+			await oidcTrustProgram()
+				.exitOverride()
+				.parseAsync([
+					'node',
+					'cupboard',
+					'--output-mode',
+					'json',
+					'oidc-trust',
+					command,
+					tenantUrl,
+					'--repo',
+					identity.fullName,
+					...args
+				]);
+
+			expect(mocks.add.mock.calls).toStrictEqual([[body]]);
+		}
+	);
+
 	const presets = [
 		{
 			command: 'add-github-pr',
@@ -1682,6 +1818,7 @@ describe('parsed GitHub read presets', () => {
 			command: 'add-github-branch',
 			args: ['--branch', 'main'],
 			body: githubBranchAddBody(tenantBase, identity, {
+				shouldGrantBuildInputs: true,
 				repo: identity.fullName,
 				branch: 'main',
 				readCache: true
@@ -1691,6 +1828,7 @@ describe('parsed GitHub read presets', () => {
 			command: 'add-github-tag',
 			args: [],
 			body: githubTagAddBody(tenantBase, identity, {
+				shouldGrantBuildInputs: true,
 				repo: identity.fullName,
 				readCache: true
 			})

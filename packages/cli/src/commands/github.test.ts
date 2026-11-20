@@ -29,6 +29,7 @@ import {
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +73,7 @@ import {
 	InvalidRepositoryError,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
+import { buildCacheGrant } from './oidc-trust/rule-builder.ts';
 
 const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
 const alice = readUserInputSchema.parse('alice');
@@ -105,6 +107,7 @@ const prCloseBody = githubPrCloseAddBody(url, identity, {
 	jobWorkflowRef: options.workflowRef
 });
 const branchBody = githubBranchAddBody(url, identity, {
+	shouldGrantBuildInputs: true,
 	repo: options.repo,
 	branch: options.branch,
 	jobWorkflowRef: options.workflowRef
@@ -114,10 +117,26 @@ const previousPrBody = githubPrAddBody(url, identity, {
 	jobWorkflowRef: previousWorkflowReference
 });
 const previousBranchBody = githubBranchAddBody(url, identity, {
+	shouldGrantBuildInputs: true,
 	repo: options.repo,
 	branch: options.branch,
 	jobWorkflowRef: previousWorkflowReference
 });
+
+// The branch rule that a release before `build-inputs` wrote from the preset's
+// earlier allow list, and the grant that setup adds to it.
+const earlierBranchBody: OidcTrustAddBodyInput = {
+	...branchBody,
+	permittedGrants: [
+		buildCacheGrant({
+			allow: ['push', 'root', 'attach', 'attest'],
+			root: 'github:acme/app/main/'
+		})
+	]
+};
+const addedBranchGrants = [
+	buildCacheGrant({ allow: ['build-inputs'], root: 'github:acme/app/main/' })
+];
 
 function storedRule(id: string, body: OidcTrustAddBodyInput) {
 	return oidcTrustSummarySchema.parse({ id, ...body, disabled: false });
@@ -132,7 +151,12 @@ interface Recorded {
 	}[];
 	readonly ruleAdds: OidcTrustAddBodyInput[];
 	readonly ruleRemoves: string[];
+	readonly ruleExtends: OidcTrustExtendInput[];
 }
+
+type OidcTrustExtendInput = Parameters<
+	GithubSetupClient['oidcTrust']['extend']
+>[0];
 
 interface Stored {
 	readonly defaultCacheAccess?: CacheAccessMode;
@@ -148,6 +172,9 @@ interface Stored {
 		selectors: readonly ReuseViewSelectorInput[];
 	}[];
 	readonly rules?: OidcTrustSummary[];
+	// A server from before `build-inputs:record` has no procedure that reads
+	// build inputs.
+	readonly isEarlierServer?: boolean;
 }
 
 function setupClient(stored: Stored): {
@@ -158,7 +185,8 @@ function setupClient(stored: Stored): {
 		graceAdds: [],
 		viewSets: [],
 		ruleAdds: [],
-		ruleRemoves: []
+		ruleRemoves: [],
+		ruleExtends: []
 	};
 	const client: GithubSetupClient = {
 		caches: {
@@ -205,6 +233,24 @@ function setupClient(stored: Stored): {
 				);
 			}
 		},
+		buildInputs: {
+			read: {
+				inDefaultCache: (input) =>
+					stored.isEarlierServer === true
+						? Promise.reject(
+								// oRPC keeps the raw response of a plain 404 in the error data.
+								new ORPCError('NOT_FOUND', {
+									status: StatusCodes.NOT_FOUND,
+									data: {
+										status: StatusCodes.NOT_FOUND,
+										headers: {},
+										body: 'Not found\n'
+									}
+								})
+							)
+						: Promise.resolve({ storePathHash: input.hash, status: 'absent' })
+			}
+		},
 		oidcTrust: {
 			list: () =>
 				Promise.resolve(
@@ -222,6 +268,19 @@ function setupClient(stored: Stored): {
 					id: trustRuleIdSchema.parse(id),
 					removed: true
 				});
+			},
+			extend(input) {
+				recorded.ruleExtends.push(input);
+
+				return Promise.resolve(
+					oidcTrustSummarySchema.parse({
+						...input.expected,
+						permittedGrants: [
+							...input.expected.permittedGrants,
+							...input.permittedGrants
+						]
+					})
+				);
 			}
 		}
 	};
@@ -295,7 +354,8 @@ describe('runGithubSetup', () => {
 			graceAdds: [],
 			viewSets: [],
 			ruleAdds: [],
-			ruleRemoves: []
+			ruleRemoves: [],
+			ruleExtends: []
 		});
 	});
 
@@ -317,7 +377,8 @@ describe('runGithubSetup', () => {
 						jobWorkflowRef: options.workflowRef
 					})
 				],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			results: [
 				[
@@ -368,6 +429,7 @@ describe('runGithubSetup', () => {
 					readDefaultCache: true
 				}).permittedGrants,
 				githubBranchAddBody(url, identity, {
+					shouldGrantBuildInputs: true,
 					repo: options.repo,
 					branch: options.branch,
 					jobWorkflowRef: options.workflowRef,
@@ -412,7 +474,8 @@ describe('runGithubSetup', () => {
 					graceAdds: [],
 					viewSets: [],
 					ruleAdds: [],
-					ruleRemoves: []
+					ruleRemoves: [],
+					ruleExtends: []
 				},
 				steps: ['pull-request cache access'],
 				outcomes: [
@@ -452,7 +515,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{ label: 'pull-request trust rule', value: ruleCreated },
@@ -494,7 +558,8 @@ describe('runGithubSetup', () => {
 			graceAdds: [],
 			viewSets: [],
 			ruleAdds: [],
-			ruleRemoves: []
+			ruleRemoves: [],
+			ruleExtends: []
 		});
 	});
 
@@ -589,12 +654,308 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{ label: 'pull-request trust rule', value: 'unchanged' },
 				{ label: 'main trust rule', value: 'unchanged' },
 				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
+			]
+		});
+	});
+
+	it('adds the build-inputs grant to a branch rule from an earlier release', async () => {
+		const results: ResultRow[][] = [];
+		const earlier = storedRule('branch', earlierBranchBody);
+		const { client, recorded } = setupClient({
+			rules: [
+				storedRule('pr', prBody),
+				earlier,
+				storedRule('pr-close', prCloseBody)
+			]
+		});
+
+		await runGithubSetup(url, options, reporter(results), client, dependencies);
+
+		expect({ recorded, outcomes: results[0]?.slice(0, 4) }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: [],
+				ruleExtends: [
+					{
+						id: 'branch',
+						expected: earlier,
+						permittedGrants: addedBranchGrants
+					}
+				]
+			},
+			outcomes: [
+				{
+					label: 'earlier trust rule branch',
+					value: 'extended: main pushes; added build-inputs:record'
+				},
+				{ label: 'pull-request trust rule', value: 'unchanged' },
+				{ label: 'main trust rule', value: 'unchanged' },
+				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
+			]
+		});
+	});
+
+	it('treats an extended branch rule from an earlier release as converged', async () => {
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			rules: [
+				storedRule('pr', prBody),
+				storedRule('branch', {
+					...earlierBranchBody,
+					permittedGrants: [
+						...earlierBranchBody.permittedGrants,
+						...addedBranchGrants
+					]
+				}),
+				storedRule('pr-close', prCloseBody)
+			]
+		});
+
+		await runGithubSetup(url, options, reporter(results), client, dependencies);
+
+		expect({ recorded, outcomes: results[0]?.slice(0, 3) }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: [],
+				ruleExtends: []
+			},
+			outcomes: [
+				{ label: 'pull-request trust rule', value: 'unchanged' },
+				{ label: 'main trust rule', value: 'unchanged' },
+				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'a fresh tenant',
+			rules: [],
+			ruleAdds: [prBody, earlierBranchBody, prCloseBody]
+		},
+		{
+			name: 'a branch rule from an earlier release',
+			rules: [
+				storedRule('pr', prBody),
+				storedRule('branch', earlierBranchBody),
+				storedRule('pr-close', prCloseBody)
+			],
+			ruleAdds: []
+		}
+	])(
+		'leaves out the build-inputs grant for a server without it, on $name',
+		async ({ rules, ruleAdds }) => {
+			const { client, recorded } = setupClient({
+				rules,
+				isEarlierServer: true
+			});
+
+			await runGithubSetup(url, options, reporter([]), client, dependencies);
+
+			expect(recorded).toStrictEqual({
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds,
+				ruleRemoves: [],
+				ruleExtends: []
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'another branch ref',
+			rule: {
+				...earlierBranchBody,
+				claims: { ...earlierBranchBody.claims, ref: 'refs/heads/other' }
+			},
+			ruleAdds: [branchBody],
+			cancellations: []
+		},
+		{
+			name: 'an extra claim',
+			rule: {
+				...earlierBranchBody,
+				claims: { ...earlierBranchBody.claims, environment: 'production' }
+			},
+			ruleAdds: [branchBody],
+			cancellations: []
+		},
+		{
+			name: 'another workflow reference',
+			rule: {
+				...earlierBranchBody,
+				claims: {
+					...earlierBranchBody.claims,
+					job_workflow_ref: previousWorkflowReference
+				}
+			},
+			ruleAdds: [branchBody],
+			cancellations: []
+		},
+		{
+			name: 'an extra action',
+			rule: {
+				...earlierBranchBody,
+				permittedGrants: [
+					buildCacheGrant({
+						allow: ['push', 'root', 'attach', 'attest', 'remove'],
+						root: 'github:acme/app/main/'
+					})
+				]
+			},
+			ruleAdds: [],
+			cancellations: ['GitHub setup was left unchanged.']
+		},
+		{
+			name: 'an extra grant',
+			rule: {
+				...earlierBranchBody,
+				permittedGrants: [
+					...earlierBranchBody.permittedGrants,
+					buildCacheGrant({ allow: ['read'] })
+				]
+			},
+			ruleAdds: [],
+			cancellations: ['GitHub setup was left unchanged.']
+		}
+	])(
+		'does not extend an earlier branch rule with $name',
+		async ({ rule, ruleAdds, cancellations }) => {
+			const { client, recorded } = setupClient({
+				rules: [
+					storedRule('pr', prBody),
+					storedRule('branch', rule),
+					storedRule('pr-close', prCloseBody)
+				]
+			});
+			const { ui, captured } = fakeCliUi();
+
+			await runGithubSetup(url, options, ui, client, dependencies);
+
+			expect({
+				recorded,
+				cancellations: captured.cancellations
+			}).toStrictEqual({
+				recorded: {
+					graceAdds: [],
+					viewSets: [],
+					ruleAdds,
+					ruleRemoves: [],
+					ruleExtends: []
+				},
+				cancellations
+			});
+		}
+	);
+
+	it('does not extend a disabled branch rule from an earlier release', async () => {
+		const { client, recorded } = setupClient({
+			rules: [
+				storedRule('pr', prBody),
+				oidcTrustSummarySchema.parse({
+					id: 'branch',
+					...earlierBranchBody,
+					disabled: true
+				}),
+				storedRule('pr-close', prCloseBody)
+			]
+		});
+
+		await runGithubSetup(url, options, reporter([]), client, dependencies);
+
+		expect(recorded).toStrictEqual({
+			graceAdds: [],
+			viewSets: [],
+			ruleAdds: [branchBody],
+			ruleRemoves: [],
+			ruleExtends: []
+		});
+	});
+
+	it.each([
+		{ name: 'the preset rule', current: branchBody },
+		{
+			name: 'an extended rule from an earlier release',
+			current: {
+				...earlierBranchBody,
+				permittedGrants: [
+					...earlierBranchBody.permittedGrants,
+					...addedBranchGrants
+				]
+			}
+		}
+	])(
+		'removes an earlier branch rule as a conflict beside $name',
+		async ({ current }) => {
+			const { client, recorded } = setupClient({
+				rules: [
+					storedRule('pr', prBody),
+					storedRule('branch', current),
+					storedRule('earlier', earlierBranchBody),
+					storedRule('pr-close', prCloseBody)
+				]
+			});
+
+			await runGithubSetup(
+				url,
+				{ ...options, yes: true },
+				reporter([], { confirm: 'yes' }),
+				client,
+				dependencies
+			);
+
+			expect(recorded).toStrictEqual({
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: ['earlier'],
+				ruleExtends: []
+			});
+		}
+	);
+
+	it('extends one of two identical branch rules from an earlier release', async () => {
+		const first = storedRule('earlier-a', earlierBranchBody);
+		const { client, recorded } = setupClient({
+			rules: [
+				storedRule('pr', prBody),
+				first,
+				storedRule('earlier-b', earlierBranchBody),
+				storedRule('pr-close', prCloseBody)
+			]
+		});
+
+		await runGithubSetup(
+			url,
+			{ ...options, yes: true },
+			reporter([], { confirm: 'yes' }),
+			client,
+			dependencies
+		);
+
+		expect(recorded).toStrictEqual({
+			graceAdds: [],
+			viewSets: [],
+			ruleAdds: [],
+			ruleRemoves: ['earlier-b'],
+			ruleExtends: [
+				{
+					id: 'earlier-a',
+					expected: first,
+					permittedGrants: addedBranchGrants
+				}
 			]
 		});
 	});
@@ -638,7 +999,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{ label: 'pull-request trust rule', value: ruleCreated },
@@ -681,7 +1043,8 @@ describe('runGithubSetup', () => {
 			graceAdds: [],
 			viewSets: [],
 			ruleAdds: [],
-			ruleRemoves: []
+			ruleRemoves: [],
+			ruleExtends: []
 		});
 	});
 
@@ -717,7 +1080,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: ['previous-branch', 'previous-pr']
+				ruleRemoves: ['previous-branch', 'previous-pr'],
+				ruleExtends: []
 			},
 			prompts: [
 				{
@@ -784,7 +1148,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			confirms: [
 				{
@@ -815,7 +1180,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			confirms: [
 				{
@@ -856,7 +1222,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{
@@ -907,7 +1274,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: ['dispatch']
+				ruleRemoves: ['dispatch'],
+				ruleExtends: []
 			},
 			prompts: [
 				{
@@ -949,7 +1317,8 @@ describe('runGithubSetup', () => {
 			graceAdds: [],
 			viewSets: [],
 			ruleAdds: [],
-			ruleRemoves: []
+			ruleRemoves: [],
+			ruleExtends: []
 		});
 	});
 
@@ -969,7 +1338,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{ label: 'pull-request trust rule', value: ruleCreated },
@@ -1007,7 +1377,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			prompts: []
 		});
@@ -1042,7 +1413,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, prCloseBody],
-				ruleRemoves: ['conflict']
+				ruleRemoves: ['conflict'],
+				ruleExtends: []
 			},
 			confirms: [
 				{
@@ -1081,7 +1453,8 @@ describe('runGithubSetup', () => {
 			graceAdds: [],
 			viewSets: [],
 			ruleAdds: [],
-			ruleRemoves: []
+			ruleRemoves: [],
+			ruleExtends: []
 		});
 	});
 
@@ -1122,7 +1495,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: ['conflict']
+				ruleRemoves: ['conflict'],
+				ruleExtends: []
 			},
 			outcomes: [
 				{
@@ -1191,7 +1565,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			prompts: [
 				{
@@ -1259,7 +1634,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{ label: 'pull-request trust rule', value: ruleCreated },
@@ -1381,7 +1757,8 @@ describe('runGithubSetup', () => {
 					graceAdds: [],
 					viewSets: [],
 					ruleAdds: [prBody, branchBody, prCloseBody],
-					ruleRemoves: earlierFailure === undefined ? ['previous-branch'] : []
+					ruleRemoves: earlierFailure === undefined ? ['previous-branch'] : [],
+					ruleExtends: []
 				},
 				outcomes: [
 					{ label: 'pull-request trust rule', value: ruleCreated },
@@ -1415,6 +1792,7 @@ describe('runGithubSetup', () => {
 			jobWorkflowRef: patternReference
 		});
 		const patternBranchBody = githubBranchAddBody(url, identity, {
+			shouldGrantBuildInputs: true,
 			repo: options.repo,
 			branch: options.branch,
 			jobWorkflowRef: patternReference
@@ -1454,7 +1832,8 @@ describe('runGithubSetup', () => {
 						jobWorkflowRef: patternReference
 					})
 				],
-				ruleRemoves: ['exact']
+				ruleRemoves: ['exact'],
+				ruleExtends: []
 			},
 			outcomes: [
 				{
@@ -1490,6 +1869,7 @@ describe('runGithubSetup', () => {
 				jobWorkflowRef: desiredReference
 			});
 			const desiredBranchBody = githubBranchAddBody(url, identity, {
+				shouldGrantBuildInputs: true,
 				repo: options.repo,
 				branch: options.branch,
 				jobWorkflowRef: desiredReference
@@ -1530,7 +1910,8 @@ describe('runGithubSetup', () => {
 						jobWorkflowRef: desiredReference
 					})
 				],
-				ruleRemoves: expectedRemovals
+				ruleRemoves: expectedRemovals,
+				ruleExtends: []
 			});
 		}
 	);
@@ -1543,6 +1924,7 @@ describe('runGithubSetup', () => {
 			jobWorkflowRef: patternReference
 		});
 		const patternBranchBody = githubBranchAddBody(url, identity, {
+			shouldGrantBuildInputs: true,
 			repo: options.repo,
 			branch: options.branch,
 			jobWorkflowRef: patternReference
@@ -1581,7 +1963,8 @@ describe('runGithubSetup', () => {
 				graceAdds: [],
 				viewSets: [],
 				ruleAdds: [],
-				ruleRemoves: []
+				ruleRemoves: [],
+				ruleExtends: []
 			},
 			outcomes: [
 				{ label: 'pull-request trust rule', value: 'unchanged' },
@@ -2264,6 +2647,7 @@ it('sets private trusted reuse grants on the core workflow without creating a pr
 		graceAdds: [],
 		viewSets: [],
 		ruleRemoves: [],
+		ruleExtends: [],
 		ruleAdds: [
 			githubPrAddBody(url, identity, {
 				repo: options.repo,
@@ -2272,6 +2656,7 @@ it('sets private trusted reuse grants on the core workflow without creating a pr
 				readDefaultCache: true
 			}),
 			githubBranchAddBody(url, identity, {
+				shouldGrantBuildInputs: true,
 				repo: options.repo,
 				branch: options.branch,
 				jobWorkflowRef: pinnedWorkflowReference,
