@@ -26,6 +26,7 @@ import {
 	uploadCapabilitiesHeader,
 	type UploadId,
 	type UploadPathNegotiation,
+	uploadPlanMaxPaths,
 	uploadPlanResponseSchema,
 	uploadRequestLimitErrorCode,
 	uploadRequestMaxPathsHeader
@@ -77,7 +78,6 @@ import {
 } from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { defaultCommitEntryCreditBudget } from '../policy/commit-credit.ts';
-import { uploadPlanMaxPaths } from '../policy/upload-pages.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,

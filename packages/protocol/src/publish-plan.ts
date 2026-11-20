@@ -1,6 +1,8 @@
 import {
+	referenceSet,
 	type RootName,
 	rootNameSchema,
+	storePathBasenameSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -11,6 +13,7 @@ import {
 } from '@cupboard/shared/text';
 import { z } from 'zod';
 
+import { buildInputsVersionSchema } from './build-inputs.ts';
 import { rootSetMaxTargets } from './retention.ts';
 
 // The plan action writes the publish plan as a JSON document, and later steps
@@ -27,7 +30,8 @@ absent when the release reads no such document.
 */
 export const documentVersionsSchema = z.looseObject({
 	publishPlan: z.number().int().optional(),
-	cohortRoots: z.number().int().optional()
+	cohortRoots: z.number().int().optional(),
+	buildInputs: z.number().int().optional()
 });
 export type DocumentVersions = z.output<typeof documentVersionsSchema>;
 
@@ -325,3 +329,33 @@ export const cohortRootsDocumentSchema = z.strictObject({
 		})
 });
 export type CohortRootsDocument = z.output<typeof cohortRootsDocumentSchema>;
+
+// `cupboard push --build-inputs-file` reads the build inputs of the paths that
+// it publishes from a JSON document and sends them. The document and the CLI
+// that reads it can come from different cupboard releases, so the document
+// records the version of its shape, and `cupboard document-versions` reports
+// the version that a CLI reads.
+export const buildInputsDocumentVersion = 1;
+
+/**
+The build inputs of the paths that one push publishes, keyed by store path,
+each as a set in code-unit order. Every list was computed by version
+`buildInputsVersion` of the client's algorithm. A list may be longer than a
+narinfo row can store, so that one large path does not make the whole
+document invalid. The push publishes such a path, and a path that the
+document does not list, without build inputs.
+*/
+export const buildInputsDocumentSchema = z.strictObject({
+	version: z.literal(buildInputsDocumentVersion),
+	buildInputsVersion: buildInputsVersionSchema,
+	paths: z.record(
+		storePathSchema,
+		z
+			.array(storePathBasenameSchema)
+			.transform((buildInputs) => referenceSet(buildInputs))
+	)
+});
+export type BuildInputsDocument = z.output<typeof buildInputsDocumentSchema>;
+export type BuildInputsDocumentInput = z.input<
+	typeof buildInputsDocumentSchema
+>;

@@ -1,17 +1,100 @@
 import {
+	buildInputsDocumentVersion,
 	cohortRootsVersion,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { cliExitCode } from '../cli.ts';
 
 import {
+	BuildInputsDocumentVersionError,
 	CohortRootsVersionError,
+	parseBuildInputsDocument,
 	parseCohortRoots,
 	parsePublishPlan,
 	PublishPlanVersionError
 } from './publish-plan-file.ts';
+
+describe('parseBuildInputsDocument', () => {
+	const app = `/nix/store/${'0'.repeat(32)}-app`;
+	const compiler = `${'1'.repeat(32)}-compiler`;
+	const source = `${'2'.repeat(32)}-source.tar.gz`;
+
+	it('reads a document of the supported version as sets of build inputs', () => {
+		expect(
+			parseBuildInputsDocument(
+				JSON.stringify({
+					version: buildInputsDocumentVersion,
+					buildInputsVersion: 1,
+					paths: { [app]: [source, compiler, source] }
+				})
+			)
+		).toStrictEqual({
+			version: buildInputsDocumentVersion,
+			buildInputsVersion: 1,
+			paths: { [app]: [compiler, source] }
+		});
+	});
+
+	it('refuses a document of another version', () => {
+		let failure: unknown;
+
+		try {
+			parseBuildInputsDocument(
+				JSON.stringify({ version: 2, buildInputsVersion: 1, paths: {} })
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect({
+			isVersionError: failure instanceof BuildInputsDocumentVersionError,
+			found:
+				failure instanceof BuildInputsDocumentVersionError
+					? failure.found
+					: undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ isVersionError: true, found: 2, status: 2 });
+	});
+
+	it('reads a path with more build inputs than a narinfo row can store', () => {
+		const buildInputs = Array.from(
+			{ length: 8193 },
+			(_, index) => `${String(index).padStart(32, '0')}-input`
+		);
+
+		expect(
+			parseBuildInputsDocument(
+				JSON.stringify({
+					version: buildInputsDocumentVersion,
+					buildInputsVersion: 1,
+					paths: { [app]: buildInputs }
+				})
+			)
+		).toStrictEqual({
+			version: buildInputsDocumentVersion,
+			buildInputsVersion: 1,
+			paths: { [app]: buildInputs }
+		});
+	});
+
+	it.each([
+		{ name: 'a key that is not a store path', paths: { app: [] } },
+		{ name: 'a build input that is not a basename', paths: { [app]: ['x'] } }
+	])('refuses a document with $name', ({ paths }) => {
+		expect(() =>
+			parseBuildInputsDocument(
+				JSON.stringify({
+					version: buildInputsDocumentVersion,
+					buildInputsVersion: 1,
+					paths
+				})
+			)
+		).toThrow(z.ZodError);
+	});
+});
 
 describe('parseCohortRoots', () => {
 	const roots = {

@@ -1,4 +1,5 @@
 import {
+	buildInputsDocumentVersion,
 	cohortRootsVersion,
 	type DocumentVersions,
 	publishPlanVersion
@@ -9,7 +10,8 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 
 const documentVersions: DocumentVersions = {
 	publishPlan: publishPlanVersion,
-	cohortRoots: cohortRootsVersion
+	cohortRoots: cohortRootsVersion,
+	buildInputs: buildInputsDocumentVersion
 };
 
 export function registerDocumentVersionsCommand(

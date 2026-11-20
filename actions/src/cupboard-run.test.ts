@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+	buildInputsDocumentVersion,
 	cohortRootsVersion,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
@@ -128,7 +129,8 @@ describe('inspectDocumentVersions', () => {
 
 		expect(await inspectDocumentVersions(binary)).toStrictEqual({
 			publishPlan: publishPlanVersion,
-			cohortRoots: cohortRootsVersion
+			cohortRoots: cohortRootsVersion,
+			buildInputs: buildInputsDocumentVersion
 		});
 	});
 

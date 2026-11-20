@@ -661,6 +661,13 @@ Options:
                                     republished paths, not a build or download.
   --copied-from-file <path>         JSON file, written by the build, that lists
                                     the stores each path was copied from
+  --build-inputs-file <path>        JSON build inputs document, version 1, as
+                                    buildInputsDocumentSchema in
+                                    @cupboard/protocol defines it:
+                                    {"version":1,"buildInputsVersion":<n>,"paths":{"<storePath>":["<basename>",...]}}.
+                                    The push sends the listed build inputs with
+                                    those paths, and only to a server that
+                                    accepts them.
   --bundle, --attestation <bundle>  a Sigstore bundle file to attach to the
                                     pushed paths that it covers (repeatable;
                                     both option names are equivalent) (default:

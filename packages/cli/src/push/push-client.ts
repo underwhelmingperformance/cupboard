@@ -4,13 +4,21 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
+import {
+	buildInputsCapability,
+	buildInputsMaxLength,
+	canStoreBuildInputs,
+	hasStorableEdges
+} from '@cupboard/protocol/build-inputs';
 import { tenantContract } from '@cupboard/protocol/contract';
 import {
 	subrequestSafetyReserve,
 	workersInvocationAllowances
 } from '@cupboard/protocol/platform';
+import { type BuildInputsDocument } from '@cupboard/protocol/publish-plan';
 import {
 	acceptCapabilitiesHeader,
+	buildInputsUploadMaxPaths,
 	confirmPresentCapability,
 	publicationCapability,
 	type PublicationEntry,
@@ -26,11 +34,15 @@ import {
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadNegotiateMaxPaths,
+	type UploadPathNegotiationFields,
 	uploadPathNegotiationSchema,
-	uploadRequestLimitErrorCode
+	uploadPlanMaxPaths,
+	uploadRequestLimitErrorCode,
+	uploadRequestMaxBodyBytes
 } from '@cupboard/protocol/upload';
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
+import { chunkByWeight } from '@cupboard/shared/collections';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	type DeadlineOptions,
@@ -84,6 +96,40 @@ export interface PushClientOptions {
 	response body fails. The default is `Math.random`.
 	*/
 	readonly random?: RandomSource;
+	/**
+	The build inputs to send in the metadata of the paths that the push
+	publishes. The client sends them only when the server echoes
+	`build-inputs-v1` on the credential request.
+	*/
+	readonly buildInputs?: BuildInputsDocument;
+	/**
+	The clock, in milliseconds since the epoch, that decides when the push
+	credential needs renewing. The default is `Date.now`.
+	*/
+	readonly now?: () => number;
+}
+
+const utf8 = new TextEncoder();
+
+function jsonBytes(value: unknown): number {
+	return utf8.encode(JSON.stringify(value)).length;
+}
+
+// Splits paths into groups whose request bodies stay within
+// `uploadRequestMaxBodyBytes`. Each path costs its JSON and a separating comma.
+function requestBodyGroups<Path>(
+	paths: readonly Path[],
+	envelope: object
+): Path[][] {
+	return chunkByWeight(
+		paths,
+		{
+			maxItems: Math.max(1, paths.length),
+			maxWeight:
+				uploadRequestMaxBodyBytes - jsonBytes({ ...envelope, paths: [] })
+		},
+		(path) => jsonBytes(path) + 1
+	);
 }
 
 /**
@@ -98,13 +144,23 @@ export function pushClientFor(
 ): PushClient {
 	const cache = options.cache;
 	const baseFetcher = options.fetcher ?? keepAliveFetch;
+	const buildInputs =
+		options.buildInputs === undefined
+			? undefined
+			: {
+					version: options.buildInputs.buildInputsVersion,
+					paths: new Map(Object.entries(options.buildInputs.paths))
+				};
+	let hasCredentialBuildInputs = false;
 	let pageSize = negotiationPageSize;
+	let planPageSize: number = uploadPlanMaxPaths;
 	// Each attempt gets its own client, so a concurrent call or an attempt that
 	// missed its deadline cannot overwrite the capabilities of the answer that
 	// is used.
 	const acknowledged = async <Result>(
 		signal: AbortSignal,
-		call: (rpc: ReturnType<typeof tenantRpc>) => Promise<Result>
+		call: (rpc: ReturnType<typeof tenantRpc>) => Promise<Result>,
+		shouldSendBuildInputs: boolean
 	): Promise<{
 		readonly result: Result;
 		readonly hasUploadGraceFacts: boolean;
@@ -114,7 +170,12 @@ export function pushClientFor(
 		const fetcher: typeof fetch = async (input, init) => {
 			const request = new Request(input, init);
 			const headers = new Headers(request.headers);
-			headers.set(acceptCapabilitiesHeader, uploadGraceFactsCapability);
+			headers.set(
+				acceptCapabilitiesHeader,
+				shouldSendBuildInputs
+					? `${uploadGraceFactsCapability},${buildInputsCapability}`
+					: uploadGraceFactsCapability
+			);
 			const response = await baseFetcher(new Request(request, { headers }));
 			hasUploadGraceFacts =
 				response.headers
@@ -126,8 +187,12 @@ export function pushClientFor(
 
 			if (response.ok) {
 				advertisedPageSize =
-					advertisedMaxPaths(response, uploadNegotiateMaxPaths) ??
-					advertisedPageSize;
+					advertisedMaxPaths(
+						response,
+						shouldSendBuildInputs
+							? buildInputsUploadMaxPaths
+							: uploadNegotiateMaxPaths
+					) ?? advertisedPageSize;
 			}
 
 			return response;
@@ -163,19 +228,29 @@ export function pushClientFor(
 		}
 	>();
 	const skips = new Map<StorePathHash, UploadActionDecision>();
-	const rpc = tenantRpc(url, {
-		credential,
-		signal: options.signal,
-		random: options.random,
-		fetcher: async (input, init) => {
+	// A call decides once whether it sends build inputs, and then uses the
+	// client that accepts them for every page, so a renewal during the call
+	// cannot leave a page with build inputs and without the capability.
+	const capabilityFetcher =
+		(shouldSendBuildInputs: boolean): typeof fetch =>
+		async (input, init) => {
 			const request = new Request(input, init);
 			const headers = new Headers(request.headers);
+			const isCredentialRequest = request.url.endsWith('/uploads/credential');
+			const canAcceptBuildInputs =
+				buildInputs !== undefined &&
+				(isCredentialRequest || shouldSendBuildInputs);
 			headers.set(
 				acceptCapabilitiesHeader,
-				`${publicationCapability},${confirmPresentCapability},${pushRootWritesCapability}`
+				[
+					publicationCapability,
+					confirmPresentCapability,
+					pushRootWritesCapability,
+					...(canAcceptBuildInputs ? [buildInputsCapability] : [])
+				].join(',')
 			);
 			const response = await baseFetcher(new Request(request, { headers }));
-			if (request.url.endsWith('/uploads/credential')) {
+			if (isCredentialRequest && response.ok) {
 				const echoed = new Set(
 					response.headers
 						.get(uploadCapabilitiesHeader)
@@ -185,6 +260,12 @@ export function pushClientFor(
 				hasCredentialPublication = echoed.has(publicationCapability);
 				hasCredentialConfirmation = echoed.has(confirmPresentCapability);
 				hasCredentialRootWrites = echoed.has(pushRootWritesCapability);
+				hasCredentialBuildInputs =
+					buildInputs !== undefined && echoed.has(buildInputsCapability);
+			}
+			if (request.url.endsWith('/uploads/plan') && response.ok) {
+				planPageSize =
+					advertisedMaxPaths(response, uploadNegotiateMaxPaths) ?? planPageSize;
 			}
 			if (request.url.endsWith('/uploads/confirm-present')) {
 				confirmationPageSize =
@@ -192,7 +273,19 @@ export function pushClientFor(
 					confirmationPageSize;
 			}
 			return response;
-		}
+		};
+	const rpcOptions = {
+		credential,
+		signal: options.signal,
+		random: options.random
+	};
+	const rpc = tenantRpc(url, {
+		...rpcOptions,
+		fetcher: capabilityFetcher(false)
+	});
+	const buildInputsRpc = tenantRpc(url, {
+		...rpcOptions,
+		fetcher: capabilityFetcher(true)
 	});
 	const raw = new CupboardClient(
 		new URL(url),
@@ -201,8 +294,9 @@ export function pushClientFor(
 		options.signal
 	);
 
-	const session = credentialSession((pushId) =>
-		callInCache(rpc.uploads.credential, cache, { pushId })
+	const session = credentialSession(
+		(pushId) => callInCache(rpc.uploads.credential, cache, { pushId }),
+		options.now === undefined ? {} : { now: options.now }
 	);
 
 	let uploader: Promise<BlobUploader> | undefined;
@@ -233,22 +327,73 @@ export function pushClientFor(
 		tenantContract.uploads.preview.inDefaultCache,
 		{ signal: options.signal, random: options.random }
 	);
-	// Sends the paths in pages of at most `pageSize`, which a response can
-	// change. A request without paths still reaches the server for capability
-	// and lifecycle information.
+	// Sends the paths in pages of at most `requestSize()` paths, which a
+	// response can change. A request without paths still reaches the server for
+	// capability and lifecycle information. A call that accepts
+	// `build-inputs-v1` must also fit each page in the body limit with
+	// `envelope`, the other fields of the request.
 	const decisionPages = async <Path, Decision>(
 		paths: readonly Path[],
 		deadline: DeadlineOptions,
-		send: (paths: Path[], signal: AbortSignal) => Promise<Decision[]>
+		send: (paths: Path[], signal: AbortSignal) => Promise<Decision[]>,
+		envelope: object,
+		requestSize: () => number,
+		shouldSendBuildInputs: boolean
 	): Promise<Decision[]> => {
 		if (paths.length === 0) {
 			return requestWithDeadline((signal) => send([], signal), deadline);
 		}
 
-		return lookupPage(paths, {
-			deadline,
-			requestSize: () => pageSize,
-			request: (page, signal) => send([...page], signal)
+		const groups = shouldSendBuildInputs
+			? requestBodyGroups(paths, envelope)
+			: [paths];
+		const decisions: Decision[] = [];
+
+		for (const group of groups) {
+			decisions.push(
+				...(await lookupPage(group, {
+					deadline,
+					requestSize,
+					request: (page, signal) => send([...page], signal)
+				}))
+			);
+		}
+
+		return decisions;
+	};
+	const withBuildInputs = (
+		paths: readonly UploadPathNegotiationFields[],
+		shouldSendBuildInputs: boolean
+	): UploadPathNegotiationFields[] => {
+		if (buildInputs === undefined || !shouldSendBuildInputs) {
+			return [...paths];
+		}
+
+		return paths.map((path) => {
+			const listed = buildInputs.paths.get(path.storePath);
+
+			if (listed === undefined) {
+				return path;
+			}
+
+			if (
+				listed.length > buildInputsMaxLength ||
+				!canStoreBuildInputs(listed) ||
+				!hasStorableEdges({ references: path.references, buildInputs: listed })
+			) {
+				rootLogger().warn(
+					'publishing a path without its build inputs, which are more than its narinfo row can store',
+					{ storePath: path.storePath, buildInputs: listed.length }
+				);
+
+				return path;
+			}
+
+			return {
+				...path,
+				buildInputs: listed,
+				buildInputsVersion: buildInputs.version
+			};
 		});
 	};
 
@@ -287,20 +432,20 @@ export function pushClientFor(
 	);
 	const plan = async (body: Parameters<PushClient['negotiate']>[0]) => {
 		const pushId = await session.pushId();
+		const shouldSendBuildInputs = hasCredentialBuildInputs;
+		const planRpc = shouldSendBuildInputs ? buildInputsRpc : rpc;
+		const envelope = {
+			pushId,
+			...(body.attachRoot !== undefined && { attachRoot: body.attachRoot })
+		};
 		const uploads = await decisionPages(
-			body.paths,
+			withBuildInputs(body.paths, shouldSendBuildInputs),
 			planDeadline,
 			async (paths, signal) => {
 				const result = await callInCache(
-					rpc.uploads.plan,
+					planRpc.uploads.plan,
 					cache,
-					{
-						pushId,
-						paths,
-						...(body.attachRoot !== undefined && {
-							attachRoot: body.attachRoot
-						})
-					},
+					{ ...envelope, paths },
 					{ signal }
 				);
 				return result.uploads.map((decision, index): UploadDecision => {
@@ -347,7 +492,10 @@ export function pushClientFor(
 								uploadId: decision.operationId
 							};
 				});
-			}
+			},
+			envelope,
+			() => planPageSize,
+			shouldSendBuildInputs
 		);
 		return { uploads, hasUploadGraceFacts: true };
 	};
@@ -460,30 +608,35 @@ export function pushClientFor(
 			return plan(body);
 		}
 		const pushId = await session.pushId();
+		const shouldSendBuildInputs = hasCredentialBuildInputs;
+		const envelope = {
+			pushId,
+			...(body.attachRoot !== undefined && { attachRoot: body.attachRoot })
+		};
 		let hasGraceFactsForEveryPage = true;
 
 		const uploads = await decisionPages(
-			body.paths,
+			withBuildInputs(body.paths, shouldSendBuildInputs),
 			negotiationDeadline,
 			async (paths, signal) => {
-				const page = await acknowledged(signal, (rpc) =>
-					callInCache(
-						rpc.uploads.negotiate,
-						cache,
-						{
-							pushId,
-							paths,
-							...(body.attachRoot !== undefined && {
-								attachRoot: body.attachRoot
-							})
-						},
-						{ signal }
-					)
+				const page = await acknowledged(
+					signal,
+					(rpc) =>
+						callInCache(
+							rpc.uploads.negotiate,
+							cache,
+							{ ...envelope, paths },
+							{ signal }
+						),
+					shouldSendBuildInputs
 				);
 				hasGraceFactsForEveryPage &&= page.hasUploadGraceFacts;
 
 				return page.result.uploads;
-			}
+			},
+			envelope,
+			() => pageSize,
+			shouldSendBuildInputs
 		);
 
 		return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
@@ -515,6 +668,7 @@ export function pushClientFor(
 		negotiate: (body) => inPush(() => negotiateInCache(body)),
 		// Never touches the credential session: a dry run requests no upload
 		// credential, so preview must not negotiate a pushId to get one.
+		// Preview never sends build inputs, so it keeps the earlier limits.
 		preview: async (body) => {
 			let hasGraceFactsForEveryPage = true;
 
@@ -522,13 +676,19 @@ export function pushClientFor(
 				body.paths,
 				previewDeadline,
 				async (paths, signal) => {
-					const page = await acknowledged(signal, (rpc) =>
-						callInCache(rpc.uploads.preview, cache, { paths }, { signal })
+					const page = await acknowledged(
+						signal,
+						(rpc) =>
+							callInCache(rpc.uploads.preview, cache, { paths }, { signal }),
+						false
 					);
 					hasGraceFactsForEveryPage &&= page.hasUploadGraceFacts;
 
 					return page.result.uploads;
-				}
+				},
+				{},
+				() => pageSize,
+				false
 			);
 
 			return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
@@ -537,8 +697,16 @@ export function pushClientFor(
 			if (kind === 'preview') {
 				const probe = await requestWithDeadline(
 					(signal) =>
-						acknowledged(signal, (rpc) =>
-							callInCache(rpc.uploads.preview, cache, { paths: [] }, { signal })
+						acknowledged(
+							signal,
+							(rpc) =>
+								callInCache(
+									rpc.uploads.preview,
+									cache,
+									{ paths: [] },
+									{ signal }
+								),
+							false
 						),
 					previewDeadline
 				);
@@ -552,13 +720,16 @@ export function pushClientFor(
 			const pushId = await session.pushId();
 			const probe = await requestWithDeadline(
 				(signal) =>
-					acknowledged(signal, (rpc) =>
-						callInCache(
-							rpc.uploads.negotiate,
-							cache,
-							{ pushId, paths: [] },
-							{ signal }
-						)
+					acknowledged(
+						signal,
+						(rpc) =>
+							callInCache(
+								rpc.uploads.negotiate,
+								cache,
+								{ pushId, paths: [] },
+								{ signal }
+							),
+						hasCredentialBuildInputs
 					),
 				negotiationDeadline
 			);

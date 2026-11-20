@@ -1657,6 +1657,32 @@ negotiation, preview and planning requests by bytes as well as by count, keeping
 each plan request within 8 MiB, and keep each `publish-batch` message within its
 4 MiB limit.
 
+`cupboard push` sends build inputs when `--build-inputs-file` gives it a
+document of them, which `@cupboard/protocol/publish-plan` versions like the
+roots document. The push then accepts `build-inputs-v1` on the credential
+request. Only after a successful credential response echoes it does the push add
+each listed path's build inputs to the path's metadata. Each negotiation or plan
+call decides once whether it sends build inputs, and then accepts the capability
+on every page of that call. Preview never sends build inputs, so it never
+accepts the capability. The push splits each negotiation or plan request that
+accepts the capability so that its JSON body stays within
+`uploadRequestMaxBodyBytes`, and pages each part by count. Negotiation pages
+follow the maximum that negotiation responses advertise, capped at
+`buildInputsUploadMaxPaths`. Plan pages start at `uploadPlanMaxPaths`, the
+protocol's limit for a plan request, and follow the maximum that plan responses
+advertise. The commit socket already ends a `publish-batch` message before it
+would exceed 4 MiB.
+
+The document accepts a list of any length, so one path with more build inputs
+than a row can store does not make the whole file invalid. A path with more than
+8,192 build inputs, more than `buildInputsMaxJsonBytes` of them, or references
+and build inputs that together exceed `pathEdgesMaxJsonBytes` is published
+without build inputs, with a warning, and the other paths of its request keep
+theirs. The backfill client reports such a path as `limit-exceeded` without
+sending it. Without the echo, the push sends no build inputs and accepts the
+capability only on the credential request, so its upload requests are those of a
+push without build inputs.
+
 The paced WebSocket accepts `publish-batch` with complete metadata and expected
 generation. Clients commit every selected path that confirmation has not
 retained, including `missing` paths. They commit every `skip` decision when the

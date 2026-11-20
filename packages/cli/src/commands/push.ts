@@ -55,7 +55,10 @@ import {
 	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
-import { parseCohortRoots } from '../plan/publish-plan-file.ts';
+import {
+	parseBuildInputsDocument,
+	parseCohortRoots
+} from '../plan/publish-plan-file.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import { type PushStore, runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
@@ -100,6 +103,7 @@ interface PushOptions {
 	readonly alreadyHeld?: readonly string[] | false;
 	readonly claimable?: readonly string[] | false;
 	readonly copiedFromFile?: string;
+	readonly buildInputsFile?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -565,6 +569,10 @@ export function registerPushCommand(
 			'JSON file, written by the build, that lists the stores each path was copied from'
 		)
 		.option(
+			'--build-inputs-file <path>',
+			'JSON build inputs document, version 1, as buildInputsDocumentSchema in @cupboard/protocol defines it: {"version":1,"buildInputsVersion":<n>,"paths":{"<storePath>":["<basename>",...]}}. The push sends the listed build inputs with those paths, and only to a server that accepts them.'
+		)
+		.option(
 			'--bundle, --attestation <bundle>',
 			'a Sigstore bundle file to attach to the pushed paths that it covers (repeatable; both option names are equivalent)',
 			collect,
@@ -709,6 +717,12 @@ export function registerPushCommand(
 				options.rootsFile === undefined
 					? undefined
 					: parseCohortRoots(await readFile(options.rootsFile, 'utf8')).roots;
+			const buildInputs =
+				options.buildInputsFile === undefined
+					? undefined
+					: parseBuildInputsDocument(
+							await readFile(options.buildInputsFile, 'utf8')
+						);
 			const rootsToSet = (roots ?? [])
 				.filter((root) => root.action === 'set')
 				.map((root) => root.name);
@@ -780,7 +794,8 @@ export function registerPushCommand(
 					options.githubOidc === true ? 'github-oidc' : 'cupboard-login',
 				client: pushClientFor(resolved.target.tenantUrl, resolved.credential, {
 					cache,
-					signal: programOptions.signal
+					signal: programOptions.signal,
+					...(buildInputs !== undefined && { buildInputs })
 				}),
 				...(options.store !== undefined && {
 					nix: Nix.openForAvailability(undefined, {

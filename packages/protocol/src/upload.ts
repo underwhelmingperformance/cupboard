@@ -201,6 +201,23 @@ export const uploadRequestMaxPathsHeader = 'x-cupboard-upload-max-paths';
 // at the limit can exhaust it.
 export const uploadRequestMaxBodyBytes = 8 * 1024 * 1024;
 
+// The most paths that the Worker advertises in `x-cupboard-upload-max-paths`
+// for a negotiation or preview request that accepts `build-inputs-v1`: as many
+// as fit in `uploadRequestMaxBodyBytes` at 4 KiB a path, after 4 KiB for the
+// push ID, a run root and the JSON around them. The fixed fields of an entry
+// take about 250 bytes, which leaves room for about 60 references of
+// 60-character basenames. A client whose entries are larger pages by size.
+export const buildInputsUploadMaxPaths = Math.floor(
+	(uploadRequestMaxBodyBytes - 4096) / 4096
+);
+
+// The most paths that one `uploads.plan` request may contain, which the server
+// advertises on plan responses. CLIs up to v0.0.52 send plan pages of 100
+// paths and cannot send a smaller page after a refusal, so the limit stays at
+// 100 whatever the other page sizes become. A server test runs a full page of
+// distinct NARs under the Free plan's slice.
+export const uploadPlanMaxPaths = 100;
+
 export const uploadRequestTooLargeErrorCode = 'UPLOAD_REQUEST_TOO_LARGE';
 export const uploadRequestTooLargeErrorDataSchema = z.strictObject({
 	maxBytes: countSchema
