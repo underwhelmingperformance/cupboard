@@ -91,6 +91,7 @@ import * as schema from '../db/schema.ts';
 import {
 	InvalidAuthorizationDetailsError,
 	InvalidReadResourcesError,
+	OAuthError,
 	ReadResourcesNotPermittedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
@@ -109,6 +110,7 @@ import {
 	oauthJsonResponse
 } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
+import { errorFacts } from '../observability/refusal-log.ts';
 import { isAudienceBound } from '../oidc/audience-binding.ts';
 import {
 	type SubjectBinding,
@@ -328,17 +330,6 @@ export class TokenExchangeService {
 		const requested: AuthorizationDetails = [
 			{ type: 'cupboard_cache', cache, actions: [...uploadActions] }
 		];
-		const requirePublisher = (): OidcTrustRule | undefined => {
-			const rules = this.oidcTrust.enabledOidcTrustRulesFor(logger, verified);
-			const selection = selectOidcTrust(rules, verified, requested);
-			if (selection.outcome === 'authority-unmatched') {
-				throw new InvalidAuthorizationDetailsError('not-permitted');
-			}
-			if (selection.outcome !== 'selected') {
-				throw this.verifiedUntrustedRefusal(rules, verified);
-			}
-			return selection.rule;
-		};
 		const audit = logger.with({
 			tenant: archive.tenant,
 			issuer: archive.issuer,
@@ -348,34 +339,44 @@ export class TokenExchangeService {
 			revision: archive.revision,
 			cache
 		});
+		const requirePublisher = (): Logger => {
+			const rules = this.oidcTrust.enabledOidcTrustRulesFor(logger, verified);
+			const selection = selectOidcTrust(rules, verified, requested);
+			if (selection.outcome === 'authority-unmatched') {
+				throw new InvalidAuthorizationDetailsError('not-permitted');
+			}
+			if (selection.outcome !== 'selected') {
+				throw this.verifiedUntrustedRefusal(rules, verified);
+			}
+			return audit.with(
+				selection.rule
+					? { ruleId: selection.rule.id }
+					: { composed: true, ruleIds: selection.ruleIds }
+			);
+		};
 		if (body.ticket === undefined) {
-			const rule = requirePublisher();
+			const publisher = requirePublisher();
 			const recipient = this.context.db.transaction((transaction) => {
 				if (binding.kind === 'nonce-bound') {
 					this.consumeNonce(transaction, binding.nonce);
 				}
 				return this.context.planArchives.issue(archive, transaction);
 			});
-			await this.maintenanceStateChanged?.();
 			const digest = await sha256Hex(recipient.ticket);
-			audit.info('plan archive ticket issued', {
-				...(rule ? { ruleId: rule.id } : { composed: true }),
+			publisher.info('plan archive ticket issued', {
 				ticketHash: digest.slice(0, 16)
 			});
+			await this.maintenanceStateChanged?.();
 			return oauthJsonResponse(recipient);
 		}
-		const digest = await sha256Hex(body.ticket);
 		if (binding.kind === 'nonce-bound') {
 			requirePublisher();
 			this.consumeNonce(this.context.db, binding.nonce);
 			await this.maintenanceStateChanged?.();
 		}
-		const rule = requirePublisher();
+		const publisher = requirePublisher();
 		const identity = this.context.planArchives.redeem(archive, body.ticket);
-		audit.info('plan archive identity released', {
-			...(rule ? { ruleId: rule.id } : { composed: true }),
-			ticketHash: digest.slice(0, 16)
-		});
+		publisher.info('plan archive identity released');
 		return oauthJsonResponse(identity);
 	}
 
@@ -1231,10 +1232,26 @@ export class TokenExchangeService {
 		const body = await parseFormBody(tokenRequestSchema, request);
 
 		if (body.grant_type === planArchiveGrantType) {
-			return this.exchange(
-				logger,
-				parseFormValue(planArchiveGrantRequestSchema, body)
-			);
+			const grant = parseFormValue(planArchiveGrantRequestSchema, body);
+			if (grant.ticket === undefined) {
+				return this.exchange(logger, grant);
+			}
+			const digest = await sha256Hex(grant.ticket);
+			const audit = logger.with({
+				tenant: this.context.requireTenant(),
+				ticketHash: digest.slice(0, 16)
+			});
+			try {
+				return await this.exchange(audit, grant);
+			} catch (error) {
+				audit.info(
+					'plan archive redemption failed',
+					error instanceof OAuthError
+						? { error: error.error, problem: error.problem }
+						: { ...errorFacts(error) }
+				);
+				throw error;
+			}
 		}
 
 		if (body.grant_type === readAccessGrantType) {

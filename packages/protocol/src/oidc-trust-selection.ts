@@ -2,18 +2,26 @@ import {
 	type AuthorizationDetail,
 	type AuthorizationDetails
 } from './grants.ts';
+import { type TrustRuleId } from './oidc.ts';
 import {
 	type OidcTrustRule,
 	type VerifiedOidcClaims
 } from './oidc-trust-match.ts';
 import { evaluateOidcTrust } from './oidc-trust-selection-internal.ts';
 
+/**
+Records one rule that permits the whole request, or the contributing rule IDs
+when the requested actions need more than one rule.
+*/
+export type SelectedOidcAuthority =
+	| { readonly rule: OidcTrustRule }
+	| { readonly rule?: undefined; readonly ruleIds: readonly TrustRuleId[] };
+
 export type OidcTrustSelection =
-	| {
+	| (SelectedOidcAuthority & {
 			readonly outcome: 'selected';
-			readonly rule?: OidcTrustRule;
 			readonly grants?: AuthorizationDetails;
-	  }
+	  })
 	| { readonly outcome: 'identity-unmatched' }
 	| {
 			readonly outcome: 'authority-unmatched';

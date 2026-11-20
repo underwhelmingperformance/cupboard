@@ -10,7 +10,10 @@ import {
 	type OidcTrustRule,
 	preferredModelledOidcTrustRules
 } from './oidc-trust-match.ts';
-import { type OidcTrustSelection } from './oidc-trust-selection.ts';
+import {
+	type OidcTrustSelection,
+	type SelectedOidcAuthority
+} from './oidc-trust-selection.ts';
 
 export interface GrantRequirement {
 	readonly alternatives: readonly [
@@ -22,11 +25,10 @@ export interface GrantRequirement {
 
 export type GrantComposition =
 	| Exclude<OidcTrustSelection, { readonly outcome: 'selected' }>
-	| {
+	| (SelectedOidcAuthority & {
 			readonly outcome: 'selected';
-			readonly rule?: OidcTrustRule;
 			readonly grants: AuthorizationDetails;
-	  };
+	  });
 
 function actionDetails(detail: AuthorizationDetail): AuthorizationDetails {
 	if (detail.type === 'cupboard_wildcard') {
@@ -112,14 +114,20 @@ export function composeOidcGrants(
 	}
 
 	const actions = grants.flatMap((detail) => actionDetails(detail));
+	const isPermitted = (rule: OidcTrustRule, action: AuthorizationDetail) =>
+		isGrantPermittedByRule(rule.permittedGrants, action, claims);
 	const complete = preferred.find((rule) =>
-		actions.every((action) =>
-			isGrantPermittedByRule(rule.permittedGrants, action, claims)
-		)
+		actions.every((action) => isPermitted(rule, action))
 	);
-	return {
-		outcome: 'selected',
-		...(complete !== undefined && { rule: complete }),
-		grants
-	};
+	if (complete !== undefined) {
+		return { outcome: 'selected', rule: complete, grants };
+	}
+
+	const contributors = new Set(
+		actions.map((action) => preferred.find((rule) => isPermitted(rule, action)))
+	);
+	const ruleIds = preferred
+		.filter((rule) => contributors.has(rule))
+		.map((rule) => rule.id);
+	return { outcome: 'selected', ruleIds, grants };
 }
