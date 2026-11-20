@@ -31,7 +31,8 @@ absent when the release reads no such document.
 export const documentVersionsSchema = z.looseObject({
 	publishPlan: z.number().int().optional(),
 	cohortRoots: z.number().int().optional(),
-	buildInputs: z.number().int().optional()
+	buildInputs: z.number().int().optional(),
+	dependencyGraph: z.number().int().optional()
 });
 export type DocumentVersions = z.output<typeof documentVersionsSchema>;
 
@@ -358,4 +359,76 @@ export const buildInputsDocumentSchema = z.strictObject({
 export type BuildInputsDocument = z.output<typeof buildInputsDocumentSchema>;
 export type BuildInputsDocumentInput = z.input<
 	typeof buildInputsDocumentSchema
+>;
+
+// `cupboard plan dependencies --graph-file` reads the dependency graph of the
+// targets that a publication covers from a JSON document. As with the build
+// inputs document, the writer and the CLI can come from different releases,
+// and `cupboard document-versions` reports the version that a CLI reads.
+export const dependencyGraphDocumentVersion = 1;
+
+const dependencyGraphBuildInputsSchema = z
+	.array(storePathBasenameSchema)
+	.transform((buildInputs) => referenceSet(buildInputs));
+
+const dependencyGraphEntrySchema = z.strictObject({
+	storePath: storePathSchema,
+	kind: z.enum(['target', 'dependency', 'published']),
+	buildInputs: dependencyGraphBuildInputsSchema
+});
+
+type DependencyGraphEntry = z.output<typeof dependencyGraphEntrySchema>;
+
+// A pass decides whether a path is blocked from the paths before it, and it
+// keeps only the paths that are nodes, so every build input must be a node
+// that comes before every path that lists it. Zod also runs this check on a
+// document whose store paths are invalid, so it takes the basename without
+// validating the path again.
+function hasInputsFirst(paths: readonly DependencyGraphEntry[]): boolean {
+	const positions = new Map<string, number>(
+		paths.map((entry, index) => [
+			entry.storePath.slice(entry.storePath.lastIndexOf('/') + 1),
+			index
+		])
+	);
+
+	return paths.every((entry, index) =>
+		entry.buildInputs.every((buildInput) => {
+			const position = positions.get(buildInput);
+
+			return position !== undefined && position < index;
+		})
+	);
+}
+
+/**
+The outputs in the dependency graph of a publication's targets, each after
+the outputs among its build inputs, with its direct build inputs as a set in
+code-unit order. `target` is a target output that its root keeps,
+`dependency` an output that a target needs to be built, and `published` a
+path that the run publishes itself and keeps with a root. A publication
+records build inputs only when it creates the row, so a pass decides a
+published path from its status like any other path. Every list was computed
+by version `buildInputsVersion` of the client's algorithm.
+*/
+export const dependencyGraphDocumentSchema = z.strictObject({
+	version: z.literal(dependencyGraphDocumentVersion),
+	buildInputsVersion: buildInputsVersionSchema,
+	paths: z
+		.array(dependencyGraphEntrySchema)
+		.refine(
+			(paths) =>
+				new Set(paths.map((entry) => entry.storePath)).size === paths.length,
+			'Each store path must appear once in the dependency graph'
+		)
+		.refine(
+			hasInputsFirst,
+			'Each build input must be a path of the dependency graph that comes before the paths that list it'
+		)
+});
+export type DependencyGraphDocument = z.output<
+	typeof dependencyGraphDocumentSchema
+>;
+export type DependencyGraphDocumentInput = z.input<
+	typeof dependencyGraphDocumentSchema
 >;

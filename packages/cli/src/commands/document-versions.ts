@@ -1,6 +1,7 @@
 import {
 	buildInputsDocumentVersion,
 	cohortRootsVersion,
+	dependencyGraphDocumentVersion,
 	type DocumentVersions,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
@@ -11,7 +12,8 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 const documentVersions: DocumentVersions = {
 	publishPlan: publishPlanVersion,
 	cohortRoots: cohortRootsVersion,
-	buildInputs: buildInputsDocumentVersion
+	buildInputs: buildInputsDocumentVersion,
+	dependencyGraph: dependencyGraphDocumentVersion
 };
 
 export function registerDocumentVersionsCommand(

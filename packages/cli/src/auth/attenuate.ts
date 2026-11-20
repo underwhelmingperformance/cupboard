@@ -56,6 +56,10 @@ export interface ConfirmGrantIntent {
 	readonly cache: CacheScope;
 }
 
+export interface BuildInputsRecordGrantIntent {
+	readonly cache: CacheScope;
+}
+
 export interface PreviewGrantIntent {
 	readonly cache: CacheScope;
 }
@@ -209,6 +213,24 @@ export function confirmAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:confirm'],
+			cache: intent.cache
+		}
+	]);
+}
+
+/**
+The authority that adds build inputs to rows that a cache already has:
+exactly `build-inputs:record` on that cache. A publish workflow requests it
+in its own exchange, so a trust rule without the grant refuses only this
+exchange and the publication continues.
+*/
+export function buildInputsRecordAuthorizationDetails(
+	intent: BuildInputsRecordGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['build-inputs:record'],
 			cache: intent.cache
 		}
 	]);

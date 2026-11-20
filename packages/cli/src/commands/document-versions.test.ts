@@ -1,6 +1,7 @@
 import {
 	buildInputsDocumentVersion,
 	cohortRootsVersion,
+	dependencyGraphDocumentVersion,
 	documentVersionsSchema,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
@@ -30,7 +31,8 @@ describe('cupboard document-versions', () => {
 		expect(documentVersionsSchema.parse(printed)).toStrictEqual({
 			publishPlan: publishPlanVersion,
 			cohortRoots: cohortRootsVersion,
-			buildInputs: buildInputsDocumentVersion
+			buildInputs: buildInputsDocumentVersion,
+			dependencyGraph: dependencyGraphDocumentVersion
 		});
 	});
 });

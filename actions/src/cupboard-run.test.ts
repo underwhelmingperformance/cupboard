@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
 	buildInputsDocumentVersion,
 	cohortRootsVersion,
+	dependencyGraphDocumentVersion,
 	publishPlanVersion
 } from '@cupboard/protocol/publish-plan';
 import {
@@ -130,7 +131,8 @@ describe('inspectDocumentVersions', () => {
 		expect(await inspectDocumentVersions(binary)).toStrictEqual({
 			publishPlan: publishPlanVersion,
 			cohortRoots: cohortRootsVersion,
-			buildInputs: buildInputsDocumentVersion
+			buildInputs: buildInputsDocumentVersion,
+			dependencyGraph: dependencyGraphDocumentVersion
 		});
 	});
 

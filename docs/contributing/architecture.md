@@ -1611,6 +1611,71 @@ may reuse from, so other caches never change whether a source appears. A request
 with more than 1,024 hashes receives `UPLOAD_REQUEST_LIMIT_EXCEEDED`, HTTP 413
 and `data.maxPaths` before the object reads any narinfo or cache rows.
 
+`cupboard plan dependencies` is the client of these procedures. The flake
+publish workflow writes the dependency graph of a cohort's targets to a
+versioned document: each output after its build inputs, as a `target`, a
+`dependency`, or a path that the cohort publishes itself (`published`). Every
+build input must be a node of the graph. The command never copies a published
+path. The publication records build inputs only when it creates the row, so the
+command records a published path that the cache already has like any other path.
+With `--github-oidc`, the command exchanges one token with the push operations
+on the destination, `root:attach` for the run root, and read access to the
+private reference source and read caches. Without it, the command uses the
+cached owner session from `cupboard login` for every request, so neither of its
+exchanges narrows the token. With its token the command asks for the status of
+every path. A plain 404 means that the server has no `dependency-status`, and
+the command reports `unsupported` without writing anything, so the workflow
+falls back to probing and republishing. Otherwise the command copies each absent
+path that has a `source`, by reference: from the configured source for that
+cache, from the cache itself when it is public, and otherwise through the
+reference source, which is the view that grants the access. It asks each source
+cache for its access at most once. A source whose access probe or metadata
+lookup fails is treated as unavailable: the command warns and leaves the
+source's paths uncopied, so the paths above them are blocked. A copy that the
+commit refuses leaves the path uncopied: the push reports the failed path by its
+basename, the command removes it from the copied paths and warns, and it
+continues. It also warns about a path that it does not copy because no source
+returns its narinfo. A copy sends the build inputs of every copied path, so a
+new row can list an input that the command later blocks.
+
+With `--record-build-inputs`, the command records build inputs on present and
+copied paths in graph order, including paths recorded at another build-inputs
+version. With `--github-oidc` it first exchanges a second token for
+`build-inputs:record` alone. Its record requests never include a path above one
+that is in flight or uncopied. A refused exchange records nothing. A record that
+fails after some pages leaves the earlier pages recorded, because each page is
+committed when it lands, and the later paths unrecorded. In both cases the
+command still succeeds. Finally it walks the graph from the targets down. A path
+that the cache has, but that neither a target root nor the recorded build inputs
+of a kept path keep, is attached to the run root. A status shows recorded build
+inputs only at the document's version. At any other version, only a `recorded`
+or `unchanged` record result confirms them. The command attaches a path by
+publishing it by reference with the destination as source, which negotiates it
+as present and attaches it through `confirm-present`, so nothing is uploaded.
+
+The walk counts an attached row, a listed row, and a row whose record result
+confirmed its build inputs, as keeping those inputs, but nothing protects those
+rows while the pass runs. A collection can delete one, and a push or a clear can
+leave it without build inputs. After each attach, and after a walk that relied
+on a record result of this pass, the command therefore reads the statuses of
+those rows again. It treats a path that it could not attach as absent and walks
+again. A row keeps its record confirmation while it is recorded at the
+document's version. A row at a higher version keeps it only while it shows the
+version that the first status read showed, because a newer client that created
+the row again may have listed other inputs. The command attaches whatever the
+new walk adds, and repeats until a walk after a recheck adds nothing. A pass
+whose walk relies only on statuses at the document's version reads no status
+again. The copy pushes the copied paths with the run root, so the walk counts
+them as attached and never attaches them again. A path that the command cannot
+attach, because the destination does not return its narinfo, the lookup fails,
+or the push cannot confirm it, is reported as `unattached` with a warning, and
+the summary reports the number of attach rounds.
+
+The dependency status reports a path as `in-flight` while an upload of it is
+pending, even when a committed row already exists. The pass never attaches such
+a path, and it blocks the paths above it. If the pending upload is abandoned,
+the row is kept only by whatever kept it before the pass.
+
 A client can also accept `build-inputs-v1` on the credential request. When the
 server echoes it, the client can send `buildInputs` and `buildInputsVersion` in
 the metadata of each path, in any of the push protocols. Older servers reject
