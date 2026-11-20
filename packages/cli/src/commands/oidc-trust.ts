@@ -25,6 +25,10 @@ import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
+import {
+	type BuildInputsReadProbe,
+	canGrantBuildInputs
+} from '../client/server-features.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	cloudflareDashIssuer,
@@ -109,6 +113,7 @@ interface GithubTagOptions extends GithubWorkflowOptions {
 	readonly rootTemplate?: string;
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
+	readonly shouldGrantBuildInputs?: boolean;
 }
 
 interface GithubBranchOptions extends GithubWorkflowOptions {
@@ -119,6 +124,7 @@ interface GithubBranchOptions extends GithubWorkflowOptions {
 	readonly readCache?: boolean;
 	readonly readView?: string;
 	readonly readPullRequestCaches?: boolean;
+	readonly shouldGrantBuildInputs?: boolean;
 }
 
 async function prepareGithubWorkflowReference(
@@ -174,6 +180,24 @@ async function prepareGithubWorkflowReference(
 		})
 	);
 	return canonical;
+}
+
+// The branch and tag presets publish trusted builds, so they may also record
+// build inputs. A server before `build-inputs:record` refuses a rule that
+// grants it, so the caller asks for it only when the server knows it.
+function trustedPublicationAllow(options: {
+	readonly attest?: boolean;
+	readonly shouldGrantBuildInputs?: boolean;
+}): string[] {
+	return withAttest(
+		[
+			'push',
+			'root',
+			'attach',
+			...(options.shouldGrantBuildInputs === true ? ['build-inputs'] : [])
+		],
+		options.attest
+	);
 }
 
 // GitHub presets grant attestation by default. The dedicated `--no-attest`
@@ -379,6 +403,16 @@ const tenantPlane: OidcTrustPlane = {
 		}).oidcTrust
 };
 
+function tenantBuildInputsRead(
+	url: URL,
+	programOptions: ProgramOptions
+): BuildInputsReadProbe {
+	return tenantRpc(url, {
+		credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+		signal: programOptions.signal
+	}).buildInputs.read;
+}
+
 const controlPlane: OidcTrustPlane = {
 	name: 'control-oidc-trust',
 	description:
@@ -556,7 +590,7 @@ export function githubTagAddBody(
 				rootTemplate:
 					options.rootTemplate ??
 					`github:${identity.fullName}/${cacheTemplate}/`,
-				allow: withAttest(['push', 'root', 'attach'], options.attest),
+				allow: trustedPublicationAllow(options),
 				substitutions: collectSubstitutions({
 					templateSource: 'github-tag',
 					captures: []
@@ -600,7 +634,7 @@ export function githubBranchAddBody(
 		claims,
 		permittedGrants: [
 			buildCacheGrant({
-				allow: withAttest(['push', 'root', 'attach'], options.attest),
+				allow: trustedPublicationAllow(options),
 				root: `github:${identity.fullName}/${options.branch}/`
 			}),
 			...(options.readCache === true ? [buildCacheContentReadGrant({})] : []),
@@ -864,9 +898,15 @@ function buildOidcTrustCommands(
 					lookupRepository(options.repo)
 				);
 
+				const shouldGrantBuildInputs = await reporter.phase(
+					'Checking server features',
+					() => canGrantBuildInputs(tenantBuildInputsRead(url, programOptions))
+				);
+
 				await runOidcTrustAdd(
 					githubTagAddBody(url, identity, {
 						...options,
+						shouldGrantBuildInputs,
 						...(jobWorkflowReference !== undefined && {
 							jobWorkflowRef: jobWorkflowReference
 						})
@@ -936,9 +976,15 @@ function buildOidcTrustCommands(
 					lookupRepository(options.repo)
 				);
 
+				const shouldGrantBuildInputs = await reporter.phase(
+					'Checking server features',
+					() => canGrantBuildInputs(tenantBuildInputsRead(url, programOptions))
+				);
+
 				await runOidcTrustAdd(
 					githubBranchAddBody(url, identity, {
 						...options,
+						shouldGrantBuildInputs,
 						...(jobWorkflowReference !== undefined && {
 							jobWorkflowRef: jobWorkflowReference
 						})
@@ -1005,7 +1051,7 @@ function registerTenantRuleAdd(
 		)
 		.option(
 			'--allow <action>',
-			'a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen or remove',
+			'a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen, remove or build-inputs',
 			collect,
 			[]
 		)

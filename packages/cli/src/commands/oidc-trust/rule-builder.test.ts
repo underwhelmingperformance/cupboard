@@ -63,6 +63,13 @@ describe('expandAllow', () => {
 		});
 	});
 
+	it('grants the recording of build inputs on its own', () => {
+		expect(expandAllow(['build-inputs'])).toStrictEqual({
+			cacheActions: ['build-inputs:record'],
+			rootActions: []
+		});
+	});
+
 	it('rejects an unknown shorthand', () => {
 		expect(() => expandAllow(['delete'])).toThrow(UnknownAllowError);
 	});

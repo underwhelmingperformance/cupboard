@@ -74,8 +74,8 @@ merged PR closure. Each command writes one rule:
 | --------------------- | ----------------------------------------------- | ----------------------------------------- | --------------------------------- | ------------------------------------------------- |
 | `add-github-pr`       | `event_name=pull_request`                       | `gh-{repository_id}-pr-{pr}`              | `github:<owner>/<repo>/pr-{pr}/`  | push, root, attach, create, close, reopen, attest |
 | `add-github-pr-close` | `event_name=pull_request`, `ref=refs/heads/...` | the repository's selected PR cache family | none                              | close only                                        |
-| `add-github-branch`   | `ref=refs/heads/<branch>`, any event            | the default cache                         | `github:<owner>/<repo>/<branch>/` | push, root, attach, attest                        |
-| `add-github-tag`      | `ref_type=tag`, any event                       | `{tag}`                                   | `github:<owner>/<repo>/<cache>/`  | push, root, attach, attest                        |
+| `add-github-branch`   | `ref=refs/heads/<branch>`, any event            | the default cache                         | `github:<owner>/<repo>/<branch>/` | push, root, attach, build-inputs, attest          |
+| `add-github-tag`      | `ref_type=tag`, any event                       | `{tag}`                                   | `github:<owner>/<repo>/<cache>/`  | push, root, attach, build-inputs, attest          |
 
 The grants are explained in [What a rule can grant](#what-a-rule-can-grant).
 Names in braces are filled in from each run's token.
@@ -297,17 +297,26 @@ at most the repository's name. See [Creating a tenant][creating-a-tenant] and
 
 `--allow` takes one of these names. Repeat the flag for each grant:
 
-| Grant    | Lets the job                                                          |
-| -------- | --------------------------------------------------------------------- |
-| `read`   | Read private cache content.                                           |
-| `push`   | Upload and publish store paths.                                       |
-| `root`   | Set and list retention roots.                                         |
-| `attach` | Add published paths to a [run root](../admin/retention.md#run-roots). |
-| `attest` | Attach attestation bundles.                                           |
-| `create` | Create the cache.                                                     |
-| `close`  | Close publication and expire roots with configured grace.             |
-| `reopen` | Restore publication to a closed cache.                                |
-| `remove` | Remove the cache.                                                     |
+| Grant          | Lets the job                                                          |
+| -------------- | --------------------------------------------------------------------- |
+| `read`         | Read private cache content.                                           |
+| `push`         | Upload and publish store paths.                                       |
+| `root`         | Set and list retention roots.                                         |
+| `attach`       | Add published paths to a [run root](../admin/retention.md#run-roots). |
+| `attest`       | Attach attestation bundles.                                           |
+| `create`       | Create the cache.                                                     |
+| `close`        | Close publication and expire roots with configured grace.             |
+| `reopen`       | Restore publication to a closed cache.                                |
+| `remove`       | Remove the cache.                                                     |
+| `build-inputs` | Add build inputs to store paths that the cache already has.           |
+
+Build inputs decide which other store paths a garbage collection keeps, so no
+other grant includes `build-inputs`. The branch and tag presets grant it,
+because they publish trusted builds. They grant it to every workflow that the
+rule accepts, although only the flake publish workflow is meant to use it. The
+pull-request preset doesn't, so a pull request can't change what a cache keeps
+of the store paths that it already has. See
+[Build inputs](../admin/retention.md#build-inputs).
 
 When `read` is combined with other permissions, the CLI creates a separate
 content-read grant with the same cache selector. Content reads apply to the
@@ -432,7 +441,7 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --claim repository_owner_id=987654321 \
   --claim ref=refs/heads/main \
   --job-workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*' \
-  --allow push --allow root --allow attach --allow attest \
+  --allow push --allow root --allow attach --allow build-inputs --allow attest \
   --root github:acme/app/main/
 ```
 

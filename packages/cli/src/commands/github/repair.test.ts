@@ -26,6 +26,7 @@ import {
 	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
 import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
 
 import { audienceSchema } from '../../audience.ts';
@@ -146,6 +147,8 @@ async function fixture(
 		publishingWorkflow?: string;
 		workflowFiles?: Readonly<Record<string, string>>;
 		fetchCacheAccess?: (target: URL) => Promise<CacheAccessMode>;
+		isEarlierServer?: boolean;
+		isProbeFailing?: boolean;
 	} = {}
 ) {
 	const { ui, captured } = fakeCliUi(
@@ -179,6 +182,29 @@ async function fixture(
 	const client = {
 		caches: {
 			list: () => Promise.resolve(cacheListResponseSchema.parse({ caches: [] }))
+		},
+		buildInputs: {
+			read: {
+				inDefaultCache: (input: { hash: string }) => {
+					if (options.isProbeFailing === true) {
+						return Promise.reject(new Error('unexpected build-inputs probe'));
+					}
+
+					return options.isEarlierServer === true
+						? Promise.reject(
+								// oRPC keeps the raw response of a plain 404 in the error data.
+								new ORPCError('NOT_FOUND', {
+									status: StatusCodes.NOT_FOUND,
+									data: {
+										status: StatusCodes.NOT_FOUND,
+										headers: {},
+										body: 'Not found\n'
+									}
+								})
+							)
+						: Promise.resolve({ storePathHash: input.hash, status: 'absent' });
+				}
+			}
 		},
 		reuseViews: {
 			list: () =>
@@ -332,6 +358,7 @@ it('repairs the repository main, PR and release workflows together', async () =>
 		defaultBranch: 'main'
 	};
 	const main = githubBranchAddBody(url, identity, {
+		shouldGrantBuildInputs: true,
 		repo: repository,
 		branch: 'main',
 		jobWorkflowRef: reference
@@ -342,6 +369,7 @@ it('repairs the repository main, PR and release workflows together', async () =>
 		cacheTemplate: 'pr-{pr}'
 	});
 	const release = githubTagAddBody(url, identity, {
+		shouldGrantBuildInputs: true,
 		repo: repository,
 		jobWorkflowRef: reference,
 		cacheTemplate: 'releases',
@@ -687,6 +715,41 @@ it.each(['release event', 'exact tag'] as const)(
 	}
 );
 
+it('repairs a private read-only branch run without asking about build inputs', async () => {
+	const readOnlyWorkflow = `
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+      push: false
+`;
+	const { ui, added, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		readOnlyWorkflow,
+		// The rule for a run that only reads never receives the build-inputs
+		// grant, so the repair must not depend on the probe.
+		{ cacheAccess: 'private', isProbeFailing: true }
+	);
+
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+
+	expect(added.map(({ permittedGrants }) => permittedGrants)).toStrictEqual([
+		[buildCacheContentReadGrant({})]
+	]);
+});
+
 it('repairs a private read-only pull request with a content-read grant only', async () => {
 	const readOnlyWorkflow = `
 on: pull_request
@@ -813,7 +876,7 @@ jobs:
 			buildCacheGrant({
 				cache: 'packages',
 				root: 'builds/',
-				allow: ['push', 'attest', 'root', 'attach']
+				allow: ['push', 'build-inputs', 'attest', 'root', 'attach']
 			}),
 			buildViewContentReadGrant('shared')
 		]
@@ -1344,6 +1407,7 @@ it('checks the preset without creating a prefix view or asking for a trust scope
 		jobWorkflowRef: workflowReference
 	});
 	const branchBody = githubBranchAddBody(url, identity, {
+		shouldGrantBuildInputs: true,
 		repo: repository,
 		branch: 'main',
 		jobWorkflowRef: workflowReference
@@ -1385,6 +1449,12 @@ jobs:
 	const client = {
 		caches: {
 			list: () => Promise.resolve(cacheListResponseSchema.parse({ caches: [] }))
+		},
+		buildInputs: {
+			read: {
+				inDefaultCache: (input: { hash: string }) =>
+					Promise.resolve({ storePathHash: input.hash, status: 'absent' })
+			}
 		},
 		reuseViews: {
 			list: () => Promise.resolve(reuseViewListResponseSchema.parse({ views })),
@@ -1560,6 +1630,57 @@ jobs:
 	}
 );
 
+it('leaves a flake branch rule from an earlier release in place', async () => {
+	const workflowReference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+	// An earlier release built the branch rule from the allow list without
+	// `build-inputs`.
+	const earlier = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: workflowReference }
+		),
+		id: 'earlier',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: github:iainlane/dotfiles/main
+`,
+		{ rules: [earlier] }
+	);
+
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+
+	expect({
+		statuses: check.jobs.map((job) => job.status),
+		added,
+		extended
+	}).toStrictEqual({ statuses: ['ready'], added: [], extended: [] });
+});
+
 const customViewWorkflow = `
 on:
   push:
@@ -1573,40 +1694,47 @@ jobs:
       reuse-view: shared
 `;
 
-it('keeps an existing custom reuse view while repairing trust', async () => {
-	const view = reuseViewSummarySchema.parse({
-		name: 'shared',
-		access: 'public',
-		selectors: [{ kind: 'prefix', prefix: 'gh-' }],
-		priority: 50,
-		revision: 1,
-		createdAt: '2026-01-01T00:00:00.000Z',
-		updatedAt: '2026-01-01T00:00:00.000Z'
-	});
-	const { ui, added, client, dependencies, check } = await fixture(
-		undefined,
-		customViewWorkflow,
-		{ views: [view] }
-	);
+it.each([
+	{ name: 'a current server', isEarlierServer: false },
+	{ name: 'a server without build inputs', isEarlierServer: true }
+])(
+	'keeps an existing custom reuse view while repairing trust on $name',
+	async ({ isEarlierServer }) => {
+		const view = reuseViewSummarySchema.parse({
+			name: 'shared',
+			access: 'public',
+			selectors: [{ kind: 'prefix', prefix: 'gh-' }],
+			priority: 50,
+			revision: 1,
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		});
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			customViewWorkflow,
+			{ views: [view], isEarlierServer }
+		);
 
-	await runDiscoveredGithubRepair(
-		url,
-		{ trustScope: 'exact' },
-		ui,
-		client,
-		dependencies,
-		check
-	);
+		await runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		);
 
-	expect(added).toStrictEqual([
-		githubBranchAddBody(url, check.identity, {
-			repo: repository,
-			branch: 'main',
-			jobWorkflowRef:
-				'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
-		})
-	]);
-});
+		expect(added).toStrictEqual([
+			githubBranchAddBody(url, check.identity, {
+				shouldGrantBuildInputs: !isEarlierServer,
+				repo: repository,
+				branch: 'main',
+				jobWorkflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+			})
+		]);
+	}
+);
 
 it.each([
 	{
@@ -2174,7 +2302,9 @@ jobs:
       cache: packages
       root: pkgs
 `,
-			{ rules: [existing] }
+			// This job never receives the build-inputs grant, so the repair must
+			// not depend on the probe.
+			{ rules: [existing], isProbeFailing: true }
 		);
 		const error = await rejection(
 			runDiscoveredGithubRepair(
@@ -3142,6 +3272,7 @@ it('reports an unconfirmed reuse-view write after a confirmed extension', async 
 	};
 	const expected = oidcTrustSummarySchema.parse({
 		...githubBranchAddBody(url, identity, {
+			shouldGrantBuildInputs: true,
 			repo: repository,
 			branch: 'main',
 			jobWorkflowRef: reference
@@ -3825,7 +3956,7 @@ const audienceRepairCases = [
 				buildCacheGrant({
 					cache: 'packages',
 					root: 'ci/',
-					allow: ['push', 'attest', 'root', 'attach']
+					allow: ['push', 'build-inputs', 'attest', 'root', 'attach']
 				})
 			]
 		}
@@ -3837,6 +3968,7 @@ const audienceRepairCases = [
 		inputs: '      preset: pull-request-and-branch',
 		access: 'public' as const,
 		body: githubBranchAddBody(url, customAudienceIdentity, {
+			shouldGrantBuildInputs: true,
 			repo: repository,
 			branch: 'main',
 			jobWorkflowRef: flakeAudienceReference,
@@ -4104,6 +4236,7 @@ const extraReadRepairCases = [
 		trigger: 'on:\n  push:\n    branches: [main]',
 		inputs: '      preset: pull-request-and-branch',
 		body: githubBranchAddBody(url, customAudienceIdentity, {
+			shouldGrantBuildInputs: true,
 			repo: repository,
 			branch: 'main',
 			jobWorkflowRef: flakeAudienceReference
@@ -4126,7 +4259,7 @@ const extraReadRepairCases = [
 				buildCacheGrant({
 					cache: 'packages',
 					root: 'ci/',
-					allow: ['push', 'attest', 'root', 'attach']
+					allow: ['push', 'build-inputs', 'attest', 'root', 'attach']
 				})
 			],
 			display: { provider: 'github', repository }
@@ -4350,6 +4483,7 @@ it.each([false, true])(
 					defaultBranch: 'main'
 				},
 				{
+					shouldGrantBuildInputs: true,
 					repo: repository,
 					branch: 'main',
 					jobWorkflowRef:
@@ -4511,6 +4645,7 @@ it.each(
 					defaultBranch: 'main'
 				},
 				{
+					shouldGrantBuildInputs: true,
 					repo: repository,
 					branch: 'main',
 					jobWorkflowRef:

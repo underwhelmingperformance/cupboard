@@ -33,6 +33,10 @@ import { audienceSchema } from '../../audience.ts';
 import { cacheLabel } from '../../client/client.ts';
 import { cachePages, listingLimits } from '../../client/listings.ts';
 import {
+	type BuildInputsReadProbe,
+	canGrantBuildInputs
+} from '../../client/server-features.ts';
+import {
 	CliError,
 	CupboardHttpError,
 	GithubCheckFailedError,
@@ -282,6 +286,7 @@ export interface GithubRepairOptions {
 type ReuseViewSetInput = Parameters<ReuseViewClient['set']>[0];
 
 export interface GithubRepairClient extends GithubCheckClient {
+	readonly buildInputs: { readonly read: BuildInputsReadProbe };
 	readonly reuseViews: GithubCheckClient['reuseViews'] & {
 		set(input: ReuseViewSetInput): ReturnType<ReuseViewClient['set']>;
 	};
@@ -428,7 +433,8 @@ function withModelledPrPublicationGrants(
 function grantsForJob(
 	job: DiscoveredPublishingJob,
 	publication: PublicationCase,
-	read: PublicationReadAuthority
+	read: PublicationReadAuthority,
+	shouldGrantBuildInputs: boolean
 ): OidcTrustAddBodyInput['permittedGrants'] {
 	const cache =
 		publication.cache === undefined
@@ -487,6 +493,11 @@ function grantsForJob(
 								}),
 						allow: [
 							'push',
+							...(shouldGrantBuildInputs &&
+							job.kind === 'flake' &&
+							publication.trigger !== 'pull_request'
+								? ['build-inputs']
+								: []),
 							'attest',
 							...(hasRoot || job.kind === 'flake' ? ['root'] : []),
 							...(requiresAttach || job.kind === 'flake' ? ['attach'] : [])
@@ -538,13 +549,38 @@ function triggerClaim(
 	return { ref: `refs/heads/${publication.ref.name}` };
 }
 
+// Whether `bodyForCase` gives the rule for this case the build-inputs grant
+// when the server knows it. It follows the branches of `bodyForCase`: only the
+// branch preset and the publication grant of `grantsForJob` for a flake job
+// include it, and neither applies to pull requests, closure or a run that only
+// reads.
+function canReceiveBuildInputsGrant(
+	job: DiscoveredPublishingJob,
+	publication: PublicationCase
+): boolean {
+	if (
+		publication.lifecycle === 'merged-close' ||
+		publication.requests.length === 0 ||
+		publication.trigger === 'pull_request'
+	) {
+		return false;
+	}
+
+	if (isPresetJob(job)) {
+		return true;
+	}
+
+	return publication.lifecycle !== 'closed' && job.kind === 'flake';
+}
+
 function bodyForCase(
 	url: URL,
 	result: DiscoveredGithubCheckResult,
 	job: DiscoveredPublishingJob,
 	publication: PublicationCase,
 	read: PublicationReadAuthority,
-	reference: string
+	reference: string,
+	shouldGrantBuildInputs: boolean
 ): OidcTrustAddBodyInput {
 	const isPreset = isPresetJob(job);
 	const audience = audienceSchema.parse(publication.claims.aud);
@@ -572,7 +608,12 @@ function bodyForCase(
 				...triggerClaim(job, publication),
 				job_workflow_ref: jobWorkflowReferenceClaim(reference)
 			},
-			permittedGrants: grantsForJob(job, publication, read),
+			permittedGrants: grantsForJob(
+				job,
+				publication,
+				read,
+				shouldGrantBuildInputs
+			),
 			display: { provider: 'github', repository: result.identity.fullName }
 		});
 	}
@@ -616,6 +657,7 @@ function bodyForCase(
 				branch: publication.ref.name,
 				jobWorkflowRef: reference,
 				allowBranchWorkflow: true,
+				shouldGrantBuildInputs,
 				readCache:
 					read.cacheAccess === 'private' && read.cacheWiring === 'none',
 				...(publication.reuseView !== undefined &&
@@ -636,7 +678,12 @@ function bodyForCase(
 			...triggerClaim(job, publication),
 			job_workflow_ref: jobWorkflowReferenceClaim(reference)
 		},
-		permittedGrants: grantsForJob(job, publication, read),
+		permittedGrants: grantsForJob(
+			job,
+			publication,
+			read,
+			shouldGrantBuildInputs
+		),
 		display: { provider: 'github', repository: result.identity.fullName }
 	});
 }
@@ -1041,13 +1088,16 @@ function checkRetainedRules(
 	read: PublicationReadAuthority,
 	finding: TrustRuleGrantMissingFinding
 ): void {
+	// Only the planned rule's claims matter here, and the build-inputs grant
+	// does not change them.
 	const planned = bodyForCase(
 		url,
 		result,
 		job,
 		publication,
 		read,
-		job.workflowRef
+		job.workflowRef,
+		false
 	);
 	const blocking = finding.rules.find(
 		(rule) => claimCount(rule) >= claimCount(planned)
@@ -1198,6 +1248,13 @@ export async function runDiscoveredGithubRepair(
 		client,
 		dependencies
 	);
+	// The repair asks the server whether it knows the grant only when a new
+	// rule would include it, so the other repairs never depend on the probe.
+	const shouldGrantBuildInputs =
+		modelled.some(
+			({ job, publication, needsTrustRule }) =>
+				needsTrustRule && canReceiveBuildInputsGrant(job, publication)
+		) && (await canGrantBuildInputs(client.buildInputs.read));
 	const requiresNewTrustRule = modelled.some((item) => item.needsTrustRule);
 
 	if (!requiresNewTrustRule && options.trustScope === 'tag-pattern') {
@@ -1301,7 +1358,17 @@ export async function runDiscoveredGithubRepair(
 			);
 		}
 
-		desired.push(bodyForCase(url, result, job, publication, read, reference));
+		desired.push(
+			bodyForCase(
+				url,
+				result,
+				job,
+				publication,
+				read,
+				reference,
+				shouldGrantBuildInputs
+			)
+		);
 	}
 
 	const additions: OidcTrustAddBodyInput[] = [];
