@@ -14,7 +14,6 @@ import {
 } from '../do/operation-cost.ts';
 
 import { requestCorrelation } from './correlation.ts';
-import { stampTraceContext } from './trace.ts';
 
 function configuredRootLogger(): Logger {
 	// Emit plain objects so Cloudflare Workers Logs indexes each field.
@@ -31,7 +30,6 @@ export function requestLogger(request: Request): Logger {
 	const ray = request.headers.get('cf-ray') ?? undefined;
 
 	return root.with({
-		...stampTraceContext(),
 		...requestCorrelation(request),
 		...(ray !== undefined && { ray }),
 		method: request.method,
