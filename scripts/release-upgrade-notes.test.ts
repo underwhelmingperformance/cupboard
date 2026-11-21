@@ -17,8 +17,10 @@ import { expect, it, onTestFinished, vi } from 'vitest';
 import { isolateGitEnvironment } from '../tests/support/git.ts';
 
 import {
+	assertUpgradeNoteHeadings,
 	collectReleaseUpgradeNotes,
-	replaceReleaseUpgradeNotes
+	replaceReleaseUpgradeNotes,
+	UpgradeNoteHeadingError
 } from './release-upgrade-notes.ts';
 
 const execute = promisify(execFile);
@@ -79,7 +81,7 @@ it('reads all first-release fragments from the exact commit, with release-tag li
 	const { directory, note, commit } = await fixture();
 	await note(
 		'schema.md',
-		'# Schema upgrade\n\nRead [the guide](../upgrading.md#deploy) and [details][details].\n\n[details]: ../../reference/cli.md\n'
+		'### Schema upgrade\n\nRead [the guide](../upgrading.md#deploy) and [details][details].\n\n[details]: ../../reference/cli.md\n'
 	);
 	const commitish = await commit();
 	await note('schema.md', 'Uncommitted replacement');
@@ -102,7 +104,7 @@ it('reads all first-release fragments from the exact commit, with release-tag li
 	).toStrictEqual([
 		{
 			path: `${prefix}schema.md`,
-			body: '# Schema upgrade\n\nRead [the guide](<https://github.com/acme/app/blob/v1.0.0/docs/operator/upgrading.md#deploy>) and [details][cupboard-upgrade-scoped].\n\n[cupboard-upgrade-scoped]: <https://github.com/acme/app/blob/v1.0.0/docs/reference/cli.md>\n'
+			body: '### Schema upgrade\n\nRead [the guide](<https://github.com/acme/app/blob/v1.0.0/docs/operator/upgrading.md#deploy>) and [details][cupboard-upgrade-scoped].\n\n[cupboard-upgrade-scoped]: <https://github.com/acme/app/blob/v1.0.0/docs/reference/cli.md>\n'
 		}
 	]);
 });
@@ -310,12 +312,155 @@ it.each([
 	);
 });
 
+it.each([
+	{
+		name: 'a level 3 title and level 4 sections',
+		body: '### Title\n\nText.\n\n#### Rolling back\n'
+	},
+	{ name: 'no heading', body: 'Guidance without a heading.\n' },
+	{
+		name: 'a heading marker inside a code block',
+		body: '### Title\n\n```sh\n# a shell comment\n```\n'
+	},
+	{
+		name: 'a heading tag inside an HTML comment',
+		body: '### Title\n\n<!-- <h2>Hidden</h2> -->\n'
+	},
+	{
+		name: 'a heading tag inside an attribute value',
+		body: '### Title\n\n<a title="<h2>">Example</a>\n'
+	}
+])('accepts a fragment with $name', ({ body }) => {
+	expect(() => {
+		assertUpgradeNoteHeadings(`${prefix}note.md`, body);
+	}).not.toThrow();
+});
+
+it.each([
+	{ name: 'a level 1 title', body: '# Title\n', depth: 1 },
+	{
+		name: 'a level 2 section after a level 3 title',
+		body: '### Title\n\n## Rolling back\n',
+		depth: 2
+	},
+	{ name: 'a setext level 1 title', body: 'Title\n=====\n', depth: 1 },
+	{
+		name: 'a level 2 heading in a blockquote',
+		body: '### Title\n\n> ## Quoted\n',
+		depth: 2
+	},
+	{
+		name: 'a level 2 heading in a list item',
+		body: '### Title\n\n- ## Listed\n',
+		depth: 2
+	},
+	{
+		name: 'a raw HTML level 2 heading',
+		body: '### Title\n\n<h2>Raw</h2>\n',
+		depth: 2
+	},
+	{
+		name: 'a raw HTML level 1 heading inside another element',
+		body: '### Title\n\n<div>\n<h1>Nested</h1>\n</div>\n',
+		depth: 1
+	},
+	{
+		name: 'a raw HTML level 2 heading between attribute values that look like a comment',
+		body: '### Title\n\n<p title="<!--"></p><h2>Visible</h2><p title="-->"></p>\n',
+		depth: 2
+	}
+])('refuses a fragment with $name', ({ body, depth }) => {
+	expect(() => {
+		assertUpgradeNoteHeadings(`${prefix}note.md`, body);
+	}).toThrow(
+		expect.objectContaining({
+			name: 'UpgradeNoteHeadingError',
+			path: `${prefix}note.md`,
+			depth
+		})
+	);
+});
+
+it('refuses to collect a fragment with a level 1 or level 2 heading', async () => {
+	const { directory, note, commit } = await fixture();
+	await note('schema.md', '# Schema upgrade\n\nGuidance.\n');
+	const commitish = await commit();
+	await expect(
+		collectReleaseUpgradeNotes({
+			directory,
+			commitish,
+			version: 'v1.0.0',
+			releases: [],
+			repository
+		})
+	).rejects.toMatchObject({
+		name: 'UpgradeNoteHeadingError',
+		path: `${prefix}schema.md`,
+		depth: 1
+	});
+});
+
+// These notes were released before the heading check existed. A release
+// includes every note changed since the preceding published release, so
+// correcting them would announce their guidance again. Fix a note's headings,
+// and remove it here, when its guidance changes for another reason.
+const releasedNotesWithShallowHeadings = [
+	'collection-arrivals.md',
+	'confirm-request-limit.md',
+	'diverged-build-outputs.md',
+	'optional-reference-source.md',
+	'publication-reuse-direction.md',
+	'root-incarnations.md',
+	'signing-key-backfill-skipped-paths.md'
+];
+
+it("keeps every new upgrade note below the release page's guidance heading", async () => {
+	const directory = new URL('../docs/operator/upgrade-notes/', import.meta.url);
+	const entries = await readdir(directory, { recursive: true });
+	const files = entries.filter((file) => file.endsWith('.md'));
+	const notes = await Promise.all(
+		files.map(async (file) => ({
+			file,
+			body: await readFile(new URL(file, directory), 'utf8')
+		}))
+	);
+	const refused = notes.filter(({ file, body }) => {
+		try {
+			assertUpgradeNoteHeadings(file, body);
+			return false;
+		} catch (error) {
+			if (error instanceof UpgradeNoteHeadingError) {
+				return true;
+			}
+			throw error;
+		}
+	});
+	expect(
+		refused
+			.map(({ file }) => file)
+			.toSorted((left, right) => left.localeCompare(right))
+	).toStrictEqual(releasedNotesWithShallowHeadings);
+});
+
 it('rejects fragments containing owned section markers', () => {
 	expect(() =>
 		replaceReleaseUpgradeNotes('', [
 			{ path: `${prefix}bad.md`, body: '<!-- cupboard:upgrade-notes:end -->' }
 		])
 	).toThrow('reserved upgrade guidance markers');
+});
+
+it('keeps the indentation of a fragment that starts with an indented code block', () => {
+	expect(
+		replaceReleaseUpgradeNotes('', [
+			{
+				path: `${prefix}code.md`,
+				body: '\n    # Update configuration\n\nText.\n\n'
+			}
+		])
+	).toBe(
+		'<!-- cupboard:upgrade-notes:start -->\n## Upgrade guidance\n\n    # Update configuration\n\nText.\n<!-- cupboard:upgrade-notes:end -->'
+	);
 });
 
 it('replaces only owned guidance on retry and removes stale guidance when notes disappear', () => {

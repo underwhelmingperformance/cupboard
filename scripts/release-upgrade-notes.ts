@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { CodedError } from '@cupboard/shared/errors';
 import type { RootContent } from 'mdast';
 import { type CompileContext, fromMarkdown } from 'mdast-util-from-markdown';
+import { type DefaultTreeAdapterTypes, parseFragment } from 'parse5';
 
 export interface PublishedReleaseTag {
 	readonly tagName: string;
@@ -35,6 +36,68 @@ export class ReleaseUpgradeNotesError extends CodedError {
 	constructor(detail: string, options?: ErrorOptions) {
 		super(`Could not collect release upgrade guidance: ${detail}`, options);
 		this.name = 'ReleaseUpgradeNotesError';
+	}
+}
+
+export class UpgradeNoteHeadingError extends ReleaseUpgradeNotesError {
+	readonly path: string;
+	readonly depth: number;
+
+	constructor(path: string, depth: number) {
+		super(
+			`${path} has a level ${String(depth)} heading; the release page puts upgrade notes under a level 2 heading, so a note's headings start at level 3`
+		);
+		this.name = 'UpgradeNoteHeadingError';
+		this.path = path;
+		this.depth = depth;
+	}
+}
+
+function htmlHeadingDepths(
+	node: DefaultTreeAdapterTypes.ParentNode
+): readonly number[] {
+	const children =
+		node.nodeName === 'template' && 'content' in node
+			? node.content.childNodes
+			: node.childNodes;
+	return children.flatMap((child) => {
+		const depth = /^h(?<depth>[1-6])$/u.exec(child.nodeName)?.groups?.depth;
+		const nested = 'childNodes' in child ? htmlHeadingDepths(child) : [];
+		return depth === undefined ? nested : [Number(depth), ...nested];
+	});
+}
+
+/**
+Throws an {@link UpgradeNoteHeadingError} when the upgrade note at `path` has a
+level 1 or level 2 heading anywhere, including inside a blockquote or a list
+item, or as raw HTML. The release page inserts every note under its level 2
+"Upgrade guidance" heading.
+*/
+export function assertUpgradeNoteHeadings(path: string, body: string): void {
+	const depths: number[] = [];
+	const visit = (node: RootContent): void => {
+		switch (node.type) {
+			case 'heading': {
+				depths.push(node.depth);
+				break;
+			}
+			case 'html': {
+				depths.push(...htmlHeadingDepths(parseFragment(node.value)));
+				break;
+			}
+		}
+		if ('children' in node) {
+			for (const child of node.children) {
+				visit(child);
+			}
+		}
+	};
+	for (const node of fromMarkdown(body).children) {
+		visit(node);
+	}
+	const shallowest = Math.min(...depths);
+	if (shallowest < 3) {
+		throw new UpgradeNoteHeadingError(path, shallowest);
 	}
 }
 
@@ -302,6 +365,7 @@ export async function collectReleaseUpgradeNotes(
 	const fragments: ReleaseUpgradeFragment[] = [];
 	for (const file of paths) {
 		const body = await git(options.directory, ['show', `${target}:${file}`]);
+		assertUpgradeNoteHeadings(file, body);
 		fragments.push({ path: file, body: resolveLinks(body, file, options) });
 	}
 	return fragments;
@@ -324,7 +388,9 @@ export function replaceReleaseUpgradeNotes(
 	const guidance =
 		notes.length === 0
 			? 'No additional upgrade steps are required for this release.'
-			: notes.map((note) => note.body.trim()).join('\n\n');
+			: notes
+					.map((note) => note.body.replace(/^(?:[ \t]*\n)+/u, '').trimEnd())
+					.join('\n\n');
 	const section = `${sectionStart}\n## Upgrade guidance\n\n${guidance}\n${sectionEnd}`;
 	const start = body.indexOf(sectionStart);
 	const end = body.indexOf(sectionEnd);

@@ -9,7 +9,11 @@ This page is for maintainers who publish cupboard releases.
    release versions. Each draft includes files added or changed since the
    preceding published release on its source history. An updated file is
    included in full, so it should describe one related set of upgrade steps.
-   Unchanged files are not repeated. The first release includes all files.
+   Unchanged files are not repeated. The first release includes all files. The
+   draft places every note under its level 2 "Upgrade guidance" heading, so
+   start each note with a level 3 heading and use no level 1 or level 2 heading.
+   The release workflow and a repository test refuse a note with a level 1 or
+   level 2 heading.
 
 2. Run the `release` workflow from the Actions tab and enter the version, with
    or without the lowercase `v` prefix. The workflow builds the CLI for every
