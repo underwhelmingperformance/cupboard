@@ -83,7 +83,9 @@ response doesn't mean that reads and pushes are working.
 
 ### Logs
 
-Both Workers have Workers Logs turned on. To follow the logs live, run:
+Both Workers have Workers Logs turned on, without invocation logs: the root span
+of each invocation records its outcome, wall time, method, URL and response
+status instead. To follow the logs live, run:
 
 ```sh
 wrangler tail cupboard
@@ -326,14 +328,17 @@ pnpm diagnose:push --worker cupboard-tenant --since 2880 --status 500 \
 
 `--since` is in minutes. A status query requires either `--since` or a GitHub
 Actions job URL, or an explicit `--from`/`--to` interval. `--hostname` restricts
-the query to an exact request Host header; omit it to query every hostname for
-the selected Worker. Add `--json` to get the matching requests with their
-timestamps, request IDs and trace IDs. URLs in the report exclude credentials,
-query parameters and fragments.
+the query to one request host; omit it to query every hostname for the selected
+Worker. Add `--json` to get the matching requests with their timestamps, request
+IDs and trace IDs. URLs in the report exclude credentials, query parameters and
+fragments.
 
-This mode queries invocation response records. Errors inside an open commit
-WebSocket or an RPC invocation do not necessarily produce an HTTP 500 response.
-Cloudflare's log retention and sampling limit which responses can be found.
+This mode queries the root span of each invocation, which records its response
+status, and the invocation logs of telemetry from before the Workers stopped
+writing them. `--hostname` matches the root span's `server.address` or the
+invocation log's Host header. Errors inside an open commit WebSocket or an RPC
+invocation do not necessarily produce an HTTP 500 response. Cloudflare's
+retention and trace sampling limit which responses can be found.
 
 ### R2 read failures
 

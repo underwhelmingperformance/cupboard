@@ -545,9 +545,79 @@ const workerInvocationSchema = z.object({
 	})
 });
 
+// The root span of an invocation carries what its invocation log did. The
+// Workers stopped writing invocation logs; earlier telemetry still has them.
+// Cloudflare documents the wall time as `cloudflare.wall_time_ms`, and deployed
+// root spans carry it as a top-level `wall_time_ms` beside
+// `http.response.status_code` and `server.address`, so both keys are read.
+const rootSpanSchema = z.object({
+	timestamp: z.number(),
+	$metadata: z.object({
+		type: z.literal('span'),
+		requestId: z.string(),
+		traceId: z.string().optional(),
+		service: z.string().optional()
+	}),
+	source: z.record(z.string(), z.unknown())
+});
+
+interface RootSpan {
+	readonly timestamp: number;
+	readonly requestId: string;
+	readonly traceId: string | undefined;
+	readonly worker: string | undefined;
+	readonly outcome: string;
+	readonly attribute: (key: string) => unknown;
+}
+
+function parseRootSpan(event: unknown): RootSpan | undefined {
+	const parsed = rootSpanSchema.safeParse(event);
+
+	if (!parsed.success) {
+		return undefined;
+	}
+
+	const { source } = parsed.data;
+	const outcome = z
+		.string()
+		.safeParse(probeSourceValue(source, 'cloudflare.outcome')).data;
+
+	if (outcome === undefined) {
+		return undefined;
+	}
+
+	return {
+		timestamp: parsed.data.timestamp,
+		requestId: parsed.data.$metadata.requestId,
+		traceId: parsed.data.$metadata.traceId,
+		worker: parsed.data.$metadata.service,
+		outcome,
+		attribute: (key) => probeSourceValue(source, key)
+	};
+}
+
 export function parseWorkerInvocation(
 	event: unknown
 ): WorkerInvocation | undefined {
+	const root = parseRootSpan(event);
+
+	if (root !== undefined) {
+		return {
+			timestamp: root.timestamp,
+			requestId: root.requestId,
+			traceId: root.traceId,
+			worker: root.worker,
+			outcome: root.outcome,
+			wallTimeMs: z
+				.number()
+				.nonnegative()
+				.safeParse(
+					root.attribute('cloudflare.wall_time_ms') ??
+						root.attribute('wall_time_ms')
+				).data
+		};
+	}
+
 	const parsed = workerInvocationSchema.safeParse(event);
 	if (!parsed.success) {
 		return undefined;
@@ -590,7 +660,37 @@ export class InvalidHttpResponseEventError extends DiagnoseError {
 	}
 }
 
+const rootSpanRequestSchema = z.object({
+	method: z.string(),
+	url: z.url(),
+	status: httpStatusSchema
+});
+
 export function parseHttpRequest(event: unknown): HttpRequest {
+	const root = parseRootSpan(event);
+	const request =
+		root === undefined
+			? undefined
+			: rootSpanRequestSchema.safeParse({
+					method: root.attribute('http.request.method'),
+					url: root.attribute('url.full'),
+					status: root.attribute('http.response.status_code')
+				});
+
+	if (root !== undefined && request?.success === true) {
+		const url = new URL(request.data.url);
+
+		return {
+			timestamp: root.timestamp,
+			requestId: root.requestId,
+			traceId: root.traceId,
+			method: request.data.method,
+			url: `${url.origin}${url.pathname}`,
+			status: request.data.status,
+			outcome: root.outcome
+		};
+	}
+
 	const parsed = httpRequestSchema.safeParse(event);
 
 	if (!parsed.success) {
@@ -609,6 +709,53 @@ export function parseHttpRequest(event: unknown): HttpRequest {
 		status: workers.event.response.status,
 		outcome: workers.outcome
 	};
+}
+
+const invocationLogKeySchema = z.object({
+	$metadata: z.object({
+		type: z.string(),
+		requestId: z.string(),
+		service: z.string().optional()
+	})
+});
+
+function invocationKey(requestId: string, service = ''): string {
+	return `${service}\0${requestId}`;
+}
+
+/**
+Drops each invocation log whose invocation also has a root span. Telemetry
+from when the Workers wrote invocation logs holds both for a request. Root
+spans are never dropped, so distinct invocations that share a request ID stay
+distinct.
+*/
+export function withoutShadowedInvocationLogs(
+	events: readonly unknown[]
+): unknown[] {
+	const rootSpans = new Set<string>();
+
+	for (const event of events) {
+		const root = parseRootSpan(event);
+
+		if (root !== undefined) {
+			rootSpans.add(invocationKey(root.requestId, root.worker));
+		}
+	}
+
+	return events.filter((event) => {
+		const parsed = invocationLogKeySchema.safeParse(event);
+
+		return (
+			!parsed.success ||
+			parsed.data.$metadata.type !== 'cf-worker-event' ||
+			!rootSpans.has(
+				invocationKey(
+					parsed.data.$metadata.requestId,
+					parsed.data.$metadata.service
+				)
+			)
+		);
+	});
 }
 
 export function lookbackWindow(now: number, minutes: number): TimeWindow {
@@ -1982,10 +2129,7 @@ export function parseOptions(arguments_: readonly string[]): Options {
 			'list HTTP responses with this status (requires an explicit window)',
 			httpStatus
 		)
-		.option(
-			'--hostname <host>',
-			'restrict --status to this request Host header'
-		)
+		.option('--hostname <host>', 'restrict --status to this request host')
 		.option('--output-mode <mode>', 'force the output mode: terminal or json')
 		.option('--json', 'shorthand for --output-mode json')
 		.option('--login', 'force a fresh browser login, ignoring the cached grant')
@@ -2401,6 +2545,84 @@ interface TelemetrySelection {
 	readonly hostname?: string | undefined;
 }
 
+/**
+Matches the invocations that answered with `status`, optionally only for one
+`Host`. A root span records the response; telemetry from before the Workers
+stopped writing invocation logs records it in the invocation log instead.
+*/
+function httpStatusFilter(
+	status: number,
+	hostname: string | undefined
+): NonNullable<TelemetryQueryParams.Parameters['filters']>[number] {
+	return {
+		kind: 'group',
+		filterCombination: 'or',
+		filters: [
+			{
+				kind: 'group',
+				filterCombination: 'and',
+				filters: [
+					{
+						key: '$metadata.type',
+						operation: 'eq',
+						type: 'string',
+						value: 'span'
+					},
+					{
+						key: 'cloudflare.outcome',
+						operation: 'exists',
+						type: 'string'
+					},
+					{
+						key: 'http.response.status_code',
+						operation: 'eq',
+						type: 'number',
+						value: status
+					},
+					...(hostname === undefined
+						? []
+						: [
+								{
+									key: 'server.address',
+									operation: 'eq' as const,
+									type: 'string' as const,
+									value: hostname
+								}
+							])
+				]
+			},
+			{
+				kind: 'group',
+				filterCombination: 'and',
+				filters: [
+					{
+						key: '$metadata.type',
+						operation: 'eq',
+						type: 'string',
+						value: 'cf-worker-event'
+					},
+					{
+						key: '$workers.event.response.status',
+						operation: 'eq',
+						type: 'number',
+						value: status
+					},
+					...(hostname === undefined
+						? []
+						: [
+								{
+									key: '$workers.event.request.headers.host',
+									operation: 'eq' as const,
+									type: 'string' as const,
+									value: hostname
+								}
+							])
+				]
+			}
+		]
+	};
+}
+
 function telemetryParameters(
 	selection: TelemetrySelection
 ): TelemetryQueryParams.Parameters {
@@ -2417,29 +2639,7 @@ function telemetryParameters(
 	}
 
 	if (selection.status !== undefined) {
-		filters.push(
-			{
-				key: '$metadata.type',
-				operation: 'eq',
-				type: 'string',
-				value: 'cf-worker-event'
-			},
-			{
-				key: '$workers.event.response.status',
-				operation: 'eq',
-				type: 'number',
-				value: selection.status
-			}
-		);
-	}
-
-	if (selection.hostname !== undefined) {
-		filters.push({
-			key: '$workers.event.request.headers.host',
-			operation: 'eq',
-			type: 'string',
-			value: selection.hostname
-		});
+		filters.push(httpStatusFilter(selection.status, selection.hostname));
 	}
 
 	return { filterCombination: 'and', filters };
@@ -3427,7 +3627,7 @@ async function main(): Promise<void> {
 	const rawTraces = selected.traces;
 
 	const diagnosticAttachments: DiagnosticAttachments = {
-		workerInvocations: rawEvents
+		workerInvocations: withoutShadowedInvocationLogs(rawEvents)
 			.map((event) => parseWorkerInvocation(event))
 			.filter((event) => event !== undefined),
 		scope: {
@@ -3460,7 +3660,7 @@ async function main(): Promise<void> {
 	};
 
 	if (options.status !== undefined) {
-		const requests = rawEvents
+		const requests = withoutShadowedInvocationLogs(rawEvents)
 			.map((event) => parseHttpRequest(event))
 			.toSorted(
 				(left, right) =>
