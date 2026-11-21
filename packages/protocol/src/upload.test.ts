@@ -1,8 +1,10 @@
+import { contentAddressedStorePath } from '@cupboard/nix-store/content-address';
 import {
 	rootNameMaxLength,
 	rootTtlMaxSeconds,
 	storePathNameMaxLength
 } from '@cupboard/nix-store/scalars';
+import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 import { type z } from 'zod';
 
@@ -65,6 +67,29 @@ const blobMetadata = {
 // A store path basename with the longest name that a basename can have.
 function longestBasename(index: number): string {
 	return `${String(index).padStart(32, '0')}-${'a'.repeat(storePathNameMaxLength)}`;
+}
+
+// Path metadata without references. `ca` produces its store path.
+function contentAddressedPath(ca: string) {
+	const path = contentAddressedStorePath({
+		storeDirectory: '/nix/store',
+		name: 'name',
+		contentAddress: ca,
+		references: [],
+		hasSelfReference: false
+	});
+
+	if (path === undefined) {
+		throw new Error(`Nix computes no store path for ${ca}`);
+	}
+
+	return {
+		...negotiationPath,
+		storePathHash: storePathHashOf(path),
+		storePath: path,
+		references: [],
+		ca
+	};
 }
 
 function issueLocations(result: z.ZodSafeParseResult<unknown>) {
@@ -355,26 +380,17 @@ describe('uploadNegotiateRequestSchema', () => {
 		}).toStrictEqual({ matching: true, mismatched: false });
 	});
 
-	it.each([
-		{
-			name: 'a deriver basename',
-			field: 'deriver' as const,
-			value: `${storePathHash}-name.drv`
-		},
-		{
-			name: 'a ca specification',
-			field: 'ca' as const,
-			value: `fixed:r:sha256:${'1'.repeat(52)}`
-		}
-	])('accepts $name', ({ field, value: field_ }) => {
+	it('accepts a deriver basename', () => {
 		const value = {
 			pushId,
-			paths: [{ ...negotiationPath, [field]: field_ }]
+			paths: [{ ...negotiationPath, deriver: `${storePathHash}-name.drv` }]
 		};
 
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
+	// The NAR hash of `negotiationPath` is `sha256:<base32>`, so it is the hash
+	// of a NAR SHA-256 address with that digest.
 	it.each([
 		{ name: 'a flat fixed-output address', ca: `fixed:sha256:${base32}` },
 		{ name: 'a NAR fixed-output address', ca: `fixed:r:sha256:${base32}` },
@@ -388,12 +404,46 @@ describe('uploadNegotiateRequestSchema', () => {
 		{
 			name: 'a BLAKE3 digest, which Nix reads with blake3-hashes',
 			ca: `fixed:r:blake3:${base32}`
-		},
-		{ name: 'an empty value, which Nix reads as no address', ca: '' }
+		}
 	])('accepts a ca with $name', ({ ca }) => {
-		const value = { pushId, paths: [{ ...negotiationPath, ca }] };
+		const value = { pushId, paths: [contentAddressedPath(ca)] };
 
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('accepts an empty ca, which Nix reads as no address', () => {
+		const value = { pushId, paths: [{ ...negotiationPath, ca: '' }] };
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	// Nix accepts a narinfo without a trusted signature when its content address
+	// produces its store path, and then checks the NAR against the address.
+	it.each([
+		{
+			name: 'does not produce the store path',
+			path: { ...negotiationPath, ca: `fixed:r:sha256:${base32}` }
+		},
+		{
+			name: 'produces the store path without the references',
+			path: {
+				...contentAddressedPath(`text:sha256:${base32}`),
+				references: [`${storePathHash}-other`]
+			}
+		},
+		{
+			name: 'is a NAR SHA-256 address with another hash than the NAR hash',
+			path: contentAddressedPath(`fixed:r:sha256:0${'2'.repeat(51)}`)
+		}
+	])('refuses a ca that $name', ({ path }) => {
+		const result = uploadNegotiateRequestSchema.safeParse({
+			pushId,
+			paths: [path]
+		});
+
+		expect(issueLocations(result)).toStrictEqual([
+			{ code: 'custom', path: ['paths', 0, 'ca'] }
+		]);
 	});
 
 	it.each([
@@ -444,11 +494,15 @@ describe('uploadNegotiateRequestSchema', () => {
 			path: ['entries', 0, 'metadata', 'ca']
 		}
 	])('refuses an invalid ca in $name', ({ schema, request, path }) => {
-		const result = schema.safeParse(
-			request({ ...negotiationPath, ca: 'not-a-content-address' })
+		const results = ['not-a-content-address', `fixed:r:sha256:${base32}`].map(
+			(ca) =>
+				issueLocations(schema.safeParse(request({ ...negotiationPath, ca })))
 		);
 
-		expect(issueLocations(result)).toStrictEqual([{ code: 'custom', path }]);
+		expect(results).toStrictEqual([
+			[{ code: 'custom', path }],
+			[{ code: 'custom', path }]
+		]);
 	});
 
 	// A row written before `ca` had to be a content address can contain any
@@ -465,11 +519,13 @@ describe('uploadNegotiateRequestSchema', () => {
 			stored: { ...negotiationPath, ...blobMetadata }
 		}
 	])(
-		'reads stored $name with a ca that is not an address',
+		'reads stored $name with a ca that is not an address for the path',
 		({ schema, stored }) => {
-			const row = { ...stored, ca: 'not-a-content-address' };
+			const rows = ['not-a-content-address', `fixed:r:sha256:${base32}`].map(
+				(ca) => ({ ...stored, ca })
+			);
 
-			expect(schema.parse(row)).toStrictEqual(row);
+			expect(rows.map((row) => schema.parse(row))).toStrictEqual(rows);
 		}
 	);
 

@@ -2,6 +2,7 @@
 	"name": "@cupboard/nix-store",
 	"version": "0.0.0",
 	"dependencies": {
+		"@noble/hashes": "^2.4.0",
 		"zod": "catalog:"
 	},
 	"devDependencies": {

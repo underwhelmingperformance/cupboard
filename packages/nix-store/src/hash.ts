@@ -147,18 +147,41 @@ which Nix reads when the `blake3-hashes` experimental feature is enabled. A
 BLAKE3 digest has 32 bytes, so it uses the same encodings as a SHA-256 digest.
 */
 export function isContentAddressHash(value: string): boolean {
-	if (decodeNixHash(value) !== undefined) {
-		return true;
+	return decodeContentAddressHash(value) !== undefined;
+}
+
+/**
+A hash in a content address. Its algorithm is one that `decodeNixHash`
+reads, or `blake3`.
+*/
+export interface ContentAddressHash {
+	readonly algorithm: NixHashAlgorithm | 'blake3';
+	readonly bytes: Uint8Array;
+}
+
+/**
+Decodes every hash that `isContentAddressHash` accepts, and returns
+`undefined` for any other value.
+*/
+export function decodeContentAddressHash(
+	value: string
+): ContentAddressHash | undefined {
+	const hash = decodeNixHash(value);
+
+	if (hash !== undefined) {
+		return hash;
 	}
 
 	if (!value.startsWith(blake3Prefix)) {
-		return false;
+		return undefined;
 	}
 
-	return (
-		decodeDigest(value.slice(blake3Prefix.length), sha256DigestBytes) !==
-		undefined
+	const bytes = decodeDigest(
+		value.slice(blake3Prefix.length),
+		sha256DigestBytes
 	);
+
+	return bytes === undefined ? undefined : { algorithm: 'blake3', bytes };
 }
 
 /**
