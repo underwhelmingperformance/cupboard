@@ -206,6 +206,16 @@ level. Costs on spans are sampled with the trace, so lowering the trace sampling
 rate also lowers the totals. The diagnostic report sums the rows read and
 written from these attributes and logs.
 
+Each publication entry of a commit-socket message that reaches admission runs in
+a `publication` span with `cupboard.publication.operation_id`; the span also
+covers the entry's commit. Once admitted, the span records
+`cupboard.publication.is_replay`, `cupboard.publication.requires_upload` and
+`cupboard.publication.recovery_deadline`. Upload planning records
+`cupboard.upload.paths` and `cupboard.cache.generation` on its request's span, a
+read-access token exchange records the number of requested resources as
+`cupboard.access.resources`, and a `commit.socket.close` span records
+`cupboard.socket.close_code` and `cupboard.socket.was_clean`.
+
 Responses receive their request ID after cache lookup. Cached responses exclude
 request IDs, trace context, client correlation headers and their `Vary` tokens.
 A cache hit therefore receives a new request ID.

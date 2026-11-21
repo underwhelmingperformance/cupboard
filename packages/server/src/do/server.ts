@@ -147,7 +147,7 @@ import {
 } from '../observability/logging.ts';
 import { warnOfRefusal } from '../observability/refusal-log.ts';
 import { withInternalRequest } from '../observability/request-context.ts';
-import { withSpan } from '../observability/span.ts';
+import { annotateActiveSpan, withSpan } from '../observability/span.ts';
 import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import {
@@ -1697,7 +1697,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	private async runPublication(command: PublicationCommand): Promise<void> {
+	// A message can carry several entries, which run concurrently, so each one
+	// records its admission on its own span.
+	private runPublication(command: PublicationCommand): Promise<void> {
+		return withSpan(
+			'publication',
+			{ 'cupboard.publication.operation_id': command.entry.operationId },
+			() => this.runPublicationEntry(command)
+		);
+	}
+
+	private async runPublicationEntry(
+		command: PublicationCommand
+	): Promise<void> {
 		const { socket, attachment, pushId, entry, grants } = command;
 		try {
 			const scope = attachment.cache;
@@ -5168,7 +5180,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<void> {
 		try {
 			await withCommitSocketEvent(socket, 'close', async () => {
-				rootLogger().debug('commit socket closed', { code, wasClean });
+				annotateActiveSpan({
+					'cupboard.socket.close_code': code,
+					'cupboard.socket.was_clean': wasClean
+				});
 				await this.closeCommitSocket(socket);
 			});
 		} finally {
