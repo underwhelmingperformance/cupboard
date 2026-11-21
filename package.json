@@ -27,6 +27,7 @@
 		"knip": "^6.15.0",
 		"mdast-util-from-markdown": "^2.1.0",
 		"miniflare": "catalog:",
+		"parse5": "^8.1.1",
 		"postject": "^1.0.0-alpha.6",
 		"prettier": "3.9.9",
 		"syncpack": "^15.3.1",
