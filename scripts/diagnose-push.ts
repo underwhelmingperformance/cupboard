@@ -1519,7 +1519,7 @@ function formatVerdict(verdict: Verdict): string {
 					: 'No native traces are available in the query window';
 			const busiest = verdict.busiest;
 
-			return `${coverage} (telemetry may be sampled, delayed or unavailable); busiest by request count is ${busiest.bucket} (${formatCount(busiest.logCount)} calls, ${formatCount(busiest.rowsRead)} rows read).`;
+			return `${coverage} (telemetry may be sampled, delayed or unavailable); the operation with the most log records is ${busiest.bucket} (${formatCount(busiest.logCount)} records, ${formatCount(busiest.rowsRead)} rows read). Requests are recorded only in traces, so log records do not count requests.`;
 		}
 		case 'no-positive-duration': {
 			return 'No trace has a positive duration.';

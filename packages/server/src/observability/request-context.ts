@@ -56,11 +56,10 @@ export function withInternalRequest(
 	};
 
 	return withContext(fields, () =>
+		// The span records the request's start, status and duration, so only a
+		// failure is logged.
 		withSpan('cupboard.request', attributes, async (span) => {
-			const logger = requestLogger(request);
 			const started = performance.now();
-
-			logger.debug('request started');
 
 			try {
 				const response = await run();
@@ -70,10 +69,6 @@ export function withInternalRequest(
 				if (response.status >= serverErrorStatus) {
 					span.setAttribute('error.type', String(response.status));
 				}
-				logger.debug('request completed', {
-					status: response.status,
-					elapsedMs: performance.now() - started
-				});
 
 				return response;
 			} catch (error) {
@@ -81,7 +76,7 @@ export function withInternalRequest(
 					'error.type',
 					error instanceof Error ? error.name : 'Error'
 				);
-				logger.error('request failed', {
+				requestLogger(request).error('request failed', {
 					elapsedMs: performance.now() - started,
 					error
 				});

@@ -5,6 +5,7 @@ import {
 	withoutCachedCorrelation,
 	withPublicRequest
 } from './request-context.ts';
+import { finishedSpans, recordSpans } from './span-recorder.test-support.ts';
 
 const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
 const spanId = '00f067aa0ba902b7';
@@ -74,6 +75,37 @@ describe('public request correlation', () => {
 			clientTraceId: traceId,
 			clientSpanId: spanId
 		});
+	});
+
+	// The span is the only record of a request that writes no other log.
+	it('records the request and its status in the request span', async () => {
+		recordSpans();
+		const response = await withPublicRequest(
+			new Request('https://cache.example.test/t/acme/nix-cache-info', {
+				headers: { 'cf-ray': 'ray' }
+			}),
+			() =>
+				Promise.resolve(
+					new Response('failed', {
+						status: StatusCodes.SERVICE_UNAVAILABLE
+					})
+				)
+		);
+
+		expect(
+			finishedSpans()
+				.filter((span) => span.name === 'cupboard.request')
+				.map((span) => span.attributes)
+		).toStrictEqual([
+			{
+				'cupboard.request_id': response.headers.get('x-request-id'),
+				'cloudflare.ray_id': 'ray',
+				'http.request.method': 'GET',
+				'url.path': '/t/acme/nix-cache-info',
+				'http.response.status_code': StatusCodes.SERVICE_UNAVAILABLE,
+				'error.type': String(StatusCodes.SERVICE_UNAVAILABLE)
+			}
+		]);
 	});
 
 	it('removes correlation headers before a response enters Workers Cache', async () => {
