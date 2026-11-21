@@ -10,6 +10,10 @@ import {
 	WranglerConfigError
 } from './config.ts';
 
+function readServerConfig(file: string): Promise<string> {
+	return readFile(new URL(`../../../server/${file}`, import.meta.url), 'utf8');
+}
+
 const controlSource = `{
 	// the control-plane Worker
 	"name": "cupboard",
@@ -78,6 +82,18 @@ describe('parseDeploymentConfig', () => {
 		]);
 	});
 
+	it('turns off invocation logs in both production Workers', async () => {
+		const config = parseDeploymentConfig(
+			await readServerConfig('wrangler.jsonc'),
+			await readServerConfig('wrangler.tenant.jsonc')
+		);
+
+		expect({
+			control: config.control.invocationLogs,
+			tenant: config.tenant.invocationLogs
+		}).toStrictEqual({ control: false, tenant: false });
+	});
+
 	it('matches the production rate-limit binding to the protocol limit', async () => {
 		const productionControlSource = await readFile(
 			new URL('../../../server/wrangler.jsonc', import.meta.url),
@@ -104,6 +120,7 @@ describe('parseDeploymentConfig', () => {
 				compatibilityFlags: ['nodejs_compat'],
 				cpuMs: 300_000,
 				observability: true,
+				invocationLogs: true,
 				tracing: true,
 				vars: { CUPBOARD_AUTH_ISSUER: 'cupboard' },
 				durableObjects: [
@@ -159,6 +176,7 @@ describe('parseDeploymentConfig', () => {
 				compatibilityFlags: ['nodejs_compat'],
 				cpuMs: undefined,
 				observability: true,
+				invocationLogs: true,
 				tracing: false,
 				vars: {},
 				durableObjects: [

@@ -48,6 +48,7 @@ import {
 	type TraceSummary,
 	triggerGroup,
 	windowForGitHubJob,
+	withoutShadowedInvocationLogs,
 	withRequestIds,
 	type WorkerLog
 } from './diagnose-push.ts';
@@ -275,22 +276,63 @@ describe('HTTP status queries', () => {
 					value: 'cupboard'
 				},
 				{
-					key: '$metadata.type',
-					operation: 'eq',
-					type: 'string',
-					value: 'cf-worker-event'
-				},
-				{
-					key: '$workers.event.response.status',
-					operation: 'eq',
-					type: 'number',
-					value: StatusCodes.INTERNAL_SERVER_ERROR
-				},
-				{
-					key: '$workers.event.request.headers.host',
-					operation: 'eq',
-					type: 'string',
-					value: 'cupboard.example.workers.dev'
+					kind: 'group',
+					filterCombination: 'or',
+					filters: [
+						{
+							kind: 'group',
+							filterCombination: 'and',
+							filters: [
+								{
+									key: '$metadata.type',
+									operation: 'eq',
+									type: 'string',
+									value: 'span'
+								},
+								{
+									key: 'cloudflare.outcome',
+									operation: 'exists',
+									type: 'string'
+								},
+								{
+									key: 'http.response.status_code',
+									operation: 'eq',
+									type: 'number',
+									value: StatusCodes.INTERNAL_SERVER_ERROR
+								},
+								{
+									key: 'server.address',
+									operation: 'eq',
+									type: 'string',
+									value: 'cupboard.example.workers.dev'
+								}
+							]
+						},
+						{
+							kind: 'group',
+							filterCombination: 'and',
+							filters: [
+								{
+									key: '$metadata.type',
+									operation: 'eq',
+									type: 'string',
+									value: 'cf-worker-event'
+								},
+								{
+									key: '$workers.event.response.status',
+									operation: 'eq',
+									type: 'number',
+									value: StatusCodes.INTERNAL_SERVER_ERROR
+								},
+								{
+									key: '$workers.event.request.headers.host',
+									operation: 'eq',
+									type: 'string',
+									value: 'cupboard.example.workers.dev'
+								}
+							]
+						}
+					]
 				}
 			]
 		};
@@ -328,6 +370,92 @@ describe('HTTP status queries', () => {
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
 			outcome: 'ok'
 		});
+	});
+
+	it('parses a root span response without its query parameters', () => {
+		const rootSpan = {
+			timestamp: 1000,
+			$metadata: {
+				type: 'span',
+				requestId: 'request-1',
+				traceId: 'trace-1',
+				service: 'cupboard'
+			},
+			source: {
+				cloudflare: { outcome: 'ok' },
+				wall_time_ms: 12,
+				http: {
+					request: { method: 'POST' },
+					response: { status_code: StatusCodes.INTERNAL_SERVER_ERROR }
+				},
+				url: { full: 'https://cupboard.example.workers.dev/t/acme/token?x=1' }
+			}
+		};
+
+		expect({
+			request: parseHttpRequest(rootSpan),
+			invocation: parseWorkerInvocation(rootSpan)
+		}).toStrictEqual({
+			request: {
+				timestamp: 1000,
+				requestId: 'request-1',
+				traceId: 'trace-1',
+				method: 'POST',
+				url: 'https://cupboard.example.workers.dev/t/acme/token',
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				outcome: 'ok'
+			},
+			invocation: {
+				timestamp: 1000,
+				requestId: 'request-1',
+				traceId: 'trace-1',
+				worker: 'cupboard',
+				outcome: 'ok',
+				wallTimeMs: 12
+			}
+		});
+	});
+
+	it('drops an invocation log only when its invocation has a root span', () => {
+		const shadowed = {
+			$metadata: {
+				type: 'cf-worker-event',
+				requestId: 'request-1',
+				service: 'cupboard'
+			}
+		};
+		const otherWorker = {
+			$metadata: {
+				type: 'cf-worker-event',
+				requestId: 'request-1',
+				service: 'cupboard-tenant'
+			}
+		};
+		const workerSpan = {
+			timestamp: 1,
+			$metadata: { type: 'span', requestId: 'request-1', service: 'cupboard' },
+			source: { cloudflare: { outcome: 'ok' } }
+		};
+		const objectSpan = { ...workerSpan, timestamp: 2 };
+
+		expect(
+			withoutShadowedInvocationLogs([
+				shadowed,
+				otherWorker,
+				workerSpan,
+				objectSpan
+			])
+		).toStrictEqual([otherWorker, workerSpan, objectSpan]);
+	});
+
+	it('reads the documented wall time key of a root span', () => {
+		expect(
+			parseWorkerInvocation({
+				timestamp: 1,
+				$metadata: { type: 'span', requestId: 'request', service: 'cupboard' },
+				source: { cloudflare: { outcome: 'exceededCpu', wall_time_ms: 30_000 } }
+			})?.wallTimeMs
+		).toBe(30_000);
 	});
 
 	it.each(['cf-worker', 'span'])(

@@ -141,6 +141,12 @@ export function buildScriptMetadata(
 		compatibility_flags: [...worker.compatibilityFlags],
 		observability: {
 			enabled: worker.observability,
+			// Sent even when it matches Cloudflare's default, so that turning
+			// invocation logs back on takes effect on an existing Worker.
+			logs: {
+				enabled: worker.observability,
+				invocation_logs: worker.invocationLogs
+			},
 			...(worker.tracing && { traces: { enabled: true } })
 		},
 		keep_bindings: ['secret_text', 'plain_text'],

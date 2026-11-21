@@ -106,6 +106,10 @@ export interface WorkerConfig {
 	readonly compatibilityFlags: readonly string[];
 	readonly cpuMs: number | undefined;
 	readonly observability: boolean;
+	/**
+	Whether Workers Logs records an invocation log for each request.
+	*/
+	readonly invocationLogs: boolean;
 	readonly tracing: boolean;
 	readonly vars: Readonly<Record<string, string>>;
 	readonly durableObjects: readonly DurableObjectBinding[];
@@ -360,6 +364,7 @@ const durableObjectExport = z.union([
 
 const observability = z.object({
 	enabled: z.boolean(),
+	logs: z.object({ invocation_logs: z.boolean() }).partial().optional(),
 	traces: z.object({ enabled: z.boolean() }).partial().optional()
 });
 
@@ -443,6 +448,7 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		compatibilityFlags: raw.compatibility_flags,
 		cpuMs: raw.limits?.cpu_ms,
 		observability: raw.observability?.enabled ?? false,
+		invocationLogs: raw.observability?.logs?.invocation_logs ?? true,
 		tracing: raw.observability?.traces?.enabled ?? false,
 		vars: raw.vars,
 		durableObjects: (raw.durable_objects?.bindings ?? []).map((binding) => ({

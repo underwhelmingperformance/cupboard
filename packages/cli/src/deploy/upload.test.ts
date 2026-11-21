@@ -32,6 +32,7 @@ const controlConfig: WorkerConfig = {
 	compatibilityFlags: ['nodejs_compat'],
 	cpuMs: 300_000,
 	observability: true,
+	invocationLogs: true,
 	tracing: true,
 	vars: { CUPBOARD_AUTH_ISSUER: 'cupboard' },
 	durableObjects: [
@@ -117,7 +118,11 @@ describe('buildScriptMetadata', () => {
 			main_module: 'worker.js',
 			compatibility_date: '2026-05-15',
 			compatibility_flags: ['nodejs_compat'],
-			observability: { enabled: true, traces: { enabled: true } },
+			observability: {
+				enabled: true,
+				logs: { enabled: true, invocation_logs: true },
+				traces: { enabled: true }
+			},
 			keep_bindings: ['secret_text', 'plain_text'],
 			cache_options: { enabled: true, cross_version_cache: true },
 			limits: { cpu_ms: 300_000 },
@@ -160,13 +165,29 @@ describe('buildScriptMetadata', () => {
 		});
 	});
 
+	it('turns off invocation logs when the config does', () => {
+		const metadata = buildScriptMetadata(
+			{ ...controlConfig, invocationLogs: false },
+			resources
+		);
+
+		expect(metadata.observability).toStrictEqual({
+			enabled: true,
+			logs: { enabled: true, invocation_logs: false },
+			traces: { enabled: true }
+		});
+	});
+
 	it('omits traces when tracing is disabled', () => {
 		const metadata = buildScriptMetadata(
 			{ ...controlConfig, tracing: false },
 			resources
 		);
 
-		expect(metadata.observability).toStrictEqual({ enabled: true });
+		expect(metadata.observability).toStrictEqual({
+			enabled: true,
+			logs: { enabled: true, invocation_logs: true }
+		});
 	});
 
 	it('omits limits and exports when absent', () => {
