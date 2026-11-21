@@ -22,16 +22,16 @@
 		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.23.0",
+		"@cloudflare/vitest-pool-workers": "0.23.0",
 		"@cloudflare/workers-types": "catalog:",
 		"@orpc/client": "catalog:",
 		"@orpc/contract": "catalog:",
 		"@orpc/openapi-client": "catalog:",
-		"age-encryption": "^0.3.1",
-		"drizzle-kit": "^0.31.10",
+		"age-encryption": "0.3.1",
+		"drizzle-kit": "0.31.10",
 		"typescript": "catalog:",
 		"vitest": "catalog:",
-		"wrangler": "^4.124.0"
+		"wrangler": "4.124.0"
 	},
 	"license": "AGPL-3.0-or-later",
 	"main": "src/worker.ts",
