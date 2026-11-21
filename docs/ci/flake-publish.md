@@ -576,8 +576,15 @@ configuration:
   jobs, so a cohort job builds the targets that the plan evaluated without
   evaluating them again. See [How a publication run
   works][reuse-plan-derivations]. It is off by default.
+- `flake-input-cache: false` stops the jobs from keeping the sources of public
+  flake inputs from github.com in a GitHub Actions cache. By default, the plan
+  job saves them and every job restores them before it evaluates, so a job
+  fetches from github.com only the inputs that are private or that the cache
+  does not have yet. Inputs on other hosts are never cached. See [Reusing flake
+  input sources between jobs][flake-input-cache].
 
 [reuse-plan-derivations]: ./how-it-works.md#importing-the-plan-jobs-derivations
+[flake-input-cache]: ./how-it-works.md#reusing-flake-input-sources-between-jobs
 [background-removal]:
   ./how-it-works.md#how-a-macos-cohort-frees-disk-space-in-the-background
 

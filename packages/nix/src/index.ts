@@ -72,6 +72,8 @@ export {
 } from './nix-store.ts';
 export type { ReadKeyFile } from './offer-acceptance.ts';
 export { offerAcceptance } from './offer-acceptance.ts';
+export type { PublicObjectAccess } from './public-nar-access.ts';
+export { probePublicObject } from './public-nar-access.ts';
 export type {
 	PublicationCandidate,
 	PublicationSelection,

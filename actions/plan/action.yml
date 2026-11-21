@@ -3,7 +3,9 @@ description:
   Evaluates the target manifest, groups the targets into cohorts, and writes the
   matrix for the cohort jobs. For output-only publication of missing builds, it
   also sets the roots of targets that the cache already has, and leaves those
-  targets out of the matrix.
+  targets out of the matrix. When actions/prepare found no flake input cache for
+  the checkout's flake.lock, it then saves the public flake input sources that
+  the job fetched.
 inputs:
   targets:
     description: Target manifest to plan, as JSON.
@@ -286,3 +288,29 @@ runs:
           node --experimental-transform-types \
             --disable-warning=ExperimentalWarning \
             "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"
+
+    # actions/prepare sets these variables when its flake-input-cache input is
+    # true and the checkout has a flake.lock. The plan has evaluated every
+    # target by now, so the job has fetched each input that the evaluation uses.
+    - name: Collect public flake input sources
+      id: flake-inputs
+      if: >-
+        ${{ env.CUPBOARD_FLAKE_INPUT_CACHE_KEY != '' &&
+        env.CUPBOARD_FLAKE_INPUT_CACHE_RESTORED != 'true' }}
+      shell: bash
+      env:
+        DIRECTORY: ${{ env.CUPBOARD_FLAKE_INPUT_CACHE_DIRECTORY }}
+      run: |
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" flake-input-cache \
+          --directory "$DIRECTORY"
+
+    # The path must be the same string that actions/prepare restores.
+    - name: Save public flake input sources
+      if: ${{ steps.flake-inputs.outputs.save == 'true' }}
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/cupboard-flake-inputs
+        key: ${{ env.CUPBOARD_FLAKE_INPUT_CACHE_KEY }}

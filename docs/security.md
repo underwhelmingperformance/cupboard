@@ -317,6 +317,34 @@ and the plan and cache-removal jobs can request OIDC tokens. Leave `plan-runner`
 set to a GitHub-hosted label unless that runner's group is restricted as
 described above.
 
+The plan job also saves the sources of public flake inputs in a GitHub Actions
+cache, which every job of the run restores. Anyone who can read the repository's
+Actions caches can read that cache, including pull-request runs that restore the
+default branch's caches. The plan job saves a source only when every
+`flake.lock` entry with that source has its origin on github.com, and an
+anonymous request to each origin succeeds. Such a request sees only public
+repositories, whatever networks the runner can reach. The job leaves out inputs
+on every other host, including GitHub Enterprise Server, because a request from
+the runner cannot prove that another host is public: a self-hosted runner can
+reach private networks.
+
+The cache trusts every entry in the default branch's `flake.lock`. That includes
+the entries that Nix copies from the lock files of upstream flakes, so the
+authors of those flakes can add entries too. A private source that is itself a
+`flake.lock` entry is never cached, because its origin refuses the anonymous
+request or the job leaves out its path. A source that the evaluation fetches
+with credentials, such as with `builtins.fetchGit`, is cached when no
+`flake.lock` entry for that source exists and an entry with a public origin
+claims its NAR hash. An entry like that needs the private source's NAR hash, and
+pull-request runs can then restore the private source from the cache. The jobs
+do not trust the cache's contents: Nix takes a source from it only when the
+source matches its content address, and otherwise fetches the input from its
+origin. Set `flake-input-cache: false` to turn the cache off. See [Reusing flake
+input sources between jobs][flake-input-cache].
+
+[flake-input-cache]:
+  ./ci/how-it-works.md#reusing-flake-input-sources-between-jobs
+
 ## What private caches reveal
 
 A private cache requires read authorisation for every request except `/pubkey`.

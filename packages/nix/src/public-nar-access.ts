@@ -53,6 +53,74 @@ export async function fetchPublicObject(
 	throw new PublicNarAccessError();
 }
 
+/**
+The answer to an anonymous request for an object:
+
+- `public`: a status from 200 to 299 with a body that is not an HTML page.
+- `private`: a definite refusal. That is 401, 403, 404, 410 or 451, an HTML
+  page such as a sign-in form, or a URL or redirect that `fetchPublicObject`
+  refuses to request. GitHub answers an anonymous request for a private
+  repository with 404.
+- `unavailable`: a 403 that reports a rate limit with `x-ratelimit-remaining:
+  0` or `retry-after`, any other status, or a failed request. A later request
+  can get a definite answer.
+*/
+export type PublicObjectAccess = 'public' | 'private' | 'unavailable';
+
+const refusalStatuses = new Set([401, 403, 404, 410, 451]);
+
+/**
+Sends an anonymous GET for the URL and classifies the answer. The request has
+no credentials, and `fetchPublicObject` follows redirects only to public
+hosts. An abort of `options.signal` rejects with its reason.
+*/
+export async function probePublicObject(
+	url: URL,
+	options: PublicFetchOptions
+): Promise<PublicObjectAccess> {
+	let response: Response;
+
+	try {
+		response = await fetchPublicObject(url, options);
+	} catch (error) {
+		options.signal.throwIfAborted();
+
+		return error instanceof PublicNarAccessError ? 'private' : 'unavailable';
+	}
+
+	await discardResponseBody(response);
+
+	if (response.ok) {
+		return isHtml(response) ? 'private' : 'public';
+	}
+
+	if (isRateLimited(response)) {
+		return 'unavailable';
+	}
+
+	return refusalStatuses.has(response.status) ? 'private' : 'unavailable';
+}
+
+// GitHub answers an exhausted primary rate limit with 403 and
+// `x-ratelimit-remaining: 0`, and a secondary rate limit with 403 or 429 and
+// `retry-after`.
+function isRateLimited(response: Response): boolean {
+	return (
+		response.headers.get('x-ratelimit-remaining') === '0' ||
+		response.headers.has('retry-after')
+	);
+}
+
+function isHtml(response: Response): boolean {
+	const mediaType = response.headers
+		.get('content-type')
+		?.split(';', 1)[0]
+		?.trim()
+		.toLowerCase();
+
+	return mediaType === 'text/html';
+}
+
 async function probePublicNarAccess(
 	url: URL,
 	downloadSize: number,

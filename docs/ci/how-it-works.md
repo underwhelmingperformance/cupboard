@@ -338,6 +338,118 @@ download are separate workflow steps, so the job log shows their times too. The
 artifact expires after one day. If you re-run a cohort job after that, it fails
 at the download, so re-run the whole workflow instead.
 
+## Reusing flake input sources between jobs
+
+Nix fetches each locked flake input before it evaluates code that uses the
+input, and a fresh runner has none of them. For each locked input, Nix asks its
+substituters for the input's source path before it fetches the input from its
+origin. With `flake-input-cache: true`, the default, the workflow keeps the
+sources of public inputs in a GitHub Actions cache and uses that cache as a
+substituter.
+
+The prepare step of the plan and cohort jobs restores the cache before Nix
+evaluates anything, and the evaluation of `nix-config` uses it. The cache key is
+`cupboard-flake-inputs-v1-` followed by the hash of the `flake.lock` at the root
+of the checkout, so a change to the lock selects a new cache. When the plan job
+finds no cache for its key, it saves one after it has planned. Cohort jobs in
+the same run then restore the plan job's cache.
+
+The saved cache contains the source of an input only when all of these are true:
+
+- The input has the type `github`, `tarball` or `file`.
+- The input's origin is github.com: a `github` input without a `host`, or a
+  `tarball` or `file` input whose locked URL uses HTTPS and the host
+  `github.com`, `codeload.github.com` or `api.github.com`, and has no query
+  string. A `github` input on GitHub Enterprise Server, which sets `host`, is
+  left out. So is a URL with a query string, which can contain a token, as the
+  download link of a private repository's archive does.
+- The lock records the input's `narHash`, and the plan job's store has the
+  source, which means that the evaluation used it.
+- Every `flake.lock` entry with the same source path meets these conditions, and
+  the request for each of their origins succeeds. The request proves only that a
+  URL is public, not that the path contains what the URL serves. A `git` input
+  and a private `github` input have the same kind of path as a public `github`
+  input, so an entry with the `narHash` of a private input would otherwise prove
+  that path public with an unrelated archive.
+- The source has no signature, which means that the plan job fetched it from the
+  origin. A source that Nix copied from a signed binary cache, such as
+  cache.nixos.org, is left out, because that cache keeps serving it.
+- An anonymous `GET` to github.com succeeds with a response that is not an HTML
+  page. For a `github` input, the job requests
+  `https://github.com/<owner>/<repo>/archive/<rev>.tar.gz`, and for a `tarball`
+  or `file` input, the locked URL. The request has no credentials. An HTML page,
+  such as a sign-in form, counts as a refusal.
+
+An anonymous request to github.com sees only public repositories, and github.com
+is the same public service from every network, so a success proves that the
+source is public whatever networks the runner can reach. A request to any other
+host proves only that this runner can fetch the source, because a self-hosted
+runner, or a GitHub-hosted runner with private networking, can reach hosts that
+the public cannot. The plan job therefore leaves out every input on another host
+and lists those inputs once in its log. A private `github` entry is left out,
+because github.com refuses the anonymous request, and `git` entries are left out
+altogether.
+
+The cache trusts every entry in the `flake.lock` of the default branch, whose
+caches every branch and pull request can restore. When Nix locks a flake, it
+copies the transitive entries of each input from that input's own `flake.lock`,
+including their `narHash`. The authors of upstream flakes can therefore add
+entries to the lock as well. Any entry can claim the `narHash` of a different
+source.
+
+The plan job caches a store path only when the job's own evaluation fetched the
+path from an origin, and every `flake.lock` entry with that path is a `github`,
+`tarball` or `file` entry whose github.com origin answers an anonymous request
+with a success. A private source that is itself a `flake.lock` entry is never
+cached. Either its origin refuses the request, or the entry is not a candidate
+and the job leaves out its path for every entry.
+
+The job does not check that a cached path contains what the public origin
+serves. A source that the evaluation fetches with credentials, with
+`builtins.fetchGit` or a similar function, is cached when no `flake.lock` entry
+for that source exists and an entry with a public origin claims the source's NAR
+hash. With an honest lock, the two sources have the same contents. With a
+crafted entry, the private source goes into the cache, which pull-request runs
+can restore. The crafted entry must contain the private source's NAR hash.
+Pull-request runs save their caches where only runs of the same pull request can
+restore them.
+
+The plan job saves the cache only when every request got a definite answer: a
+success, or a refusal with 401, 403, 404, 410 or 451. GitHub answers an
+anonymous request for a private repository with 404. When a request fails, times
+out or gets another status, the job does not save the cache and writes a
+warning, and the next run tries again. That includes a 403 that reports a rate
+limit with `x-ratelimit-remaining: 0` or `retry-after`, as well as 429 and 503.
+Otherwise the cache would lack that source until `flake.lock` changes. The job
+sends at most eight requests at once. A `flake.lock` entry that does not parse
+leaves out only that input, with a warning.
+
+The cache has no signing key, and the workflow does not mark it as trusted. Nix
+accepts a source from it only when the narinfo's content address produces the
+source's store path. It then checks the NAR against that address, and the
+evaluation checks the source against the lock's `narHash`. When a cached source
+fails the content-address check, Nix fetches the input from its origin.
+
+A failure never fails a job. When the cache cannot be restored, or the copy or
+the save fails, the job writes a warning and Nix fetches the inputs from their
+origins. Nix reads the cache only when the job's user may add substituters,
+which is true for the single-user Nix that the workflow installs.
+
+At the end of the prepare step, the job adds the restored cache to its own
+substituters unless `store` is set or Nix's effective `builders` setting lists a
+machine. That setting includes the caller's `nix-config` and the runner's
+`/etc/nix/nix.conf` and `/etc/nix/machines`. When the step cannot read the
+setting or a machines file, it treats Nix as having remote builders. The prepare
+step says in the log when it leaves the cache out. With `store` set and an empty
+`nix-config`, the restore only checks whether a cache exists, because no step
+reads the cache. Nix sends the job's substituter settings to the remote store's
+daemon and to each `ssh-ng` builder's daemon. Those daemons cannot read a
+directory on the runner, and a daemon that trusts the runner would create the
+directory on the remote host. A cohort's `nix build` evaluates and builds in one
+process with one set of settings, so the workflow cannot give the cache to
+evaluation alone. The plan job still collects and saves the cache in those
+cases, because collecting reads only its own store.
+
 ## Sharing work between cohorts: the run root
 
 Cohorts run in parallel, and they often share dependencies. To avoid building

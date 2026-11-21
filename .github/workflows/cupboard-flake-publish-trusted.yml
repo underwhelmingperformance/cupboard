@@ -260,6 +260,24 @@ on:
         required: false
         default: false
         type: boolean
+      flake-input-cache:
+        description:
+          Keep the sources of the flake's public inputs in a GitHub Actions
+          cache keyed on flake.lock. The plan job saves the cache when none
+          exists for the lock, and the plan and cohort jobs restore it before
+          their first Nix evaluation and use it as a substituter. The cache
+          contains only the sources of github, tarball and file entries of
+          flake.lock on github.com that the plan job fetched and that anonymous
+          requests to github.com show to be public. It trusts every entry in the
+          default branch's flake.lock, including the entries that Nix copies
+          from the lock files of upstream flakes. Nix checks each source that it
+          takes from the cache against its content address and the lock's
+          narHash. A job with store set, or whose Nix configuration has remote
+          builders, does not use the cache after the prepare step. A failure to
+          save or restore the cache produces a warning.
+        required: false
+        default: true
+        type: boolean
       input-known-hosts:
         description:
           known_hosts lines for every SSH host that serves a private flake
@@ -469,6 +487,7 @@ jobs:
       fail-on-divergence: ${{ inputs.fail-on-divergence }}
       nix-config: ${{ inputs.nix-config }}
       reuse-plan-derivations: ${{ inputs.reuse-plan-derivations }}
+      flake-input-cache: ${{ inputs.flake-input-cache }}
       input-known-hosts: ${{ inputs.input-known-hosts }}
       builders: ${{ inputs.builders }}
       builder-known-hosts: ${{ inputs.builder-known-hosts }}
