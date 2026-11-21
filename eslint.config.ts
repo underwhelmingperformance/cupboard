@@ -253,7 +253,9 @@ export default defineConfig(
 		// Durable Object row budget and the subrequest slice use `AsyncLocalStorage`
 		// to keep interleaved requests from sharing accounting, deadlines,
 		// allowances, budgets or slices. The test alarm controls use it to give each
-		// call the test generation in which it started.
+		// call the test generation in which it started. The OTel bridge uses it as
+		// the context manager that carries OTel contexts across awaits, and its
+		// test uses it to fake the runtime's active span.
 		// Workerd exposes it through `nodejs_compat`; permit only
 		// `node:async_hooks` in these modules.
 		files: [
@@ -262,7 +264,9 @@ export default defineConfig(
 			'packages/server/src/do/deadline.ts',
 			'packages/server/src/do/row-budget.ts',
 			'packages/server/src/do/statement-scope.ts',
-			'packages/server/src/do/subrequest-slice.ts'
+			'packages/server/src/do/subrequest-slice.ts',
+			'packages/server/src/observability/workers-otel-bridge.ts',
+			'packages/server/src/observability/workers-otel-bridge.test.ts'
 		],
 		rules: {
 			'no-restricted-imports': [

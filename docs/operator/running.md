@@ -90,6 +90,17 @@ wrangler tail cupboard
 wrangler tail cupboard-tenant
 ```
 
+The Workers send spans through the OpenTelemetry API, which a bridge maps onto
+[Workers tracing][workers-traces]. Each server log record includes the active
+span's `trace_id`, `span_id` and `trace_flags`. These are Cloudflare's native
+trace identifiers, not the client's. `trace_flags` does not show whether
+Cloudflare kept the trace. A runtime without the native tracing APIs, such as an
+older `wrangler dev`, logs `Workers tracing is disabled` once per isolate and
+records no spans.
+
+[workers-traces]:
+  https://developers.cloudflare.com/workers/observability/traces/
+
 The CLI writes diagnostic files only when `--log-file <path>` is supplied. Files
 contain the existing structured logs at trace level, independently of the
 console's verbosity. They include the active OpenTelemetry `trace_id` and

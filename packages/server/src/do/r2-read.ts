@@ -1,6 +1,7 @@
 import { getLogger, withContext } from '@cupboard/logger';
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { abortableSleep, transientRetryBackoff } from '@cupboard/shared/retry';
+import type { Span } from '@opentelemetry/api';
 
 import { R2ReadUnavailableError, SubrequestTimeoutError } from '../errors.ts';
 import type { withSpan } from '../observability/span.ts';

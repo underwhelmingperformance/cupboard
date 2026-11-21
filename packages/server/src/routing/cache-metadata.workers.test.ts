@@ -19,6 +19,7 @@ import {
 	readTokenBasicUser,
 	readTokenPasswordPrefix
 } from '@cupboard/protocol/read-access';
+import type { Span } from '@opentelemetry/api';
 import {
 	createExecutionContext,
 	runInDurableObject,

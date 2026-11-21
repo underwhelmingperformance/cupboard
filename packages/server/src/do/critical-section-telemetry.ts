@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import type { Span } from '@opentelemetry/api';
 
 import type { withSpan } from '../observability/span.ts';
 

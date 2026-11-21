@@ -1,3 +1,5 @@
+import './observability/register-tracing.ts';
+
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 
