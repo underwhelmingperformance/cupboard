@@ -283,6 +283,11 @@ export interface SpanEvent {
 		readonly outcome: string;
 		readonly wallTimeMs: number | undefined;
 	};
+	/**
+	The SQLite rows that the span's operation read and wrote, from its
+	`cupboard.cost.*` attributes.
+	*/
+	readonly cost?: { readonly rowsRead: number; readonly rowsWritten: number };
 }
 
 export interface StorageReadEvent {
@@ -1037,6 +1042,13 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 		.safeParse(
 			probeSourceValue(source, 'cloudflare.wall_time_ms') ?? source.wall_time_ms
 		).data;
+	const rowCount = z.number().int().nonnegative();
+	const rowsRead = rowCount.safeParse(
+		probeSourceValue(source, 'cupboard.cost.rows_read')
+	).data;
+	const rowsWritten = rowCount.safeParse(
+		probeSourceValue(source, 'cupboard.cost.rows_written')
+	).data;
 	const r2Success = probeSourceValue(source, 'cloudflare.r2.response.success');
 	const r2Code = probeSourceValue(source, 'cloudflare.r2.error.code');
 	const r2Outcome =
@@ -1057,7 +1069,10 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 		endMs,
 		...(name === 'r2_get' && { r2Outcome }),
 		...(outcome !== undefined && { invocation: { outcome, wallTimeMs } }),
-		...(probe !== undefined && { probe })
+		...(probe !== undefined && { probe }),
+		...((rowsRead !== undefined || rowsWritten !== undefined) && {
+			cost: { rowsRead: rowsRead ?? 0, rowsWritten: rowsWritten ?? 0 }
+		})
 	};
 }
 
@@ -1206,6 +1221,30 @@ export function analyse(
 		if (trace.errors.length > 0) {
 			bucket.errors += 1;
 		}
+	}
+
+	// Operations record their row counts on spans; older deployments logged them.
+	let spanRowsRead = 0;
+	let spanRowsWritten = 0;
+
+	for (const span of spans) {
+		if (span.cost === undefined) {
+			continue;
+		}
+
+		// The totals count every span, as they count every log. An operation
+		// counts the spans of the traces that the traces view returned.
+		spanRowsRead += span.cost.rowsRead;
+		spanRowsWritten += span.cost.rowsWritten;
+		const bucketKey = bucketByTrace.get(span.traceId);
+
+		if (bucketKey === undefined) {
+			continue;
+		}
+
+		const bucket = bucketFor(bucketKey);
+		bucket.rowsRead += span.cost.rowsRead;
+		bucket.rowsWritten += span.cost.rowsWritten;
 	}
 
 	const traceErrors = new Map<
@@ -1374,8 +1413,11 @@ export function analyse(
 					a.message.localeCompare(b.message)
 			),
 		totals: {
-			rowsRead: logs.reduce((sum, log) => sum + log.rowsRead, 0),
-			rowsWritten: logs.reduce((sum, log) => sum + log.rowsWritten, 0),
+			rowsRead: logs.reduce((sum, log) => sum + log.rowsRead, spanRowsRead),
+			rowsWritten: logs.reduce(
+				(sum, log) => sum + log.rowsWritten,
+				spanRowsWritten
+			),
 			errors: operations.reduce((sum, op) => sum + op.errors, 0)
 		}
 	};

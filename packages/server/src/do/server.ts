@@ -141,7 +141,7 @@ import {
 import { requestCorrelation } from '../observability/correlation.ts';
 import {
 	loggerMiddleware,
-	logMethodFinished,
+	recordMethodCost,
 	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
@@ -577,8 +577,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.prototype,
 			(server) => server.context.subrequestsPerInvocation
 		);
+		// Each dispatched method is its own invocation, so its cost goes on the
+		// invocation's root span.
 		enterOperationCostOnDispatch(this.prototype, (method, cost) => {
-			logMethodFinished(rootLogger().with({ method }), cost);
+			recordMethodCost(rootLogger().with({ method }), cost);
 		});
 	}
 
@@ -2810,17 +2812,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 		};
 
-		// The drain outlives the request that starts it, so it has its own cost
-		// scope.
-		this.reconcileDrain = withOperationCost(
+		// The drain outlives the request that starts it, so it has its own span
+		// and cost scope.
+		this.reconcileDrain = withSpan(
 			'maintenance-eligibility-reconcile',
-			drain,
-			(cost) => {
-				logMethodFinished(
-					rootLogger().with({ method: 'maintenance-eligibility-reconcile' }),
-					cost
-				);
-			}
+			{},
+			() =>
+				withOperationCost(
+					'maintenance-eligibility-reconcile',
+					drain,
+					(cost) => {
+						recordMethodCost(
+							rootLogger().with({
+								method: 'maintenance-eligibility-reconcile'
+							}),
+							cost
+						);
+					}
+				)
 		);
 	}
 
@@ -2861,7 +2870,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				method,
 				() => body(logger),
 				(cost) => {
-					logMethodFinished(logger, cost);
+					recordMethodCost(logger, cost);
 				}
 			)
 		);
@@ -2875,12 +2884,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async runInitialisation(tenant?: TenantId): Promise<void> {
 		try {
-			await withOperationCost(
-				'initialise',
-				() => this.migrateAndSeed(tenant),
-				(cost) => {
-					logMethodFinished(rootLogger().with({ method: 'initialise' }), cost);
-				}
+			// Initialisation runs inside a dispatched method, which records its own
+			// cost on the invocation's root span.
+			await withSpan('initialise', {}, () =>
+				withOperationCost(
+					'initialise',
+					() => this.migrateAndSeed(tenant),
+					(cost) => {
+						recordMethodCost(rootLogger().with({ method: 'initialise' }), cost);
+					}
+				)
 			);
 		} catch (error: unknown) {
 			this.migrationPromise = undefined;
@@ -3790,15 +3803,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// measures the time across the pass's I/O waits and excludes
 			// synchronous execution. A pass without I/O reports 0.
 			const startedAt = Date.now();
-			const progress = await withOperationCost(pass.key, pass.run, (cost) => {
-				logMethodFinished(
-					rootLogger().with({
-						method: pass.key,
-						durationMs: Date.now() - startedAt
-					}),
-					cost
-				);
-			});
+			const progress = await withSpan(
+				'maintenance-pass',
+				{ 'cupboard.maintenance.pass': pass.key },
+				() =>
+					withOperationCost(pass.key, pass.run, (cost) => {
+						recordMethodCost(
+							rootLogger().with({
+								method: pass.key,
+								durationMs: Date.now() - startedAt
+							}),
+							cost
+						);
+					})
+			);
 			await this.recordMaintenanceProgress(pass.key, progress);
 			break;
 		}

@@ -14,6 +14,11 @@ import {
 } from '../do/operation-cost.ts';
 
 import { requestCorrelation } from './correlation.ts';
+import {
+	annotateActiveSpan,
+	isActiveSpanRecording,
+	type SpanAttributes
+} from './span.ts';
 
 function configuredRootLogger(): Logger {
 	// Emit plain objects so Cloudflare Workers Logs indexes each field.
@@ -45,10 +50,29 @@ export const loggerMiddleware = createMiddleware<{
 });
 
 /**
-Logs the billed storage that a pass, RPC or queue message used as
-`method finished`. The logger supplies the `method` field.
+The span attributes of a cost, such as `cupboard.cost.rows_read`.
 */
-export function logMethodFinished(
+function costAttributes(cost: OperationCostRecord): SpanAttributes {
+	return Object.fromEntries(
+		Object.entries(cost).map(([key, count]) => [
+			`cupboard.cost.${key.replaceAll(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}`,
+			count
+		])
+	);
+}
+
+/**
+Records the billed storage that a pass, RPC or queue message used as
+`cupboard.cost.*` attributes on the active span. The caller runs it in the
+span of that one operation, or in the invocation's root span when nothing else
+in the invocation records a cost there.
+
+It also logs the cost as `method finished`, with the `method` field from the
+logger. When a recording span took the cost, the log is at trace level, which
+the Workers do not keep and tests read. Otherwise the log is the only record,
+so it is at info level: for example, a scope that outlived its invocation.
+*/
+export function recordMethodCost(
 	logger: Logger,
 	cost: OperationCostRecord
 ): void {
@@ -56,7 +80,10 @@ export function logMethodFinished(
 		return;
 	}
 
-	logger.info('method finished', { ...cost });
+	const isOnSpan = isActiveSpanRecording();
+
+	annotateActiveSpan(costAttributes(cost));
+	logger[isOnSpan ? 'trace' : 'info']('method finished', { ...cost });
 }
 
 // `app.use` registers a middleware for every method, so a handler is a route
@@ -71,9 +98,12 @@ function handlerRoute(context: Context): string {
 }
 
 /**
-Measures the billed storage that a request uses and logs it as
-`request finished` at `debug`. Register it before every other middleware so
-the scope covers the whole request.
+Records the matched route of a request as `http.route` on the request's span,
+and measures the billed storage that the request uses as `cupboard.cost.*`
+attributes. A request with a cost also logs it as `request finished`: at trace
+level, which the Workers do not keep, when the span took it, and otherwise at
+debug level. Register it before every other middleware so the scope covers the
+whole request.
 
 The route is the template of the last registered handler, not middleware,
 that matches the request, so a request that a middleware refuses still
@@ -93,12 +123,21 @@ export const requestCostMiddleware = createMiddleware(async (context, next) => {
 			recordedRoute = currentOperationCost()?.route;
 		},
 		(cost) => {
-			if (!hasCost(cost)) {
+			const route = recordedRoute ?? handlerRoute(context);
+			const hasRequestCost = hasCost(cost);
+			const isOnSpan = isActiveSpanRecording();
+
+			annotateActiveSpan({
+				'http.route': route,
+				...(hasRequestCost && costAttributes(cost))
+			});
+
+			if (!hasRequestCost) {
 				return;
 			}
 
-			logger.debug('request finished', {
-				route: recordedRoute ?? handlerRoute(context),
+			logger[isOnSpan ? 'trace' : 'debug']('request finished', {
+				route,
 				status,
 				...cost
 			});
