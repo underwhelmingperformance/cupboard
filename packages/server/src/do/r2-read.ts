@@ -67,18 +67,19 @@ export function getR2Object(
 		const run = async (span: Span): Promise<R2ReadResult> => {
 			const started = performance.now();
 			let attempts = 0;
-			logger.debug('R2 get started', {
-				budgetMs: r2GetBudgetMs,
-				remainingBudgetMs: remainingDeadlineMs()
-			});
+			const remainingBudgetMs = remainingDeadlineMs();
+
+			if (remainingBudgetMs !== undefined) {
+				span.setAttribute(
+					'cupboard.storage.remaining_budget_ms',
+					remainingBudgetMs
+				);
+			}
 
 			const getWithRetries = async (): Promise<R2ReadResult> => {
 				for (;;) {
 					currentDeadlineSignal()?.throwIfAborted();
 					attempts += 1;
-					logger.debug('R2 get attempt started', {
-						attempt: attempts
-					});
 					try {
 						return await operation();
 					} catch (error) {
@@ -126,11 +127,6 @@ export function getR2Object(
 							: 'conditional';
 				span.setAttribute('cupboard.storage.outcome', disposition);
 				span.setAttribute('cupboard.storage.attempts', attempts);
-				logger.debug('R2 get returned', {
-					attempts,
-					disposition,
-					elapsedMs: performance.now() - started
-				});
 				return result;
 			} catch (error) {
 				const disposition =
