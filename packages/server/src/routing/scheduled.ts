@@ -111,7 +111,8 @@ import {
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
-import { logMethodFinished } from '../observability/logging.ts';
+import { recordMethodCost } from '../observability/logging.ts';
+import { withSpan } from '../observability/span.ts';
 import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
@@ -483,12 +484,23 @@ export async function handleMaintenanceQueue(
 			method: job.kind,
 			...('tenant' in job && { tenant: job.tenant })
 		});
-		const decision = await withOperationCost(
-			job.kind,
-			() => executeMaintenanceQueueMessage(messageLogger, env, buffers, job),
-			(cost) => {
-				logMethodFinished(costLogger, cost);
-			}
+		// A batch holds several messages, so each one records its cost on its own
+		// span.
+		const decision = await withSpan(
+			'maintenance-queue-message',
+			{
+				'cupboard.maintenance.job': job.kind,
+				'cupboard.tenant': 'tenant' in job ? job.tenant : undefined
+			},
+			() =>
+				withOperationCost(
+					job.kind,
+					() =>
+						executeMaintenanceQueueMessage(messageLogger, env, buffers, job),
+					(cost) => {
+						recordMethodCost(costLogger, cost);
+					}
+				)
 		);
 
 		if (decision.action === 'ack') {
