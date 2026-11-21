@@ -18,7 +18,11 @@ import {
 	localStepStallWindowMs,
 	type LocalStepStatus
 } from '@cupboard/protocol/deployment';
-import { subjectTokenProblemSchema } from '@cupboard/protocol/oidc';
+import type { PermittedGrant } from '@cupboard/protocol/grants';
+import {
+	subjectTokenProblemSchema,
+	type TrustRuleId
+} from '@cupboard/protocol/oidc';
 import { formatBytes } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -382,6 +386,98 @@ export class TrustRuleOptionsRequiredError extends CliUsageError {
 			`A trust rule needs ${options.join(' and ')}. Pass them, or pass the whole rule with --from-file.`
 		);
 		this.name = 'TrustRuleOptionsRequiredError';
+	}
+}
+
+export class TrustGrantsFileConflictError extends CliUsageError {
+	constructor(public readonly options: readonly string[]) {
+		super(
+			`--from-file contains the grants to add, so it can't be combined with ${options.join(', ')}.`
+		);
+		this.name = 'TrustGrantsFileConflictError';
+	}
+}
+
+export class TrustGrantsRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'Pass the grants to add with --allow, or pass a JSON list of grants with --from-file.'
+		);
+		this.name = 'TrustGrantsRequiredError';
+	}
+}
+
+/**
+`oidc-trust extend` was asked to add grants that the rule already permits
+for every token that it accepts. `grants` lists those requested grants, and
+`descriptions` describes each of them as the extension plan does.
+*/
+export class TrustRuleGrantsPermittedError extends CliUsageError {
+	constructor(
+		public readonly id: TrustRuleId,
+		public readonly grants: readonly PermittedGrant[],
+		public readonly descriptions: readonly string[]
+	) {
+		super(
+			[
+				`Trust rule ${id} already permits these requested grants for every token that it accepts. Leave them out and run the command again.`,
+				...descriptions.map((description) => `- ${description}`)
+			].join('\n')
+		);
+		this.name = 'TrustRuleGrantsPermittedError';
+	}
+}
+
+/**
+The trust rule accepts GitHub Actions tokens without an exact
+`repository_id` or `repository_owner_id` claim, and the server refuses to add
+grants to such a rule.
+*/
+export class TrustRuleRepositoryPinRequiredError extends CliUsageError {
+	constructor(public readonly id: TrustRuleId) {
+		super(
+			`Trust rule ${id} accepts GitHub Actions tokens without an exact repository_id or repository_owner_id claim, so grants cannot be added to it. Add a rule that pins the repository and has all the grants that you need, then remove this rule.`
+		);
+		this.name = 'TrustRuleRepositoryPinRequiredError';
+	}
+}
+
+export class TrustRuleDisabledError extends CliUsageError {
+	constructor(public readonly id: TrustRuleId) {
+		super(
+			`Trust rule ${id} is disabled, and a disabled rule cannot be extended. Add a new rule with the grants that you need.`
+		);
+		this.name = 'TrustRuleDisabledError';
+	}
+}
+
+export class OwnerTrustRuleImmutableError extends CliUsageError {
+	constructor(public readonly id: TrustRuleId) {
+		super(
+			`Trust rule ${id} is the tenant's owner rule, which cannot be changed. Add a separate rule with the grants that you need.`
+		);
+		this.name = 'OwnerTrustRuleImmutableError';
+	}
+}
+
+/**
+The server refused to extend a trust rule because the stored rule no longer
+matches the rule that the command read. The server gives the same refusal for
+a rule that was disabled in the meantime.
+*/
+export class TrustRuleChangedError extends CliError {
+	override readonly humanMessage: string;
+
+	constructor(
+		public readonly id: TrustRuleId,
+		options?: ErrorOptions
+	) {
+		super(
+			`Trust rule ${id} changed or was disabled after this command read it. Review the rule and run the command again.`,
+			options
+		);
+		this.name = 'TrustRuleChangedError';
+		this.humanMessage = this.message;
 	}
 }
 

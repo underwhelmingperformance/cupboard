@@ -6,8 +6,9 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
+import type { AuthorizationDetail } from '@cupboard/protocol/grants';
 import {
 	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
@@ -27,6 +28,13 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	CliUsageError,
 	InvalidClaimError,
+	OwnerTrustRuleImmutableError,
+	TrustGrantsFileConflictError,
+	TrustGrantsRequiredError,
+	TrustRuleChangedError,
+	TrustRuleDisabledError,
+	TrustRuleGrantsPermittedError,
+	TrustRuleRepositoryPinRequiredError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
 
@@ -37,10 +45,12 @@ import {
 	githubPrCloseAddBody,
 	githubTagAddBody,
 	type OidcTrustClient,
+	type OidcTrustExtendClient,
 	registerControlOidcTrustCommands,
 	registerOidcTrustCommands,
 	ruleOptionsGiven,
 	runOidcTrustAdd,
+	runOidcTrustExtend,
 	runOidcTrustList,
 	runOidcTrustRemove,
 	runOidcTrustShow
@@ -49,6 +59,8 @@ import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
 const mocks = vi.hoisted(() => ({
 	add: vi.fn<OidcTrustClient['add']>(),
+	get: vi.fn<OidcTrustExtendClient['get']>(),
+	extend: vi.fn<OidcTrustExtendClient['extend']>(),
 	readBuildInputs: vi.fn<(input: { hash: string }) => Promise<unknown>>(),
 	lookup: vi.fn<(repository: string) => Promise<RepositoryIdentity>>(),
 	verify:
@@ -75,7 +87,7 @@ vi.mock('./github/workflow-reference.ts', () => ({
 vi.mock('../client/orpc.ts', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../client/orpc.ts')>()),
 	tenantRpc: () => ({
-		oidcTrust: { add: mocks.add },
+		oidcTrust: { add: mocks.add, get: mocks.get, extend: mocks.extend },
 		buildInputs: { read: { inDefaultCache: mocks.readBuildInputs } }
 	}),
 	controlRpc: () => ({ oidcTrust: { add: mocks.add } })
@@ -712,6 +724,809 @@ describe('runOidcTrustRemove', () => {
 			results: [],
 			cancellations: ['The trust rule was left in place.']
 		});
+	});
+});
+
+type Grant = OidcTrustSummary['permittedGrants'][number];
+
+const extendedRule = summary({
+	claims: { repository_owner_id: '5678', repository_id: '1234' }
+});
+const buildInputsGrant: Grant = {
+	type: 'cupboard_cache',
+	actions: ['build-inputs:record'],
+	resources: {
+		cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
+	}
+};
+const branchRootGrant: Grant = {
+	type: 'cupboard_cache',
+	actions: ['root:set', 'root:list'],
+	resources: {
+		cache: { kind: 'default' },
+		root: { exact: 'github:acme/infra/main/', validate: 'rootName' }
+	}
+};
+function parseGrant(grant: unknown): Grant {
+	return oidcTrustSummarySchema.shape.permittedGrants.element.parse(grant);
+}
+
+const prCacheGrant = parseGrant({
+	type: 'cupboard_cache',
+	actions: uploadActions,
+	resources: { cache: prCacheBinding }
+});
+
+interface ExtendCalls {
+	readonly gets: { id: string }[];
+	readonly extends: Parameters<OidcTrustExtendClient['extend']>[0][];
+}
+
+/**
+An extend client that reads `rule` and records each request. `extend` answers
+with the rule that the server would store, unless `refusal` is given.
+*/
+function extendClient(
+	rule: OidcTrustSummary,
+	refusal?: Error
+): { client: OidcTrustExtendClient; calls: ExtendCalls } {
+	const calls: ExtendCalls = { gets: [], extends: [] };
+
+	return {
+		calls,
+		client: {
+			get(input) {
+				calls.gets.push(input);
+				return Promise.resolve(rule);
+			},
+			extend(input) {
+				calls.extends.push(input);
+
+				if (refusal !== undefined) {
+					return Promise.reject(refusal);
+				}
+
+				return Promise.resolve(
+					oidcTrustSummarySchema.parse({
+						...input.expected,
+						permittedGrants: [
+							...input.expected.permittedGrants,
+							...input.permittedGrants
+						]
+					})
+				);
+			}
+		}
+	};
+}
+
+/**
+Runs `runOidcTrustExtend` and confirms the extension. Returns 'extended', or
+the error that it threw.
+*/
+async function extendOutcome(
+	id: string,
+	grants: readonly Grant[],
+	client: OidcTrustExtendClient
+): Promise<unknown> {
+	const { ui } = fakeCliUi({ confirm: 'yes' });
+
+	try {
+		await runOidcTrustExtend(trustRuleIdSchema.parse(id), grants, ui, client);
+
+		return 'extended';
+	} catch (error) {
+		return error;
+	}
+}
+
+function noteBody(rows: readonly ResultRow[]): string {
+	return rows.map((row) => `${row.label}\t${row.value}`).join('\n');
+}
+
+describe('runOidcTrustExtend', () => {
+	const ruleId = trustRuleIdSchema.parse('rule-1');
+	const addedAccess = 'Cache owner-ci: record the build inputs of cached paths';
+	const extendedRows: ResultRow[] = [
+		...ciRuleRows.slice(0, 6),
+		{ label: '', value: addedAccess },
+		{ label: 'State', value: 'enabled' }
+	];
+	const planRows: ResultRow[] = [
+		{ label: 'Grants to add', value: addedAccess },
+		{ label: 'Resulting rule', value: 'rule-1' },
+		...extendedRows.slice(1)
+	];
+	const extended = summary({
+		...extendedRule,
+		permittedGrants: [ciGrant, buildInputsGrant]
+	});
+	const finalResult: ResultPayload = {
+		kind: 'oidc-trust-rule',
+		title: 'Trust rule',
+		data: extended,
+		rows: extendedRows
+	};
+
+	it.each([
+		{
+			mode: 'shows the plan as a note at a terminal',
+			interactive: true,
+			notes: [
+				{ title: 'Planned trust rule extension', body: noteBody(planRows) }
+			],
+			results: [finalResult]
+		},
+		{
+			mode: 'reports the plan as a result when it cannot prompt',
+			interactive: false,
+			notes: [],
+			results: [
+				{
+					kind: 'oidc-trust-extension-plan',
+					title: 'Planned trust rule extension',
+					data: {
+						id: 'rule-1',
+						expected: extendedRule,
+						permittedGrants: [buildInputsGrant]
+					},
+					rows: planRows
+				},
+				finalResult
+			]
+		}
+	])(
+		'$mode, then appends the grants to the rule that it read',
+		async ({ interactive, notes, results }) => {
+			const { ui, captured } = fakeCliUi({ interactive, confirm: 'yes' });
+			const { client, calls } = extendClient(extendedRule);
+
+			await runOidcTrustExtend(ruleId, [buildInputsGrant], ui, client);
+
+			expect({
+				calls,
+				notes: captured.notes,
+				confirms: captured.confirms,
+				results: captured.results
+			}).toStrictEqual({
+				calls: {
+					gets: [{ id: 'rule-1' }],
+					extends: [
+						{
+							id: 'rule-1',
+							expected: extendedRule,
+							permittedGrants: [buildInputsGrant]
+						}
+					]
+				},
+				notes,
+				confirms: [
+					{
+						message: 'Add these grants to OIDC trust rule rule-1?',
+						detail:
+							'Every token that the rule accepts can then also be exchanged for the added grants.'
+					}
+				],
+				results
+			});
+		}
+	);
+
+	it('leaves the rule unchanged when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ interactive: true, confirm: 'no' });
+		const { client, calls } = extendClient(extendedRule);
+
+		await runOidcTrustExtend(ruleId, [buildInputsGrant], ui, client);
+
+		expect({
+			extends: calls.extends,
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			extends: [],
+			results: [],
+			cancellations: ['The trust rule was left unchanged.']
+		});
+	});
+
+	it.each([
+		{
+			name: 'the same grant',
+			grants: [ciGrant],
+			requested: [ciGrant],
+			descriptions: [
+				'Cache owner-ci: request publication of paths, check publication status, complete publication of uploaded paths'
+			]
+		},
+		{
+			name: 'some of the operations of a grant',
+			grants: [ciGrant],
+			requested: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:negotiate'],
+					resources: ciGrant.resources
+				}
+			],
+			descriptions: ['Cache owner-ci: request publication of paths']
+		},
+		{
+			name: 'a root under a granted root prefix',
+			grants: [branchRootGrant],
+			requested: [
+				{
+					type: 'cupboard_cache',
+					actions: ['root:set'],
+					resources: {
+						cache: { kind: 'default' },
+						root: {
+							exact: 'github:acme/infra/main/x86_64-linux',
+							validate: 'rootName'
+						}
+					}
+				}
+			],
+			descriptions: [
+				"Tenant's default cache: set retention roots (root restriction: github:acme/infra/main/x86_64-linux (exact root))"
+			]
+		},
+		{
+			name: 'a cache that a template makes from an exact claim',
+			grants: [
+				{
+					type: 'cupboard_cache',
+					actions: ['build-inputs:record'],
+					resources: {
+						cache: {
+							kind: 'named',
+							equalsTemplate: 'owner-{repository_owner_id}',
+							substitutions: {
+								repository_owner_id: { claim: 'repository_owner_id' }
+							},
+							validate: 'cacheName'
+						}
+					}
+				}
+			],
+			requested: [
+				{
+					type: 'cupboard_cache',
+					actions: ['build-inputs:record'],
+					resources: {
+						cache: { kind: 'named', exact: 'owner-5678', validate: 'cacheName' }
+					}
+				}
+			],
+			descriptions: [
+				'Cache owner-5678: record the build inputs of cached paths'
+			]
+		},
+		{
+			name: 'the same template grant',
+			grants: [prCacheGrant],
+			requested: [prCacheGrant],
+			descriptions: [
+				'Cache from template gh-{repository_id}-pr-{pr}: request publication of paths, check publication status, complete publication of uploaded paths, confirm paths and extend their retention (cache variable {repository_id}: claim repository_id; cache variable {pr}: group pr from claim ref matching ^refs/pull/(?<pr>[0-9]+)/merge$)'
+			]
+		},
+		{
+			name: 'any grant of a wildcard rule',
+			grants: [{ type: 'cupboard_wildcard' }],
+			requested: [buildInputsGrant],
+			descriptions: ['Cache owner-ci: record the build inputs of cached paths']
+		}
+	] satisfies {
+		name: string;
+		grants: Grant[];
+		requested: Grant[];
+		descriptions: string[];
+	}[])(
+		'refuses $name, which the rule already permits',
+		async ({ grants, requested, descriptions }) => {
+			const rule = summary({ ...extendedRule, permittedGrants: grants });
+			const { client, calls } = extendClient(rule);
+
+			const error = await extendOutcome('rule-1', requested, client);
+
+			expect({
+				refusal:
+					error instanceof TrustRuleGrantsPermittedError
+						? {
+								id: error.id,
+								grants: error.grants,
+								descriptions: error.descriptions
+							}
+						: error,
+				extends: calls.extends
+			}).toStrictEqual({
+				refusal: { id: 'rule-1', grants: requested, descriptions },
+				extends: []
+			});
+		}
+	);
+
+	it('refuses only the grants that the rule already permits', async () => {
+		const { client } = extendClient(extendedRule);
+
+		const error = await extendOutcome(
+			'rule-1',
+			[buildInputsGrant, ciGrant],
+			client
+		);
+
+		expect(
+			error instanceof TrustRuleGrantsPermittedError
+				? {
+						id: error.id,
+						grants: error.grants,
+						descriptions: error.descriptions
+					}
+				: error
+		).toStrictEqual({
+			id: 'rule-1',
+			grants: [ciGrant],
+			descriptions: [
+				'Cache owner-ci: request publication of paths, check publication status, complete publication of uploaded paths'
+			]
+		});
+	});
+
+	it('appends and previews a repeated grant once', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+		const { client, calls } = extendClient(extendedRule);
+
+		await runOidcTrustExtend(
+			ruleId,
+			[buildInputsGrant, buildInputsGrant],
+			ui,
+			client
+		);
+
+		expect({
+			extends: calls.extends,
+			plan: captured.results[0]
+		}).toStrictEqual({
+			extends: [
+				{
+					id: 'rule-1',
+					expected: extendedRule,
+					permittedGrants: [buildInputsGrant]
+				}
+			],
+			plan: {
+				kind: 'oidc-trust-extension-plan',
+				title: 'Planned trust rule extension',
+				data: {
+					id: 'rule-1',
+					expected: extendedRule,
+					permittedGrants: [buildInputsGrant]
+				},
+				rows: planRows
+			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'a new operation on a granted cache',
+			grants: [ciGrant],
+			requested: buildInputsGrant
+		},
+		{
+			name: 'a granted operation on another cache',
+			grants: [ciGrant],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate'],
+				resources: {
+					cache: { kind: 'named', exact: 'other', validate: 'cacheName' }
+				}
+			}
+		},
+		{
+			name: 'a root outside the granted root prefix',
+			grants: [branchRootGrant],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['root:set'],
+				resources: {
+					cache: { kind: 'default' },
+					root: { exact: 'github:acme/infra/dev/', validate: 'rootName' }
+				}
+			}
+		},
+		{
+			name: 'a cache that a template makes only for some tokens',
+			grants: [prCacheGrant],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate'],
+				resources: {
+					cache: { kind: 'named', exact: 'gh-1234-pr-7', validate: 'cacheName' }
+				}
+			}
+		},
+		{
+			name: 'a template grant with another operation',
+			grants: [prCacheGrant],
+			requested: parseGrant({
+				type: 'cupboard_cache',
+				actions: ['build-inputs:record'],
+				resources: { cache: prCacheBinding }
+			})
+		}
+	] satisfies {
+		name: string;
+		grants: Grant[];
+		requested: Grant;
+	}[])('appends $name', async ({ grants, requested }) => {
+		const rule = summary({ ...extendedRule, permittedGrants: grants });
+		const { client, calls } = extendClient(rule);
+		const { ui } = fakeCliUi({ confirm: 'yes' });
+
+		await runOidcTrustExtend(ruleId, [requested], ui, client);
+
+		expect(calls.extends).toStrictEqual([
+			{ id: 'rule-1', expected: rule, permittedGrants: [requested] }
+		]);
+	});
+
+	it.each([
+		{
+			name: "the tenant's owner rule",
+			id: 'owner',
+			rule: summary({ ...extendedRule, id: 'owner' }),
+			errorClass: OwnerTrustRuleImmutableError,
+			gets: []
+		},
+		{
+			name: 'a disabled rule',
+			id: 'rule-1',
+			rule: summary({ ...extendedRule, disabled: true }),
+			errorClass: TrustRuleDisabledError,
+			gets: [{ id: 'rule-1' }]
+		},
+		{
+			name: 'a GitHub Actions rule without a repository pin',
+			id: 'rule-1',
+			rule: summary({ ...extendedRule, claims: { ref: 'refs/heads/main' } }),
+			errorClass: TrustRuleRepositoryPinRequiredError,
+			gets: [{ id: 'rule-1' }]
+		}
+	])('refuses $name before sending a request', async (testCase) => {
+		const { client, calls } = extendClient(testCase.rule);
+
+		const error = await extendOutcome(testCase.id, [buildInputsGrant], client);
+
+		expect({
+			refusal: error instanceof testCase.errorClass ? { id: error.id } : error,
+			calls
+		}).toStrictEqual({
+			refusal: { id: testCase.id },
+			calls: { gets: testCase.gets, extends: [] }
+		});
+	});
+
+	it('reports a rule that changed after the command read it', async () => {
+		const refusal = new ORPCError('OIDC_TRUST_RULE_CHANGED', {
+			status: StatusCodes.CONFLICT
+		});
+		const { client } = extendClient(extendedRule, refusal);
+
+		const error = await extendOutcome('rule-1', [buildInputsGrant], client);
+
+		expect(
+			error instanceof TrustRuleChangedError
+				? { id: error.id, cause: error.cause }
+				: error
+		).toStrictEqual({ id: 'rule-1', cause: refusal });
+	});
+});
+
+/**
+Runs `oidc-trust <command>` through the command line in JSON mode. Returns
+'done', or the error that the command threw.
+*/
+async function runTrustCommand(
+	commandArguments: readonly string[]
+): Promise<unknown> {
+	try {
+		await buildProgram().parseAsync([
+			'node',
+			'cupboard',
+			'--output-mode',
+			'json',
+			'oidc-trust',
+			...commandArguments
+		]);
+
+		return 'done';
+	} catch (error) {
+		return error;
+	}
+}
+
+describe('oidc-trust extend', () => {
+	beforeEach(() => {
+		mocks.add.mockReset();
+		mocks.add.mockImplementation((body) =>
+			Promise.resolve(summary({ ...body, id: 'rule-1' }))
+		);
+		mocks.get.mockReset();
+		mocks.get.mockResolvedValue(extendedRule);
+		mocks.extend.mockReset();
+		mocks.extend.mockImplementation((input) =>
+			Promise.resolve(
+				summary({
+					...input.expected,
+					permittedGrants: [
+						...input.expected.permittedGrants,
+						...input.permittedGrants
+					]
+				})
+			)
+		);
+	});
+
+	it.each([
+		{
+			name: 'a build-inputs grant on the default cache',
+			args: ['--allow', 'build-inputs'],
+			grants: [
+				{
+					type: 'cupboard_cache',
+					actions: ['build-inputs:record'],
+					resources: { cache: { kind: 'default' } }
+				}
+			]
+		},
+		{
+			name: 'publication and content reads on a named cache',
+			args: ['--allow', 'read', '--allow', 'push', '--cache', 'ci'],
+			grants: [
+				{
+					type: 'cupboard_cache',
+					actions: uploadActions,
+					resources: {
+						cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+					}
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					resources: {
+						cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+					}
+				}
+			]
+		},
+		{
+			name: 'root management through templates',
+			args: [
+				'--allow',
+				'root',
+				'--template-source',
+				'github-pr',
+				'--cache-template',
+				'gh-{repository_id}-pr-{pr}',
+				'--root-template',
+				'github:acme/infra/pr-{pr}/'
+			],
+			grants: [
+				{
+					type: 'cupboard_cache',
+					actions: ['root:set', 'root:list'],
+					resources: { cache: prCacheBinding, root: prRootBinding }
+				}
+			]
+		}
+	])('builds $name as add builds it', async ({ args, grants }) => {
+		const added = await runTrustCommand([
+			'add',
+			tenantUrl,
+			'--issuer',
+			'https://token.actions.githubusercontent.com',
+			'--audience',
+			tenantUrl,
+			'--claim',
+			'repository_id=1234',
+			...args
+		]);
+		const extended = await runTrustCommand([
+			'extend',
+			tenantUrl,
+			'rule-1',
+			'--yes',
+			...args
+		]);
+
+		expect({
+			added,
+			extended,
+			addedGrants: mocks.add.mock.calls.map(([body]) => body.permittedGrants),
+			extends: mocks.extend.mock.calls
+		}).toStrictEqual({
+			added: 'done',
+			extended: 'done',
+			addedGrants: [grants],
+			extends: [
+				[{ id: 'rule-1', expected: extendedRule, permittedGrants: grants }]
+			]
+		});
+	});
+
+	// An earlier release wrote these presets without the build-inputs grant. The
+	// documented commands add it so that the token service grants the request
+	// for build inputs that the flake publish workflow makes.
+	it.each([
+		{
+			name: 'a branch rule',
+			body: githubBranchAddBody(tenantBase, identity, {
+				repo: 'acme/infra',
+				branch: 'main'
+			}),
+			args: ['--allow', 'build-inputs'],
+			cache: { kind: 'default' },
+			claims: { ref: 'refs/heads/main' },
+			request: { kind: 'default' }
+		},
+		{
+			name: 'a tag rule with the default cache template',
+			body: githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' }),
+			args: [
+				'--allow',
+				'build-inputs',
+				'--template-source',
+				'github-tag',
+				'--cache-template',
+				'{tag}'
+			],
+			cache: tagCacheBinding,
+			claims: { ref: 'refs/tags/v1.2.3', ref_type: 'tag' },
+			request: { kind: 'named', name: cacheNameSchema.parse('v1.2.3') }
+		},
+		{
+			name: 'a tag rule with another cache template',
+			body: githubTagAddBody(tenantBase, identity, {
+				repo: 'acme/infra',
+				cacheTemplate: 'release-{tag}'
+			}),
+			args: [
+				'--allow',
+				'build-inputs',
+				'--template-source',
+				'github-tag',
+				'--cache-template',
+				'release-{tag}'
+			],
+			cache: { ...tagCacheBinding, equalsTemplate: 'release-{tag}' },
+			claims: { ref: 'refs/tags/v1.2.3', ref_type: 'tag' },
+			request: { kind: 'named', name: cacheNameSchema.parse('release-v1.2.3') }
+		}
+	] satisfies {
+		name: string;
+		body: OidcTrustAddBodyInput;
+		args: string[];
+		cache: unknown;
+		claims: Record<string, string>;
+		request: CacheScope;
+	}[])(
+		'adds the documented build-inputs grant to $name',
+		async ({ body, args, cache, claims, request }) => {
+			const rule = summary({ ...body, id: 'rule-1' });
+			const grant = parseGrant({
+				type: 'cupboard_cache',
+				actions: ['build-inputs:record'],
+				resources: { cache }
+			});
+			const tokenClaims = {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				...claims
+			};
+			const detail: AuthorizationDetail = {
+				type: 'cupboard_cache',
+				actions: ['build-inputs:record'],
+				cache: request
+			};
+			mocks.get.mockResolvedValue(rule);
+
+			const outcome = await runTrustCommand([
+				'extend',
+				tenantUrl,
+				'rule-1',
+				'--yes',
+				...args
+			]);
+
+			expect({
+				outcome,
+				extends: mocks.extend.mock.calls,
+				permittedBefore: isGrantPermittedByRule(
+					rule.permittedGrants,
+					detail,
+					tokenClaims
+				),
+				permittedAfter: isGrantPermittedByRule(
+					[...rule.permittedGrants, grant],
+					detail,
+					tokenClaims
+				)
+			}).toStrictEqual({
+				outcome: 'done',
+				extends: [[{ id: 'rule-1', expected: rule, permittedGrants: [grant] }]],
+				permittedBefore: false,
+				permittedAfter: true
+			});
+		}
+	);
+
+	it('appends the grants listed in --from-file', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-grants-'));
+		const file = path.join(directory, 'grants.json');
+
+		try {
+			await writeFile(file, JSON.stringify([buildInputsGrant]));
+
+			const outcome = await runTrustCommand([
+				'extend',
+				tenantUrl,
+				'rule-1',
+				'--yes',
+				'--from-file',
+				file
+			]);
+
+			expect({ outcome, extends: mocks.extend.mock.calls }).toStrictEqual({
+				outcome: 'done',
+				extends: [
+					[
+						{
+							id: 'rule-1',
+							expected: extendedRule,
+							permittedGrants: [buildInputsGrant]
+						}
+					]
+				]
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{
+			name: 'grant options alongside --from-file',
+			args: ['--from-file', 'grants.json', '--allow', 'push', '--cache', 'ci'],
+			expected: {
+				name: 'TrustGrantsFileConflictError',
+				options: ['--allow', '--cache']
+			}
+		},
+		{
+			name: 'neither --allow nor --from-file',
+			args: ['--cache', 'ci'],
+			expected: { name: 'TrustGrantsRequiredError' }
+		}
+	])('refuses $name', async ({ args, expected }) => {
+		const refusal = await runTrustCommand([
+			'extend',
+			tenantUrl,
+			'rule-1',
+			'--yes',
+			...args
+		]);
+
+		expect({
+			refusal:
+				refusal instanceof TrustGrantsFileConflictError
+					? { name: refusal.name, options: refusal.options }
+					: refusal instanceof TrustGrantsRequiredError
+						? { name: refusal.name }
+						: refusal,
+			gets: mocks.get.mock.calls,
+			extends: mocks.extend.mock.calls
+		}).toStrictEqual({ refusal: expected, gets: [], extends: [] });
 	});
 });
 

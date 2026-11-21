@@ -3,7 +3,12 @@ import { readFile } from 'node:fs/promises';
 import type { CliUi } from '@cupboard/cli-ui';
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { quotePatternLiteral } from '@cupboard/protocol/capture';
-import { templateSchema, templateVariables } from '@cupboard/protocol/grants';
+import { isDeepEqual } from '@cupboard/protocol/deep-equal';
+import {
+	type PermittedGrant,
+	templateSchema,
+	templateVariables
+} from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	controlOidcTrustAddBodySchema,
@@ -11,6 +16,8 @@ import {
 	isUnpinnedGithubRule,
 	type OidcTrustAddBodyInput,
 	oidcTrustAddBodySchema,
+	type OidcTrustExtendBodyInput,
+	oidcTrustExtendBodySchema,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
@@ -18,8 +25,10 @@ import {
 	trustRuleIdSchema,
 	type UnreadableOidcTrustRule
 } from '@cupboard/protocol/oidc';
-import { type Reporter } from '@cupboard/reporter';
+import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { ORPCError } from '@orpc/client';
 import type { Command } from 'commander';
+import type { z } from 'zod';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -37,8 +46,15 @@ import {
 import {
 	CliUsageError,
 	InvalidClaimError,
+	OwnerTrustRuleImmutableError,
+	TrustGrantsFileConflictError,
+	TrustGrantsRequiredError,
+	TrustRuleChangedError,
+	TrustRuleDisabledError,
 	TrustRuleFileConflictError,
+	TrustRuleGrantsPermittedError,
 	TrustRuleOptionsRequiredError,
+	TrustRuleRepositoryPinRequiredError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
@@ -59,6 +75,8 @@ import {
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import {
 	adminControlRuleId,
+	trustGrantDescription,
+	trustGrantRows,
 	trustRuleSummaryRows,
 	unpinnedGithubAdminRuleWarning,
 	unpinnedGithubOwnerRuleWarning,
@@ -69,6 +87,7 @@ import {
 	parseRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
+import { isGrantPermittedForEveryToken } from './oidc-trust/grant-coverage.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
@@ -220,7 +239,20 @@ export function ruleOptionsGiven(options: OidcTrustAddOptions): string[] {
 		['--issuer', options.issuer !== undefined],
 		['--audience', options.audience !== undefined],
 		['--claim', options.claim.length > 0],
-		['--job-workflow-ref', options.jobWorkflowRef !== undefined],
+		['--job-workflow-ref', options.jobWorkflowRef !== undefined]
+	];
+
+	return [
+		...given.filter(([, isGiven]) => isGiven).map(([option]) => option),
+		...grantOptionsGiven(options)
+	];
+}
+
+/**
+The grant options given on the command line, as they are spelt there.
+*/
+function grantOptionsGiven(options: TrustGrantOptions): string[] {
+	const given: [string, boolean][] = [
 		['--allow', options.allow.length > 0],
 		['--cache', options.cache !== undefined],
 		['--cache-template', options.cacheTemplate !== undefined],
@@ -231,6 +263,20 @@ export function ruleOptionsGiven(options: OidcTrustAddOptions): string[] {
 	];
 
 	return given.filter(([, isGiven]) => isGiven).map(([option]) => option);
+}
+
+function grantsFromOptions(options: TrustGrantOptions): PermittedGrant[] {
+	return buildCacheGrants({
+		cache: options.cache,
+		cacheTemplate: options.cacheTemplate,
+		allow: options.allow,
+		root: options.root,
+		rootTemplate: options.rootTemplate,
+		substitutions: collectSubstitutions({
+			templateSource: options.templateSource,
+			captures: options.capture
+		})
+	});
 }
 
 // JSON input accepts the complete rule schema, including admin, domain, and
@@ -245,7 +291,7 @@ async function addBodyFor(
 			throw new TrustRuleFileConflictError(conflicts);
 		}
 
-		return loadAddBody(options.fromFile, oidcTrustAddBodySchema);
+		return loadJsonFile(options.fromFile, oidcTrustAddBodySchema);
 	}
 
 	const { issuer, audience } = options;
@@ -257,30 +303,41 @@ async function addBodyFor(
 		]);
 	}
 
-	const substitutions = collectSubstitutions({
-		templateSource: options.templateSource,
-		captures: options.capture
-	});
-
 	return buildAddBody({
 		issuer,
 		audience,
 		claims: claimsForAdd(options.claim, options.jobWorkflowRef),
-		permittedGrants: buildCacheGrants({
-			cache: options.cache,
-			cacheTemplate: options.cacheTemplate,
-			allow: options.allow,
-			root: options.root,
-			rootTemplate: options.rootTemplate,
-			substitutions
-		})
+		permittedGrants: grantsFromOptions(options)
 	});
 }
 
-async function loadAddBody(
+async function extendGrantsFor(
+	options: OidcTrustExtendOptions
+): Promise<PermittedGrant[]> {
+	if (options.fromFile !== undefined) {
+		const conflicts = grantOptionsGiven(options);
+
+		if (conflicts.length > 0) {
+			throw new TrustGrantsFileConflictError(conflicts);
+		}
+
+		return loadJsonFile(
+			options.fromFile,
+			oidcTrustExtendBodySchema.shape.permittedGrants
+		);
+	}
+
+	if (options.allow.length === 0) {
+		throw new TrustGrantsRequiredError();
+	}
+
+	return grantsFromOptions(options);
+}
+
+async function loadJsonFile<Schema extends z.ZodType>(
 	path: string,
-	schema: typeof oidcTrustAddBodySchema
-): Promise<OidcTrustAddBodyInput> {
+	schema: Schema
+): Promise<z.output<Schema>> {
 	let parsed: unknown;
 
 	try {
@@ -306,10 +363,10 @@ interface ControlOidcTrustAddOptions {
 	readonly fromFile: string;
 }
 
-export interface OidcTrustAddOptions {
-	readonly issuer?: string;
-	readonly audience?: Audience;
-	readonly claim: readonly string[];
+/**
+The options that `add` and `extend` build cache grants from.
+*/
+interface TrustGrantOptions {
 	readonly allow: readonly string[];
 	readonly cache?: string;
 	readonly cacheTemplate?: string;
@@ -317,8 +374,18 @@ export interface OidcTrustAddOptions {
 	readonly rootTemplate?: string;
 	readonly capture: readonly string[];
 	readonly templateSource?: string;
+}
+
+export interface OidcTrustAddOptions extends TrustGrantOptions {
+	readonly issuer?: string;
+	readonly audience?: Audience;
+	readonly claim: readonly string[];
 	readonly fromFile?: string;
 	readonly jobWorkflowRef?: string;
+}
+
+interface OidcTrustExtendOptions extends TrustGrantOptions, ConfirmableOptions {
+	readonly fromFile?: string;
 }
 
 /**
@@ -329,6 +396,16 @@ export interface OidcTrustClient {
 	get(input: { id: TrustRuleId }): Promise<OidcTrustSummary>;
 	add(input: OidcTrustAddBodyInput): Promise<OidcTrustSummary>;
 	remove(input: { id: TrustRuleId }): Promise<OidcTrustRemoveResponse>;
+}
+
+/**
+The tenant trust operations that `oidc-trust extend` uses. The control plane
+has no extend procedure.
+*/
+export interface OidcTrustExtendClient extends Pick<OidcTrustClient, 'get'> {
+	extend(
+		input: OidcTrustExtendBodyInput & { readonly id: TrustRuleId }
+	): Promise<OidcTrustSummary>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -390,17 +467,23 @@ interface OidcTrustPlane {
 	) => OidcTrustClient;
 }
 
+function tenantOidcTrust(
+	url: URL,
+	programOptions: ProgramOptions
+): OidcTrustClient & OidcTrustExtendClient {
+	return tenantRpc(url, {
+		credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+		signal: programOptions.signal
+	}).oidcTrust;
+}
+
 const tenantPlane: OidcTrustPlane = {
 	name: 'oidc-trust',
 	description:
 		'Manage the trust rules that let administrators and CI jobs sign in to the tenant with OIDC identity tokens.',
 	urlArgument: tenantUrlArgument,
 	kind: 'tenant',
-	clientFor: (url, programOptions) =>
-		tenantRpc(url, {
-			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-			signal: programOptions.signal
-		}).oidcTrust
+	clientFor: tenantOidcTrust
 };
 
 function tenantBuildInputsRead(
@@ -708,6 +791,7 @@ function buildOidcTrustCommands(
 		registerControlRuleAdd(oidcTrust, program, programOptions, plane);
 	} else {
 		registerTenantRuleAdd(oidcTrust, program, programOptions, plane);
+		registerTenantRuleExtend(oidcTrust, program, programOptions, plane);
 	}
 
 	if (plane.kind === 'tenant') {
@@ -1015,40 +1099,10 @@ function buildOidcTrustCommands(
 }
 
 /**
-`oidc-trust add`: a tenant rule built from options or read whole from
-`--from-file`.
+Adds the options that `grantsFromOptions` builds cache grants from.
 */
-function registerTenantRuleAdd(
-	oidcTrust: Command,
-	program: Command,
-	programOptions: ProgramOptions,
-	plane: OidcTrustPlane
-): void {
-	oidcTrust
-		.command('add')
-		.description(
-			'Add a trust rule by hand: the issuer, audience and claims that a token must have, and the grants that the rule gives.'
-		)
-		.argument('<url>', plane.urlArgument, parseWorkerUrl)
-		.option(
-			'--issuer <issuer>',
-			'OIDC issuer that must have signed the token (required unless you use --from-file)'
-		)
-		.option(
-			'--audience <audience>',
-			'audience that the token must have (required unless you use --from-file)',
-			parseAudience
-		)
-		.option(
-			'--claim <key=value>',
-			'a claim that the token must have, with exactly this value (repeatable)',
-			collect,
-			[]
-		)
-		.option(
-			'--workflow-ref, --job-workflow-ref <ref>',
-			'require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check'
-		)
+function withGrantOptions(command: Command): Command {
+	return command
 		.option(
 			'--allow <action>',
 			'a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen, remove or build-inputs',
@@ -1080,7 +1134,46 @@ function registerTenantRuleAdd(
 		.option(
 			'--template-source <name>',
 			'take template variables from GitHub token claims: github-pr gives {repository_id} and {pr}, and github-tag gives {tag}'
+		);
+}
+
+/**
+`oidc-trust add`: a tenant rule built from options or read whole from
+`--from-file`.
+*/
+function registerTenantRuleAdd(
+	oidcTrust: Command,
+	program: Command,
+	programOptions: ProgramOptions,
+	plane: OidcTrustPlane
+): void {
+	const add = oidcTrust
+		.command('add')
+		.description(
+			'Add a trust rule by hand: the issuer, audience and claims that a token must have, and the grants that the rule gives.'
 		)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
+		.option(
+			'--issuer <issuer>',
+			'OIDC issuer that must have signed the token (required unless you use --from-file)'
+		)
+		.option(
+			'--audience <audience>',
+			'audience that the token must have (required unless you use --from-file)',
+			parseAudience
+		)
+		.option(
+			'--claim <key=value>',
+			'a claim that the token must have, with exactly this value (repeatable)',
+			collect,
+			[]
+		)
+		.option(
+			'--workflow-ref, --job-workflow-ref <ref>',
+			'require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check'
+		);
+
+	withGrantOptions(add)
 		.option(
 			'--from-file <path>',
 			"read the whole rule, including its issuer and audience, from a JSON file. Can't be combined with the other rule options."
@@ -1110,6 +1203,55 @@ function registerTenantRuleAdd(
 				await addBodyFor(options),
 				reporter,
 				plane.clientFor(url, programOptions)
+			);
+		});
+}
+
+/**
+`oidc-trust extend`: appends grants, built from options or read from
+`--from-file`, to an existing tenant rule.
+*/
+function registerTenantRuleExtend(
+	oidcTrust: Command,
+	program: Command,
+	programOptions: ProgramOptions,
+	plane: OidcTrustPlane
+): void {
+	const extend = oidcTrust
+		.command('extend')
+		.description(
+			'Add grants to an existing trust rule. The rule keeps its ID, issuer, audience, claims and existing grants.'
+		)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
+		.argument('<id>', 'trust rule ID');
+
+	withGrantOptions(extend)
+		.option(
+			'--from-file <path>',
+			"read the grants to add from a JSON file that contains a list of grants. Can't be combined with the other grant options."
+		)
+		.option('-y, --yes', 'extend the rule without the confirmation prompt')
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				'  # Let the jobs that a rule accepts record build inputs in the',
+				"  # tenant's default cache",
+				'  cupboard oidc-trust extend https://cupboard.example.workers.dev/t/acme <rule-id> \\',
+				'    --allow build-inputs'
+			].join('\n')
+		)
+		.action(async (url: URL, id: string, options: OidcTrustExtendOptions) => {
+			const ui = commandUi(program, programOptions, {
+				assumeYes: options.yes
+			});
+
+			await runOidcTrustExtend(
+				trustRuleIdSchema.parse(id),
+				await extendGrantsFor(options),
+				ui,
+				tenantOidcTrust(url, programOptions)
 			);
 		});
 }
@@ -1158,7 +1300,7 @@ function registerControlRuleAdd(
 			const reporter = commandUi(program, programOptions).reporter();
 
 			await runOidcTrustAdd(
-				await loadAddBody(options.fromFile, controlOidcTrustAddBodySchema),
+				await loadJsonFile(options.fromFile, controlOidcTrustAddBodySchema),
 				reporter,
 				plane.clientFor(url, programOptions)
 			);
@@ -1316,5 +1458,123 @@ export async function runOidcTrustRemove(
 			{ label: 'Rule', value: result.id },
 			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
 		]
+	});
+}
+
+// The server stores each distinct grant once, so the plan and the request
+// list each distinct grant once.
+function distinctGrants(grants: readonly PermittedGrant[]): PermittedGrant[] {
+	return grants.filter(
+		(grant, index) =>
+			grants.findIndex((earlier) => isDeepEqual(earlier, grant)) === index
+	);
+}
+
+/**
+Appends `requested` to the rule `id` after showing the grants and the
+resulting rule and asking for confirmation. The extend request contains the
+rule as this function read it, and the server refuses the request if the
+stored rule has changed since. Refuses the owner rule, a disabled rule, a
+GitHub Actions rule without a repository pin, and grants that the rule
+already permits for every token that it accepts.
+*/
+export async function runOidcTrustExtend(
+	id: TrustRuleId,
+	requested: readonly PermittedGrant[],
+	ui: CliUi,
+	client: OidcTrustExtendClient
+): Promise<void> {
+	if (id === 'owner') {
+		throw new OwnerTrustRuleImmutableError(id);
+	}
+
+	const reporter = ui.reporter();
+	const rule = await reporter.phase('Fetching OIDC trust rule', () =>
+		client.get({ id })
+	);
+
+	if (rule.disabled) {
+		throw new TrustRuleDisabledError(id);
+	}
+
+	if (isUnpinnedGithubRule(rule)) {
+		throw new TrustRuleRepositoryPinRequiredError(id);
+	}
+
+	const permittedGrants = distinctGrants(requested);
+	const permitted = permittedGrants.filter((grant) =>
+		isGrantPermittedForEveryToken(rule, grant)
+	);
+
+	if (permitted.length > 0) {
+		throw new TrustRuleGrantsPermittedError(
+			id,
+			permitted,
+			permitted.map((grant) => trustGrantDescription(grant))
+		);
+	}
+
+	const rows: ResultRow[] = [
+		...permittedGrants.flatMap((grant, index) =>
+			trustGrantRows(grant, index === 0 ? 'Grants to add' : '')
+		),
+		...trustRuleSummaryRows(
+			{
+				...rule,
+				permittedGrants: [...rule.permittedGrants, ...permittedGrants]
+			},
+			'Resulting rule'
+		)
+	];
+
+	if (ui.interactive) {
+		ui.note('Planned trust rule extension', rows);
+	} else {
+		reporter.result({
+			kind: 'oidc-trust-extension-plan',
+			title: 'Planned trust rule extension',
+			data: { id, expected: rule, permittedGrants },
+			rows
+		});
+	}
+
+	const outcome = await ui.confirm({
+		message: `Add these grants to OIDC trust rule ${id}?`,
+		detail:
+			'Every token that the rule accepts can then also be exchanged for the added grants.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The trust rule was left unchanged.');
+		return;
+	}
+
+	const summary = await reporter.phase(
+		'Extending OIDC trust rule',
+		async () => {
+			try {
+				return await client.extend({
+					id,
+					expected: rule,
+					permittedGrants: [...permittedGrants]
+				});
+			} catch (error) {
+				if (
+					error instanceof ORPCError &&
+					error.code === 'OIDC_TRUST_RULE_CHANGED'
+				) {
+					throw new TrustRuleChangedError(id, { cause: error });
+				}
+
+				throw error;
+			}
+		}
+	);
+
+	reporter.result({
+		kind: 'oidc-trust-rule',
+		title: 'Trust rule',
+		data: summary,
+		rows: trustRuleSummaryRows(summary)
 	});
 }

@@ -138,6 +138,22 @@ export function trustGrantRows(
 }
 
 /**
+Describes `grant` on one line, with the text of {@link trustGrantRows}: its
+resource and operations, followed by its resource restrictions in
+parentheses.
+*/
+export function trustGrantDescription(grant: PermittedGrant): string {
+	const [summary, ...restrictions] = trustGrantRows(grant, '');
+	const details = restrictions
+		.map((row) => `${row.label.toLowerCase()}: ${row.value}`)
+		.join('; ');
+
+	return details === ''
+		? (summary?.value ?? '')
+		: `${summary?.value ?? ''} (${details})`;
+}
+
+/**
 The warning for an enabled GitHub Actions rule that requires neither an exact
 `repository_id` nor an exact `repository_owner_id`. `subject` introduces the
 rule, for example "Trust rule <id>", and `removal` is the command that

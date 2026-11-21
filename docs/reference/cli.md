@@ -101,6 +101,7 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard oidc-trust list`](#cupboard-oidc-trust-list)
   - [`cupboard oidc-trust show`](#cupboard-oidc-trust-show)
   - [`cupboard oidc-trust add`](#cupboard-oidc-trust-add)
+  - [`cupboard oidc-trust extend`](#cupboard-oidc-trust-extend)
   - [`cupboard oidc-trust add-github-pr`](#cupboard-oidc-trust-add-github-pr)
   - [`cupboard oidc-trust add-github-pr-close`](#cupboard-oidc-trust-add-github-pr-close)
   - [`cupboard oidc-trust add-github-tag`](#cupboard-oidc-trust-add-github-tag)
@@ -2300,6 +2301,9 @@ Commands:
   add [options] <url>                  Add a trust rule by hand: the issuer,
                                        audience and claims that a token must
                                        have, and the grants that the rule gives.
+  extend [options] <url> <id>          Add grants to an existing trust rule. The
+                                       rule keeps its ID, issuer, audience,
+                                       claims and existing grants.
   add-github-pr [options] <url>        Add a trust rule that lets each pull
                                        request in a GitHub repository publish to
                                        a cache of its own.
@@ -2388,6 +2392,51 @@ Example:
     --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \
     --allow push --allow root --template-source github-pr \
     --cache-template pr-{pr} --root-template pr-{pr}
+```
+
+#### cupboard oidc-trust extend
+
+```text
+Usage: cupboard oidc-trust extend [options] <url> <id>
+
+Add grants to an existing trust rule. The rule keeps its ID, issuer, audience,
+claims and existing grants.
+
+Arguments:
+  url                          tenant URL (e.g.
+                               https://cupboard.example.workers.dev/t/<slug>)
+  id                           trust rule ID
+
+Options:
+  --allow <action>             a grant to give (repeatable): read, push, attest,
+                               root, attach, create, close, reopen, remove or
+                               build-inputs (default: [])
+  --cache <name>               the cache that the grants apply to (default: the
+                               tenant's default cache)
+  --cache-template <template>  make the cache name from values in the token,
+                               such as "pr-{pr}" (see --template-source and
+                               --capture)
+  --root <name>                the root that publication grants cover, or a root
+                               prefix ending in /
+  --root-template <template>   make the publication root name from values in the
+                               token (see --template-source and --capture)
+  --capture <claim=pattern>    claim=regex, where each named group in the
+                               regular expression becomes a template variable
+                               (repeatable) (default: [])
+  --template-source <name>     take template variables from GitHub token claims:
+                               github-pr gives {repository_id} and {pr}, and
+                               github-tag gives {tag}
+  --from-file <path>           read the grants to add from a JSON file that
+                               contains a list of grants. Can't be combined with
+                               the other grant options.
+  -y, --yes                    extend the rule without the confirmation prompt
+  -h, --help                   display help for command
+
+Example:
+  # Let the jobs that a rule accepts record build inputs in the
+  # tenant's default cache
+  cupboard oidc-trust extend https://cupboard.example.workers.dev/t/acme <rule-id> \
+    --allow build-inputs
 ```
 
 #### cupboard oidc-trust add-github-pr
