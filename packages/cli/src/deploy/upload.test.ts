@@ -32,6 +32,7 @@ const controlConfig: WorkerConfig = {
 	compatibilityFlags: ['nodejs_compat'],
 	cpuMs: 300_000,
 	observability: true,
+	invocationLogs: true,
 	tracing: true,
 	vars: { CUPBOARD_AUTH_ISSUER: 'cupboard' },
 	durableObjects: [
@@ -157,6 +158,19 @@ describe('buildScriptMetadata', () => {
 				},
 				{ type: 'plain_text', name: 'CUPBOARD_AUTH_ISSUER', text: 'cupboard' }
 			]
+		});
+	});
+
+	it('turns off invocation logs when the config does', () => {
+		const metadata = buildScriptMetadata(
+			{ ...controlConfig, invocationLogs: false },
+			resources
+		);
+
+		expect(metadata.observability).toStrictEqual({
+			enabled: true,
+			logs: { enabled: true, invocation_logs: false },
+			traces: { enabled: true }
 		});
 	});
 

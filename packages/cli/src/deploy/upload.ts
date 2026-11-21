@@ -141,6 +141,9 @@ export function buildScriptMetadata(
 		compatibility_flags: [...worker.compatibilityFlags],
 		observability: {
 			enabled: worker.observability,
+			...(!worker.invocationLogs && {
+				logs: { enabled: worker.observability, invocation_logs: false }
+			}),
 			...(worker.tracing && { traces: { enabled: true } })
 		},
 		keep_bindings: ['secret_text', 'plain_text'],

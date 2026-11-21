@@ -70,6 +70,7 @@ function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 		compatibilityFlags: ['nodejs_compat'],
 		cpuMs: 300_000,
 		observability: true,
+		invocationLogs: true,
 		tracing: false,
 		vars: {},
 		durableObjects: [],

@@ -91,6 +91,11 @@
 	},
 	"observability": {
 		"enabled": true,
+		// The root span of each invocation records what an invocation log would:
+		// the outcome, wall time, method, URL and status.
+		"logs": {
+			"invocation_logs": false
+		},
 		"traces": {
 			"enabled": true
 		}
