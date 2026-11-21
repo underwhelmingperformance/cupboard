@@ -43,6 +43,7 @@ import {
 	pullRequestLifecycleOutcome,
 	pullRequestPublicationOutcome
 } from './pull-request-lifecycle.ts';
+import { runPushInput } from './push-input.ts';
 import { ReferencePattern } from './reference-pattern.ts';
 
 type BranchTrigger = 'push' | 'workflow_dispatch' | 'schedule';
@@ -99,6 +100,11 @@ export type PublicationCase = TriggerReference & {
 	readonly reuseView?: ReuseViewRequirement;
 	readonly readCaches?: readonly CacheScope[];
 	readonly trustedContributorReuse?: true;
+	/**
+	The value of the `push` input for this run. It is set only for a job that
+	passes `push` as an expression, because the value can differ between runs.
+	*/
+	readonly push?: boolean;
 };
 
 export interface PublishingJobFinding {
@@ -402,11 +408,40 @@ export function isPresetJob(job: DiscoveredPublishingJob): boolean {
 	);
 }
 
-export function isReadOnlyJob(job: DiscoveredPublishingJob): boolean {
+function isReadOnlyJob(job: DiscoveredPublishingJob): boolean {
 	return (
 		job.inputs.publish === 'none' ||
 		(job.kind === 'flake' && job.inputs.push === false)
 	);
+}
+
+/**
+Whether one modelled run of a job only reads, either because every run of
+the job only reads or because the job's push expression is false for the
+run.
+*/
+export function isReadOnlyCase(
+	job: DiscoveredPublishingJob,
+	publication: PublicationCase
+): boolean {
+	return isReadOnlyJob(job) || publication.push === false;
+}
+
+// The model uses example values for the pull request number and the release
+// tag, so it does not fix `github.ref` for those runs.
+function runReference(entry: TriggerReference): string | undefined {
+	switch (entry.ref.kind) {
+		case 'branch': {
+			return `refs/heads/${entry.ref.name}`;
+		}
+		case 'tag': {
+			return `refs/tags/${entry.ref.pattern.example()}`;
+		}
+		case 'pull-request':
+		case 'release-tag': {
+			return undefined;
+		}
+	}
 }
 
 function unresolved(reason: string): JobCache {
@@ -967,15 +1002,9 @@ export function modelPublishingJob(
 		return unmodelled('manage-pr-cache requires a named cache');
 	}
 	const cacheAccessMode = scalar(job, 'cache-access-mode');
-
-	if (
-		isPreset &&
-		!isReadOnly &&
-		(cacheAccessMode === undefined ||
-			!['', 'public', 'private'].includes(cacheAccessMode))
-	) {
-		return unmodelled('cache-access-mode must be public, private or omitted');
-	}
+	const hasValidCacheAccessMode =
+		cacheAccessMode !== undefined &&
+		['', 'public', 'private'].includes(cacheAccessMode);
 	// The flake workflow reads `branch` only with the preset, and only the flake
 	// workflow has a `reuse-view` input.
 	const configuredBranch = isPreset ? scalar(job, 'branch', 'main') : branch;
@@ -1092,6 +1121,20 @@ export function modelPublishingJob(
 				continue;
 			}
 
+			const reference = runReference(entry);
+			const runPush = runPushInput(job, identity, {
+				event: entry.trigger,
+				...(reference !== undefined && { ref: reference })
+			});
+
+			if (runPush.outcome === 'unresolved') {
+				findings.push({
+					trigger: entry.trigger,
+					finding: new PublicationUnmodelledFinding(runPush.reason)
+				});
+				continue;
+			}
+
 			if (releaseRootTemplate !== undefined && entry.trigger !== 'release') {
 				findings.push({
 					trigger: entry.trigger,
@@ -1101,7 +1144,13 @@ export function modelPublishingJob(
 				});
 				continue;
 			}
-			if (!isReadOnly && rootPrefix === '' && entry.trigger === 'release') {
+			const isRunReadOnly = isReadOnly || !runPush.push;
+			if (isPreset && !isRunReadOnly && !hasValidCacheAccessMode) {
+				return unmodelled(
+					'cache-access-mode must be public, private or omitted'
+				);
+			}
+			if (!isRunReadOnly && rootPrefix === '' && entry.trigger === 'release') {
 				return unmodelled('release publication requires an explicit root');
 			}
 			const isPullRequest = entry.trigger === 'pull_request';
@@ -1122,7 +1171,7 @@ export function modelPublishingJob(
 			);
 
 			if (job.kind === 'installable') {
-				const roots = isReadOnly
+				const roots = isRunReadOnly
 					? undefined
 					: installableRoots(
 							rootPrefix,
@@ -1130,7 +1179,7 @@ export function modelPublishingJob(
 							entry
 						);
 
-				if (roots === undefined && !isReadOnly) {
+				if (roots === undefined && !isRunReadOnly) {
 					return unmodelled(`root '${rootPrefix}' is invalid`);
 				}
 
@@ -1154,7 +1203,7 @@ export function modelPublishingJob(
 						pullRequestTemplates
 					}),
 					requests: [
-						...(managePrCache === true && isPullRequest && !isReadOnly
+						...(managePrCache === true && isPullRequest && !isRunReadOnly
 							? [
 									cacheCreateAuthorizationDetails({ cache: cache.scope }),
 									cacheLifecycleAuthorizationDetails({
@@ -1174,7 +1223,7 @@ export function modelPublishingJob(
 			}
 
 			const publicationCache: CacheScope =
-				isPreset && isPullRequest && !isReadOnly
+				isPreset && isPullRequest && !isRunReadOnly
 					? {
 							kind: 'named',
 							name: cacheNameSchema.parse(
@@ -1191,7 +1240,7 @@ export function modelPublishingJob(
 				return unmodelled(`root-prefix '${selectedRoot}' is invalid`);
 			}
 
-			const requests = isReadOnly
+			const requests = isRunReadOnly
 				? []
 				: flakeRequests(publicationCache, roots, isPreset && isPullRequest);
 
@@ -1250,8 +1299,10 @@ export function modelPublishingJob(
 					cache: cache.scope
 				}),
 				requests,
+				...(job.pushExpression !== undefined && { push: runPush.push }),
 				...(job.recordsBuildInputs === true &&
-					!isPullRequest && {
+					!isPullRequest &&
+					!isRunReadOnly && {
 						buildInputsRequests: [
 							buildInputsRecordAuthorizationDetails({ cache: publicationCache })
 						]

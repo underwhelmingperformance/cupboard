@@ -86,7 +86,8 @@ The check reports these jobs as unverified, for manual review:
   tenant the job targets.
 - A job with cupboard workflow inputs that the check cannot evaluate. A dynamic
   `publish` input, for example, prevents a static check from determining whether
-  the job publishes paths.
+  the job publishes paths. The check evaluates some expressions in the flake
+  workflow's `push` input, as [Push expressions](#push-expressions) describes.
 - A pull-request publisher whose inputs do not prove that each PR writes to its
   own cache and root. A rule for the pull-request event alone would allow every
   PR from the repository to write to a shared cache or root. Use the flake
@@ -277,6 +278,54 @@ A job can use a custom reuse view in place of the preset's
 `pull-requests-<repository-id>` view. The check verifies that the view exists
 and checks its priority and store directory, but it does not verify which caches
 the view's selectors include. It adds a note on the job that says so.
+
+## Push expressions
+
+The `push` input of the flake workflow can be an expression. The check evaluates
+the expression for each run that it simulates. A run publishes when the
+expression is true and only reads when it is false, so the check and the repair
+treat each run as they treat a run with a literal `push` input.
+
+The check evaluates boolean, null, number and string literals, `&&`, `||`, `!`,
+`==`, `!=` and parentheses, with GitHub's [expression
+semantics][github-expressions]. It reads these values:
+
+- `inputs.<name>`, in a reusable workflow that another workflow calls: the value
+  that the calling job passes for the `workflow_call` input, or the input's
+  default when the calling job does not set it. The check follows an input that
+  an intermediate reusable workflow passes on as `${{ inputs.<name> }}`. It
+  reads only `workflow_call` inputs, so in a workflow that no other workflow
+  calls, such as one with `workflow_dispatch` inputs, it reports the job as
+  unverified when the expression reads `inputs`.
+- `github.event_name`, `github.repository` and `github.repository_id`.
+- `github.event.pull_request.head.repo.full_name` and
+  `github.event.pull_request.head.repo.id`. The check simulates only pull
+  requests from the repository itself, so in a pull-request run these values are
+  the repository's own name and ID. In other runs they are empty.
+- `github.ref`, in push, schedule and manual runs. The check uses example values
+  for the number of a pull request and the tag of a release, so it reports a
+  pull-request or release run as unverified when the expression reads
+  `github.ref`.
+
+When the expression uses anything else, such as a function, `vars`, `secrets`, a
+`steps` or `needs` output, or an input without a literal value or default, the
+check reports the job as unverified. The finding quotes the part of the
+expression that the check cannot evaluate. The check also reports the job as
+unverified when an input's value does not have the input's declared `type`,
+because it does not convert the value as GitHub might. It reports a run as
+unverified when the expression's value for that run is not a boolean.
+
+For example, the check evaluates this `push` input, which publishes on every run
+except a pull request from a fork:
+
+```yaml
+push: >-
+  ${{ inputs.push && (github.event_name != 'pull_request' ||
+  github.event.pull_request.head.repo.full_name == github.repository) }}
+```
+
+[github-expressions]:
+  https://docs.github.com/en/actions/reference/workflows-and-actions/expressions
 
 ## Repairing the tenant
 

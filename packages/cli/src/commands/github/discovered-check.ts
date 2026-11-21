@@ -74,6 +74,7 @@ import {
 } from './finding.ts';
 import {
 	isPresetJob,
+	isReadOnlyCase,
 	modelPublishingJob,
 	type PublicationCase,
 	type PublishingJobFinding,
@@ -482,6 +483,7 @@ function trustFindings(
 
 	if (
 		!isPreset &&
+		publication.requests.length > 0 &&
 		publication.trigger === 'pull_request' &&
 		publication.pullRequestTemplates === undefined &&
 		publication.lifecycle === undefined
@@ -653,6 +655,7 @@ async function inspectPublication(
 	if (
 		job.buildInputsRecordingUnverified !== undefined &&
 		publication.trigger !== 'pull_request' &&
+		!isReadOnlyCase(job, publication) &&
 		findings.every((finding) => finding.status === 'ok')
 	) {
 		findings.push(

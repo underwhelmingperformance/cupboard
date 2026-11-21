@@ -52,6 +52,7 @@ import {
 	WorkflowPinFailedFinding
 } from './discovered-check.ts';
 import { WorkflowDiscoveryError, type WorkflowSource } from './discovery.ts';
+import { dotfilesWorkflows } from './dotfiles-workflows.test-support.ts';
 import {
 	PassedCheckFinding,
 	PullRequestCacheAccessMismatchFinding,
@@ -943,6 +944,59 @@ it.each([
 	}
 );
 
+// Checks the workflows while the cupboard flake workflow cannot be read, so
+// the check cannot tell whether the jobs record build inputs.
+async function checkWithoutFlakeWorkflow(workflows: Record<string, string>) {
+	const { client, dependencies } = fixture({
+		dependencies: {
+			source: {
+				resolveBranch: () => Promise.resolve('a'.repeat(40)),
+				list: () => Promise.resolve(Object.keys(workflows)),
+				read: (selectedRepository, selectedPath) => {
+					if (selectedRepository !== 'underwhelmingperformance/cupboard') {
+						return Promise.resolve(workflows[selectedPath] ?? '');
+					}
+
+					return selectedPath === '.github/workflows/cupboard-flake-publish.yml'
+						? Promise.reject(
+								new WorkflowDiscoveryError('the workflow is not readable')
+							)
+						: Promise.resolve(legacyPublishingWorkflow);
+				}
+			}
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+
+	return result.jobs.map((job) => ({
+		job: job.job,
+		status: job.status,
+		findings: job.findings.map(({ trigger, finding }) => ({
+			trigger,
+			finding: finding.toJSON()
+		}))
+	}));
+}
+
+it('does not check build-input recording for runs that a push expression makes read-only', async () => {
+	const literal = await checkWithoutFlakeWorkflow(
+		await dotfilesWorkflows({ push: false })
+	);
+
+	expect(literal.map(({ status }) => status)).toStrictEqual(['ready']);
+	expect(
+		await checkWithoutFlakeWorkflow(
+			await dotfilesWorkflows({ callerPush: false })
+		)
+	).toStrictEqual(literal);
+});
+
 it('models existing branch workflow trust and reports future edits', async () => {
 	const workflowReference =
 		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main';
@@ -1605,7 +1659,7 @@ jobs:
 	});
 });
 
-it('shows structured candidate rules when a dynamic push input prevents verification', async () => {
+it('shows structured candidate rules when an unresolved push input prevents verification', async () => {
 	const reference =
 		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
 	const matching = oidcTrustSummarySchema.parse({
@@ -1689,7 +1743,7 @@ jobs:
 				findings: [
 					{
 						finding: new DiscoveryUnverifiedFinding(
-							'the push input is dynamic, so the check cannot determine whether this job publishes or only reads'
+							'the push input reads inputs.push, but the check reads only the workflow_call inputs of a workflow that another workflow calls, so it cannot determine whether this job publishes or only reads'
 						)
 					}
 				]
@@ -2949,6 +3003,95 @@ jobs:
 					{
 						trigger: 'pull_request',
 						finding: new SharedPullRequestCacheFinding()
+					}
+				]
+			}
+		]);
+	}
+);
+
+const readOnlyPullRequestWorkflows: Readonly<
+	Record<string, Readonly<Record<string, string>>>
+> = {
+	'a literal push input': {
+		[path]: `
+on: pull_request
+jobs:
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${tenant.href}
+      root-prefix: github:${repository}/main
+      push: false
+`
+	},
+	'a push expression': {
+		[path]: `
+on: pull_request
+jobs:
+  packages:
+    uses: ./.github/workflows/build.yml
+    with:
+      push: false
+`,
+		'.github/workflows/build.yml': `
+on:
+  workflow_call:
+    inputs:
+      push:
+        type: boolean
+        default: true
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${tenant.href}
+      root-prefix: github:${repository}/main
+      push: \${{ inputs.push && github.event_name == 'pull_request' }}
+`
+	}
+};
+
+it.each(Object.entries(readOnlyPullRequestWorkflows))(
+	'checks the read grant of a read-only pull request without a shared cache with %s',
+	async (_name, workflows) => {
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			fixture().client,
+			defaultDependencies({
+				fetchCacheAccess: () => Promise.resolve('private'),
+				source: {
+					resolveBranch: () => Promise.resolve('a'.repeat(40)),
+					list: () => Promise.resolve(Object.keys(workflows)),
+					read: (selectedRepository, selectedPath) =>
+						Promise.resolve(
+							selectedRepository === 'underwhelmingperformance/cupboard'
+								? 'on: workflow_call\njobs: {}\n'
+								: (workflows[selectedPath] ?? '')
+						)
+				}
+			})
+		);
+
+		expect(
+			result.jobs.map((job) => ({
+				status: job.status,
+				findings: job.findings.map(({ trigger, finding }) => ({
+					trigger,
+					finding: finding.toJSON()
+				}))
+			}))
+		).toStrictEqual([
+			{
+				status: 'failed',
+				findings: [
+					{
+						trigger: 'pull_request',
+						finding: new RepositoryTrustRuleMissingFinding(
+							'trust rule'
+						).toJSON()
 					}
 				]
 			}

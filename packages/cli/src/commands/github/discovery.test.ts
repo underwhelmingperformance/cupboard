@@ -18,7 +18,16 @@ import {
 	type WorkflowSource,
 	type WorkflowTrigger
 } from './discovery.ts';
-import { ForkPullRequestFinding, modelPublishingJob } from './publication.ts';
+import {
+	dotfilesCaller,
+	dotfilesPushExpression,
+	dotfilesWorkflows
+} from './dotfiles-workflows.test-support.ts';
+import {
+	ForkPullRequestFinding,
+	modelPublishingJob,
+	PublicationUnmodelledFinding
+} from './publication.ts';
 
 const repository = 'iainlane/dotfiles';
 const tenant = new URL('https://cupboard.supply/t/laney');
@@ -2284,3 +2293,367 @@ it.each([
 		});
 	}
 );
+
+describe('push input expressions', () => {
+	const job = 'publish (cupboard-publish.yml: publish)';
+	const workflowReference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.54';
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+
+	it.each([
+		{ name: 'the default of inputs.push', options: {}, push: true },
+		{
+			name: 'a caller that sets push to false',
+			options: { callerPush: false },
+			push: false
+		},
+		{
+			name: 'a declared Push input and a caller that sets push to false',
+			options: { callerPush: false, declaredPush: 'Push' },
+			push: false
+		}
+	])('resolves the push expression with $name', async ({ options, push }) => {
+		const expression = await dotfilesPushExpression();
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source(await dotfilesWorkflows(options))
+		);
+
+		expect({
+			jobs: result.jobs.map((discovered) => ({
+				job: discovered.job,
+				push: discovered.inputs.push,
+				pushExpression: discovered.pushExpression
+			})),
+			unverified: result.unverified
+		}).toStrictEqual({
+			jobs: [
+				{
+					job,
+					push: expression,
+					pushExpression: { expression, inputs: { push } }
+				}
+			],
+			unverified: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'an unsupported function',
+			workflows: { push: "${{ inputs.push && contains(github.ref, 'main') }}" },
+			detail:
+				'the check cannot evaluate contains() in the push input, so it cannot determine whether this job publishes or only reads'
+		},
+		{
+			name: 'an unknown context',
+			workflows: { push: "${{ inputs.push && vars.PUBLISH == 'true' }}" },
+			detail:
+				'the check cannot evaluate vars.PUBLISH in the push input, so it cannot determine whether this job publishes or only reads'
+		},
+		{
+			name: 'an input that the caller sets with an expression',
+			workflows: { callerPush: "${{ github.event_name == 'push' }}" },
+			detail:
+				'the push input reads inputs.push, which has no literal value or default, so the check cannot determine whether this job publishes or only reads'
+		},
+		...['constructor', '__proto__'].map((name) => ({
+			name: `inputs.${name}`,
+			workflows: { push: `\${{ inputs.${name} == 'yes' }}` },
+			detail: `the push input reads inputs.${name}, which has no literal value or default, so the check cannot determine whether this job publishes or only reads`
+		})),
+		{
+			name: 'an input value that does not match its declared type',
+			workflows: { callerPush: 'false' },
+			detail:
+				'the push input reads inputs.push, whose value "false" does not match its declared type boolean, so the check cannot determine whether this job publishes or only reads'
+		}
+	])(
+		'reports a push expression with $name for manual review',
+		async ({ workflows, detail }) => {
+			const result = await discoverPublishingJobs(
+				repository,
+				'main',
+				tenant,
+				source(await dotfilesWorkflows(workflows))
+			);
+
+			expect(result).toStrictEqual({
+				revision: 'a'.repeat(40),
+				jobs: [],
+				unverified: [
+					{
+						caller: dotfilesCaller,
+						job,
+						workflow: 'cupboard',
+						workflowRef: workflowReference,
+						detail
+					}
+				]
+			});
+		}
+	);
+
+	it('reports inputs.push in a workflow that no other workflow calls', async () => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source({
+				'.github/workflows/ci.yml': `
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        type: boolean
+        default: true
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${tenant.href}
+      root-prefix: github:${repository}/main
+      push: \${{ inputs.push }}
+`
+			})
+		);
+
+		expect(result).toStrictEqual({
+			revision: 'a'.repeat(40),
+			jobs: [],
+			unverified: [
+				{
+					caller: '.github/workflows/ci.yml',
+					job: 'publish',
+					workflow: 'cupboard',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					detail:
+						'the push input reads inputs.push, but the check reads only the workflow_call inputs of a workflow that another workflow calls, so it cannot determine whether this job publishes or only reads'
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'a push to main',
+			on: 'push:\n    branches: [main]',
+			branch: 'main',
+			ref: 'refs/heads/main',
+			cases: [
+				{ trigger: 'push', ref: 'refs/heads/main', push: true, requests: 4 }
+			]
+		},
+		{
+			name: 'a schedule',
+			on: "schedule:\n    - cron: '0 0 * * *'",
+			branch: 'main',
+			ref: 'refs/heads/main',
+			cases: [
+				{
+					trigger: 'schedule',
+					ref: 'refs/heads/main',
+					push: true,
+					requests: 4
+				}
+			]
+		},
+		{
+			name: 'a manual run on main',
+			on: 'workflow_dispatch:',
+			branch: 'main',
+			ref: 'refs/heads/main',
+			cases: [
+				{
+					trigger: 'workflow_dispatch',
+					ref: 'refs/heads/main',
+					push: true,
+					requests: 4
+				}
+			]
+		},
+		{
+			name: 'a manual run on another branch',
+			on: 'workflow_dispatch:',
+			branch: 'feature',
+			ref: 'refs/heads/main',
+			cases: [
+				{
+					trigger: 'workflow_dispatch',
+					ref: 'refs/heads/feature',
+					push: false,
+					requests: 0
+				}
+			]
+		},
+		{
+			name: 'a push of an exact tag',
+			on: 'push:\n    tags: [v1.2.3]',
+			branch: 'main',
+			ref: 'refs/tags/v1.2.3',
+			cases: [
+				{ trigger: 'push', ref: 'refs/tags/v1.2.3', push: true, requests: 4 }
+			]
+		}
+	])(
+		'evaluates github.ref in the push expression for $name',
+		async ({ on, branch, ref, cases }) => {
+			const result = await discoverPublishingJobs(
+				repository,
+				branch,
+				tenant,
+				source({
+					'.github/workflows/ci.yml': `
+on:
+  ${on}
+jobs:
+  publish:
+    uses: ./.github/workflows/publish.yml
+`,
+					'.github/workflows/publish.yml': `
+on:
+  workflow_call:
+    inputs:
+      push:
+        type: boolean
+        default: true
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${tenant.href}
+      root-prefix: github:${repository}/main
+      push: \${{ inputs.push && github.ref == '${ref}' }}
+`
+				})
+			);
+
+			expect(
+				result.jobs.map((discovered) =>
+					modelPublishingJob(discovered, identity, tenant, branch).cases.map(
+						(publication) => ({
+							trigger: publication.trigger,
+							ref: publication.claims.ref,
+							push: publication.push,
+							requests: publication.requests.length
+						})
+					)
+				)
+			).toStrictEqual([cases]);
+		}
+	);
+
+	it.each(
+		['push', 'pull_request', 'workflow_dispatch'].flatMap((event) => [
+			{ event, callerPush: undefined, push: true, cupboardInputs: {} },
+			{ event, callerPush: false, push: false, cupboardInputs: {} },
+			{
+				event,
+				callerPush: false,
+				push: false,
+				cupboardInputs: { 'cache-access-mode': 'internal' }
+			}
+		])
+	)(
+		'models a $event run of the dotfiles job with $cupboardInputs like a literal push input of $push',
+		async ({ event, callerPush, push, cupboardInputs }) => {
+			const model = async (
+				workflows: Record<string, string>
+			): Promise<ReturnType<typeof modelPublishingJob>> => {
+				const result = await discoverPublishingJobs(
+					repository,
+					'main',
+					tenant,
+					source(workflows, recordingFlakeWorkflow)
+				);
+				const [discovered] = result.jobs;
+
+				if (discovered === undefined) {
+					throw new Error('expected the dotfiles publish job');
+				}
+
+				return modelPublishingJob(
+					{
+						...discovered,
+						triggers: discovered.triggers.filter(
+							(trigger) => trigger.event === event
+						)
+					},
+					identity,
+					tenant,
+					'main'
+				);
+			};
+			const literal = await model(
+				await dotfilesWorkflows({ push, cupboardInputs })
+			);
+
+			expect(literal.cases).not.toStrictEqual([]);
+			expect(
+				await model(await dotfilesWorkflows({ callerPush, cupboardInputs }))
+			).toStrictEqual({
+				...literal,
+				cases: literal.cases.map((publication) => ({ ...publication, push }))
+			});
+		}
+	);
+
+	it.each([
+		{
+			push: "${{ inputs.push && github.ref == 'refs/heads/main' }}",
+			reason:
+				'the check cannot evaluate github.ref in the push input for pull_request runs, so it cannot determine whether those runs publish or only read'
+		},
+		{
+			push: "${{ inputs.push && 'yes' }}",
+			reason:
+				'the push input evaluates to "yes" for pull_request runs, but the input accepts only a boolean'
+		}
+	])(
+		'leaves a pull_request run unverified for $push',
+		async ({ push, reason }) => {
+			const result = await discoverPublishingJobs(
+				repository,
+				'main',
+				tenant,
+				source(await dotfilesWorkflows({ push }))
+			);
+			const [discovered] = result.jobs;
+
+			if (discovered === undefined) {
+				throw new Error('expected the dotfiles publish job');
+			}
+
+			expect(
+				modelPublishingJob(
+					{
+						...discovered,
+						triggers: discovered.triggers.filter(
+							(trigger) => trigger.event === 'pull_request'
+						)
+					},
+					identity,
+					tenant,
+					'main'
+				)
+			).toStrictEqual({
+				cases: [],
+				findings: [
+					{ trigger: 'pull_request', finding: new ForkPullRequestFinding() },
+					{
+						trigger: 'pull_request',
+						finding: new PublicationUnmodelledFinding(reason)
+					}
+				]
+			});
+		}
+	);
+});

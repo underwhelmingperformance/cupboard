@@ -27,6 +27,7 @@ import {
 
 import { parseExactWorkflowReference } from './convention.ts';
 import {
+	expressionInputs,
 	jobConditionOutcome,
 	type JobDependencyGate
 } from './job-condition.ts';
@@ -100,6 +101,16 @@ export interface DiscoveredPublishingJob {
 	readonly workflowRef: string;
 	readonly workflowRefInput?: string;
 	readonly inputs: WorkflowInputs;
+	/**
+	Set for a flake job whose `push` input is an expression that the check can
+	evaluate. `inputs` has the value of each input that the expression reads,
+	keyed by lowercase name. The value comes from the calling job or from the
+	input's default.
+	*/
+	readonly pushExpression?: {
+		readonly expression: string;
+		readonly inputs: WorkflowInputs;
+	};
 	readonly readCredentialWiring?: {
 		readonly cache: ReadCredentialWiring;
 		readonly view: ReadCredentialWiring;
@@ -191,7 +202,10 @@ const patternsSchema = z
 	);
 
 const inputDeclarationSchema = z
-	.looseObject({ default: inputSchema.optional().catch(undefined) })
+	.looseObject({
+		default: inputSchema.optional().catch(undefined),
+		type: z.string().optional().catch(undefined)
+	})
 	.catch({});
 const inputDeclarationsSchema = z
 	.record(z.string(), inputDeclarationSchema)
@@ -387,25 +401,112 @@ function jobDependencyGate(
 	};
 }
 
-function inputDefaults(workflow: Workflow): WorkflowInputs {
+type InputDeclaration = z.output<typeof inputDeclarationSchema>;
+
+// GitHub matches input names without regard to case, so the check keys the
+// inputs of a workflow by lowercase name. A map has no inherited entries, so
+// an input name such as `constructor` finds only a declared or passed input.
+function lowercaseMap<T>(
+	entries: Readonly<Record<string, T>>
+): ReadonlyMap<string, T> {
+	return new Map(
+		Object.entries(entries).map(([key, value]) => [key.toLowerCase(), value])
+	);
+}
+
+function inputDeclarations(
+	workflow: Workflow
+): ReadonlyMap<string, InputDeclaration> {
 	const on = workflow.on;
 	const declarations =
 		typeof on === 'object' && !Array.isArray(on)
 			? on.workflow_call?.inputs
 			: undefined;
 
-	return Object.fromEntries(
-		Object.entries(declarations ?? {}).flatMap(([key, declaration]) =>
+	return lowercaseMap(declarations ?? {});
+}
+
+function inputDefaults(
+	declarations: ReadonlyMap<string, InputDeclaration>
+): ReadonlyMap<string, WorkflowInput> {
+	return new Map(
+		[...declarations].flatMap(([key, declaration]) =>
 			declaration.default === undefined ? [] : [[key, declaration.default]]
 		)
 	);
 }
 
 const passThrough = /^\$\{\{\s*inputs\.([A-Za-z0-9_-]+)\s*\}\}$/;
+const inputTypes = new Set(['boolean', 'number', 'string']);
+
+/**
+The inputs of the workflow that contains a job, keyed by lowercase name.
+`isCalled` is false for a workflow that no other workflow calls. The check
+does not resolve such a workflow's inputs.
+*/
+interface WorkflowInputContext {
+	readonly inputs: ReadonlyMap<string, WorkflowInput>;
+	readonly declarations: ReadonlyMap<string, InputDeclaration>;
+	readonly isCalled: boolean;
+}
+
+/**
+The `push` expression of a flake job with the values of the inputs that it
+reads, or why the check cannot evaluate it.
+*/
+function pushExpression(
+	expression: string,
+	context: WorkflowInputContext
+):
+	| NonNullable<DiscoveredPublishingJob['pushExpression']>
+	| { readonly unsupported: string } {
+	const read = expressionInputs(expression);
+
+	if (read.outcome === 'unsupported') {
+		return {
+			unsupported: `the check cannot evaluate ${read.part} in the push input, so it cannot determine whether this job publishes or only reads`
+		};
+	}
+
+	const values = new Map<string, WorkflowInput>();
+
+	for (const name of read.inputs) {
+		if (!context.isCalled) {
+			return {
+				unsupported: `the push input reads inputs.${name}, but the check reads only the workflow_call inputs of a workflow that another workflow calls, so it cannot determine whether this job publishes or only reads`
+			};
+		}
+
+		const value = context.inputs.get(name);
+
+		if (
+			value === undefined ||
+			(typeof value === 'string' && value.includes('${{'))
+		) {
+			return {
+				unsupported: `the push input reads inputs.${name}, which has no literal value or default, so the check cannot determine whether this job publishes or only reads`
+			};
+		}
+
+		// GitHub may convert a value of another type to the declared type, but
+		// the check does not know how, so it does not convert the value.
+		const type = context.declarations.get(name)?.type;
+
+		if (type !== undefined && typeof value !== type && inputTypes.has(type)) {
+			return {
+				unsupported: `the push input reads inputs.${name}, whose value ${JSON.stringify(value)} does not match its declared type ${type}, so the check cannot determine whether this job publishes or only reads`
+			};
+		}
+
+		values.set(name, value);
+	}
+
+	return { expression, inputs: Object.fromEntries(values) };
+}
 
 function resolveInputs(
 	values: WorkflowJob['with'],
-	parent: WorkflowInputs
+	parent: ReadonlyMap<string, WorkflowInput>
 ): WorkflowInputs {
 	return Object.fromEntries(
 		Object.entries(values ?? {}).flatMap(([key, entry]) => {
@@ -418,8 +519,13 @@ function resolveInputs(
 			if (typeof value.data === 'string') {
 				const parameter = passThrough.exec(value.data)?.[1];
 
-				if (parameter !== undefined && parent[parameter] !== undefined) {
-					return [[key, parent[parameter]]];
+				const resolved =
+					parameter === undefined
+						? undefined
+						: parent.get(parameter.toLowerCase());
+
+				if (resolved !== undefined) {
+					return [[key, resolved]];
 				}
 			}
 
@@ -982,10 +1088,14 @@ export async function discoverPublishingJobs(
 		}
 
 		// A workflow's own inputs exist only when another workflow calls it.
-		const effectiveInputs =
-			callerLabel === undefined
-				? context.inputs
-				: { ...inputDefaults(workflow), ...context.inputs };
+		const declarations = inputDeclarations(workflow);
+		const isCalled = callerLabel !== undefined;
+		const effectiveInputs = isCalled
+			? new Map([
+					...inputDefaults(declarations),
+					...lowercaseMap(context.inputs)
+				])
+			: lowercaseMap(context.inputs);
 		const ancestors = new Set([...context.ancestors, location]);
 
 		const workflowJobs = Object.entries(workflow.jobs ?? {});
@@ -1182,7 +1292,16 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
-			if (kind === 'flake' && typeof supplied.push === 'string') {
+			const push =
+				kind === 'flake' && typeof supplied.push === 'string'
+					? pushExpression(supplied.push, {
+							inputs: effectiveInputs,
+							declarations,
+							isCalled
+						})
+					: undefined;
+
+			if (push !== undefined && 'unsupported' in push) {
 				unverified.push({
 					caller,
 					job: label,
@@ -1190,8 +1309,7 @@ export async function discoverPublishingJobs(
 					...(workflowReference !== undefined && {
 						workflowRef: workflowReference
 					}),
-					detail:
-						'the push input is dynamic, so the check cannot determine whether this job publishes or only reads'
+					detail: push.unsupported
 				});
 				continue;
 			}
@@ -1288,6 +1406,7 @@ export async function discoverPublishingJobs(
 						workflowRefInput: `${cupboardWorkflowPrefix}${workflowPath}@${pin}`
 					}),
 				inputs: supplied,
+				...(push !== undefined && { pushExpression: push }),
 				...(keys === 'unknown'
 					? { privateSubstitutersWiring: 'unknown' as const }
 					: keys.has('private_substituters')

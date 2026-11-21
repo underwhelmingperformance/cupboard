@@ -431,3 +431,4 @@ reads.
 | `tests/fixtures/cache-deployment-predecessor` | Workers that imitate an earlier release, for the staged upgrade test.                                    |
 | `tests/fixtures/nix-ssh-store`                | The Dockerfile for the remote store tests.                                                               |
 | `tests/fixtures/github-actions`               | A workflow from an older caller, for the reusable workflow tests.                                        |
+| `tests/fixtures/github-actions/dotfiles`      | Two workflows of a caller that passes `push` as an expression, for the `cupboard github check` tests.    |

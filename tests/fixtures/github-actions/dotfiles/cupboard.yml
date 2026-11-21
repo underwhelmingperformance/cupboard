@@ -1,0 +1,195 @@
+# Build hosts, packages and checks in strict cohorts, and publish the results
+# on main and same-repository pull requests. Fork pull requests and merge groups
+# build public packages and checks without publication.
+name: cupboard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: cupboard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' && github.event.action != 'closed'
+    }}
+
+permissions: {}
+
+jobs:
+  validation-plan:
+    if: >-
+      github.event_name == 'merge_group' || (github.event_name == 'pull_request'
+      && github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.id != github.repository_id)
+    name: Plan public builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+
+      - name: Plan public system cohorts
+        id: targets
+        run: |
+          set -euo pipefail
+
+          matrix=$(./scripts/check-evaluation.bash --json .#.cupboardPublicOutputs |
+            jq --compact-output '{include: (map({system, os}) | unique_by(.system))}')
+          printf 'matrix=%s\n' "${matrix}" >> "${GITHUB_OUTPUT}"
+
+  validation:
+    needs: validation-plan
+    name: Build public packages and checks (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.validation-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: wimpysworld/nothing-but-nix@687c797a730352432950c707ab493fcc951818d7 # v10
+        if: runner.os == 'Linux'
+        with:
+          hatchet-protocol: holster
+          nix-permission-edict: true
+
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+
+      - name: Configure evaluation and binary caches
+        id: cache-config
+        env:
+          NIXBUILD_TOKEN: ${{ secrets.NIXBUILD_NET_SECRET }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.config/nix"
+          {
+            printf '\n'
+            ./scripts/check-evaluation.bash --raw .#.nix.ciConfig
+          } >> "${HOME}/.config/nix/nix.conf"
+
+          echo "remoteSubstituters=$(nix eval --raw .#.nix.publishInputs.remoteSubstituters)" >> "${GITHUB_OUTPUT}"
+          echo "remoteTrustedKeys=$(nix eval --raw .#.nix.publishInputs.remoteTrustedKeys)" >> "${GITHUB_OUTPUT}"
+          if [ -n "${NIXBUILD_TOKEN}" ]; then
+            echo "have_builder=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # Evaluating the host and home configurations reads the private secrets
+      # input, so the host-evaluation checks need the deploy key. Fork pull
+      # requests do not receive it and skip those checks, as they skip the
+      # closure builds in the publish path.
+      - name: Set up secrets access
+        id: secrets
+        env:
+          DEPLOY_KEY: ${{ secrets.SECRETS_DEPLOY_KEY }}
+          FALCON_CACHE_PASSWORD: ${{ secrets.FALCON_CACHE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "No secrets deploy key; skipping the host evaluations."
+            echo "have_key=false" | tee -a "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ -z "${FALCON_CACHE_PASSWORD}" ]; then
+            echo "The Falcon cache password is missing." >&2
+            exit 1
+          fi
+
+          key="${RUNNER_TEMP}/secrets_deploy_key"
+          install -m 600 /dev/null "${key}"
+
+          printf '%s\n' "${DEPLOY_KEY}" > "${key}"
+          netrc="${RUNNER_TEMP}/falcon-cache.netrc"
+          install -m 600 /dev/null "${netrc}"
+          {
+            echo "machine cupboard.supply"
+            echo "login cupboard"
+            printf 'password %s\n' "${FALCON_CACHE_PASSWORD}"
+          } > "${netrc}"
+          {
+            echo "extra-substituters = https://cupboard.supply/t/laney/cache/falcon"
+            echo "netrc-file = ${netrc}"
+          } >> "${HOME}/.config/nix/nix.conf"
+          echo "GIT_SSH_COMMAND=ssh -i ${key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${RUNNER_TEMP}/known_hosts" | tee -a "${GITHUB_ENV}"
+          echo "have_key=true" | tee -a "${GITHUB_OUTPUT}"
+
+      - uses: nixbuild/nixbuild-action@edba7779b0a251b622d4250d263540f50c0f1a0b # v25
+        if:
+          ${{ runner.os == 'Linux' && steps.cache-config.outputs.have_builder ==
+          'true' }}
+        with:
+          nixbuild_token: ${{ secrets.NIXBUILD_NET_SECRET }}
+          settings: |
+            substituters = ${{ steps.cache-config.outputs.remoteSubstituters }},https://cupboard:${{ secrets.FALCON_CACHE_PASSWORD }}@cupboard.supply/t/laney/cache/falcon
+            trusted-public-keys = ${{ steps.cache-config.outputs.remoteTrustedKeys }}
+
+      # The host-evaluation checks in `flake/host-assembly/checks/evaluation.nix`
+      # force the toplevel derivation of every host configuration. Forcing the
+      # derivation path of every check, on every system, therefore evaluates
+      # every host without building any of them.
+      #
+      # Do not use `nix flake check --no-build` here. That flag puts Nix into
+      # read-only mode, where a filtered source gets a store path that Nix
+      # computes but never writes, and evaluation fails as soon as it needs
+      # that path. Without the flag, `nix flake check` builds every check for
+      # this runner's system, which is more than this job is for.
+      - name: Evaluate the host configurations
+        if: ${{ steps.secrets.outputs.have_key == 'true' }}
+        run: |
+          set -euo pipefail
+
+          ./scripts/nix-retry.bash eval --raw .#.checks --apply \
+            'checks:
+              builtins.deepSeq
+                (builtins.mapAttrs
+                  (_: builtins.mapAttrs (_: check: check.drvPath))
+                  checks)
+                "ok"'
+
+      - name: Build public packages and checks
+        env:
+          TARGET_SYSTEM: ${{ matrix.system }}
+        run: |
+          set -euo pipefail
+
+          nix eval --json .#.cupboardPublicOutputs |
+            jq --raw-output --arg system "${TARGET_SYSTEM}" \
+              '.[] | select(.system == $system) | .attr' > "${RUNNER_TEMP}/targets.txt"
+          targets=()
+          while IFS= read -r target; do
+            targets+=("${target}")
+          done < "${RUNNER_TEMP}/targets.txt"
+
+          nix build --keep-going --out-link "${RUNNER_TEMP}/strict-build" "${targets[@]}"
+
+  publish:
+    if: >-
+      github.event_name != 'merge_group' && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.id == github.repository_id)
+    permissions:
+      attestations: write # write build provenance attestations for the outputs
+      contents: read
+      id-token: write # issue the OIDC token the cupboard cache trusts for push
+      pull-requests: read # let the trusted wrapper identify the merged PR
+    # Keep the repository-specific inputs on main; the jobs themselves come
+    # from cupboard's separately trusted released workflow.
+    uses: iainlane/dotfiles/.github/workflows/cupboard-publish.yml@main # zizmor: ignore[unpinned-uses]
+    secrets:
+      falcon_cache_password: ${{ secrets.FALCON_CACHE_PASSWORD }}
+      nixbuild_token: ${{ secrets.NIXBUILD_NET_SECRET }}
+      secrets_deploy_key: ${{ secrets.SECRETS_DEPLOY_KEY }}
