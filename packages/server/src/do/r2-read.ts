@@ -4,7 +4,7 @@ import { abortableSleep, transientRetryBackoff } from '@cupboard/shared/retry';
 import type { Span } from '@opentelemetry/api';
 
 import { R2ReadUnavailableError, SubrequestTimeoutError } from '../errors.ts';
-import type { withSpan } from '../observability/span.ts';
+import { withSpan } from '../observability/span.ts';
 
 import {
 	boundedSubrequest,
@@ -51,22 +51,20 @@ async function cancelLateBody(object: R2ReadResult): Promise<void> {
 /**
 Bounds the wait for R2 `get()` to return, including transient retries. The
 budget does not limit body streaming. A late, unused stream is cancelled
-best-effort.
-An observer must start its callback synchronously so subrequest accounting
-precedes subsequent admission checks. `random` is the random source for the
-backoff between retries, and defaults to `Math.random`.
+best-effort. The read runs in an `r2-get` span, which starts it synchronously
+so that subrequest accounting precedes later admission checks. `random` is the
+random source for the backoff between retries, and defaults to `Math.random`.
 */
 export function getR2Object(
 	operation: () => Promise<R2ReadResult>,
 	key: string,
-	observeRead?: typeof withSpan,
 	random?: RandomSource
 ): Promise<R2ReadResult> {
 	const storageOperationId = crypto.randomUUID();
 	const objectKey = key.slice(0, 1024);
 	const backoff = transientRetryBackoff(random);
 	return withContext({ storageOperationId, objectKey, phase: 'get' }, () => {
-		const run = async (span?: Span): Promise<R2ReadResult> => {
+		const run = async (span: Span): Promise<R2ReadResult> => {
 			const started = performance.now();
 			let attempts = 0;
 			logger.debug('R2 get started', {
@@ -126,8 +124,8 @@ export function getR2Object(
 						: 'body' in result
 							? 'returned'
 							: 'conditional';
-				span?.setAttribute('cupboard.storage.outcome', disposition);
-				span?.setAttribute('cupboard.storage.attempts', attempts);
+				span.setAttribute('cupboard.storage.outcome', disposition);
+				span.setAttribute('cupboard.storage.attempts', attempts);
 				logger.debug('R2 get returned', {
 					attempts,
 					disposition,
@@ -141,8 +139,8 @@ export function getR2Object(
 						: error instanceof R2ReadUnavailableError
 							? 'exhausted'
 							: 'failed';
-				span?.setAttribute('cupboard.storage.outcome', disposition);
-				span?.setAttribute('cupboard.storage.attempts', attempts);
+				span.setAttribute('cupboard.storage.outcome', disposition);
+				span.setAttribute('cupboard.storage.attempts', attempts);
 				logger.debug('R2 get failed', {
 					attempts,
 					disposition,
@@ -152,16 +150,14 @@ export function getR2Object(
 				throw error;
 			}
 		};
-		return observeRead === undefined
-			? run()
-			: observeRead(
-					'r2-get',
-					{
-						'cupboard.storage.operation_id': storageOperationId,
-						'cupboard.storage.object_key': objectKey,
-						'cupboard.storage.budget_ms': r2GetBudgetMs
-					},
-					run
-				);
+		return withSpan(
+			'r2-get',
+			{
+				'cupboard.storage.operation_id': storageOperationId,
+				'cupboard.storage.object_key': objectKey,
+				'cupboard.storage.budget_ms': r2GetBudgetMs
+			},
+			run
+		);
 	});
 }

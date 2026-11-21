@@ -1,7 +1,6 @@
 import { type RandomSource } from '@cupboard/shared/backoff';
 
 import { UnboundableIoError } from '../errors.ts';
-import type { withSpan } from '../observability/span.ts';
 
 import {
 	boundedSubrequest,
@@ -145,14 +144,14 @@ export function boundedWorkerEnv<
 		>;
 		readonly CUPBOARD_TENANT?: Fetcher;
 	}
->(env: T, observeRead?: typeof withSpan, delay: Delay = systemClock.delay): T {
+>(env: T, delay: Delay = systemClock.delay): T {
 	// A proxy, not a spread: tests supply a service binding through a `get`
 	// trap, which a spread would not copy.
 	return new Proxy(env, {
 		get(target, property) {
 			switch (property) {
 				case 'BLOBS': {
-					return boundedBlobs(target.BLOBS, observeRead);
+					return boundedBlobs(target.BLOBS);
 				}
 				case 'CONTROL_DB': {
 					return target.CONTROL_DB === undefined
@@ -189,7 +188,6 @@ random source for the backoff between read retries, and defaults to
 */
 export function boundedBlobs(
 	bucket: R2Bucket,
-	observeRead?: typeof withSpan,
 	random?: RandomSource
 ): R2Bucket {
 	return new Proxy(bucket, {
@@ -208,7 +206,6 @@ export function boundedBlobs(
 								return call;
 							},
 							key,
-							observeRead,
 							random
 						);
 				}

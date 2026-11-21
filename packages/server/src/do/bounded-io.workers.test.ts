@@ -8,7 +8,10 @@ import {
 	SubrequestTimeoutError,
 	UnboundableIoError
 } from '../errors.ts';
-import { withSpan } from '../observability/span.ts';
+import {
+	finishedSpans,
+	recordSpans
+} from '../observability/span-recorder.test-support.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
@@ -115,21 +118,19 @@ describe('unboundable members', () => {
 
 describe('bounded Worker environment', () => {
 	it('starts traced native reads synchronously before the next admission check', async () => {
-		const spans: string[] = [];
-		const observeRead: typeof withSpan = (name, attributes, body) => {
-			spans.push(name);
-			return withSpan(name, attributes, body);
-		};
+		recordSpans();
 		const get = vi.spyOn(env.BLOBS, 'get');
 		try {
-			const pending = boundedBlobs(env.BLOBS, observeRead).get(
-				'traced-missing-key'
-			);
-			expect({ calls: get.mock.calls, spans }).toStrictEqual({
+			const pending = boundedBlobs(env.BLOBS).get('traced-missing-key');
+			const calls = [...get.mock.calls];
+			await pending;
+			expect({
+				calls,
+				spans: finishedSpans().map((span) => span.name)
+			}).toStrictEqual({
 				calls: [['traced-missing-key', undefined]],
 				spans: ['r2-get']
 			});
-			await pending;
 		} finally {
 			get.mockRestore();
 		}
@@ -251,7 +252,7 @@ describe('bounded Worker environment', () => {
 			vi.useFakeTimers();
 			try {
 				const pending = withDeadlineBudget(budgetMs, () =>
-					boundedBlobs(env.BLOBS, undefined, () => 0.5).get('key')
+					boundedBlobs(env.BLOBS, () => 0.5).get('key')
 				);
 				const rejected = expect(pending).rejects.toMatchObject({
 					name: 'SubrequestTimeoutError',

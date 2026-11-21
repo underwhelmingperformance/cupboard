@@ -32,7 +32,6 @@ import {
 	withInternalRequest,
 	withoutCachedCorrelation
 } from '../observability/request-context.ts';
-import { withSpan } from '../observability/span.ts';
 import { readRequestBudgetMs } from '../policy/streaming.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
@@ -287,7 +286,7 @@ export function cachedTenantReadFetch(
 			() =>
 				tenantReadFetch(
 					request,
-					boundedWorkerEnv(env, withSpan, clock.delay),
+					boundedWorkerEnv(env, clock.delay),
 					ctx,
 					clock
 				),

@@ -4,7 +4,10 @@ import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SubrequestTimeoutError } from '../errors.ts';
-import { withSpan } from '../observability/span.ts';
+import {
+	finishedSpans,
+	recordSpans
+} from '../observability/span-recorder.test-support.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
 import { observeCriticalSection } from './critical-section-telemetry.ts';
@@ -50,52 +53,6 @@ function overBudgetRecords(capture: Capture): unknown {
 			.filter((log) => log.message === overBudget)
 			.map(({ level, properties }) => ({ level, properties }))
 	);
-}
-
-interface RecordedSpan {
-	readonly name: string;
-	readonly attributes: Record<string, unknown>;
-	readonly set: [string, boolean | number | string][];
-}
-
-/**
-Opens real spans and records the attributes that each one receives.
-*/
-function recordingSpans(): {
-	readonly spans: RecordedSpan[];
-	readonly withSpan: typeof withSpan;
-} {
-	const spans: RecordedSpan[] = [];
-
-	return {
-		spans,
-		withSpan: (name, attributes, body) =>
-			withSpan(name, attributes, (span) => {
-				const recorded: RecordedSpan = { name, attributes, set: [] };
-				spans.push(recorded);
-
-				return body(
-					new Proxy(span, {
-						get: (target, property) => {
-							if (property === 'setAttribute') {
-								return (key: string, value: boolean | number | string) => {
-									recorded.set.push([key, value]);
-
-									return target.setAttribute(key, value);
-								};
-							}
-
-							const member: unknown = Reflect.get(target, property);
-
-							return typeof member === 'function'
-								? (...parameters: unknown[]): unknown =>
-										Reflect.apply(member, target, parameters)
-								: member;
-						}
-					})
-				);
-			})
-	};
 }
 
 function hangDeletes() {
@@ -190,7 +147,7 @@ describe('critical section telemetry', () => {
 				observeCriticalSection(
 					() =>
 						boundedSubrequest(() => env.BLOBS.delete('gated-key'), 'r2.delete'),
-					{ budgetMs: 100, withSpan: undefined }
+					100
 				)
 			);
 		} catch (error) {
@@ -206,7 +163,7 @@ describe('critical section telemetry', () => {
 	});
 
 	it('records the budget, elapsed time and pending subrequests in the span', async () => {
-		const recorder = recordingSpans();
+		recordSpans();
 		const hang = hangDeletes();
 		const logs = startCapture();
 		capture = logs;
@@ -222,7 +179,7 @@ describe('critical section telemetry', () => {
 								() => env.BLOBS.delete('gated-key'),
 								'r2.delete'
 							),
-						{ budgetMs: 100, withSpan: recorder.withSpan }
+						100
 					),
 				(cost) => {
 					costs.push(cost);
@@ -234,27 +191,28 @@ describe('critical section telemetry', () => {
 			hang.mockRestore();
 		}
 
-		const [span] = recorder.spans;
-		const pending = span?.set.find(([key]) => key === 'pendingSubrequests');
-		const set = Object.fromEntries(
-			span?.set.filter(([key]) => key !== 'pendingSubrequests') ?? []
-		);
+		const [span] = finishedSpans();
+		const { pendingSubrequests, ...attributes } = span?.attributes ?? {};
 
 		expect({
 			timedOut: rejection instanceof SubrequestTimeoutError,
 			span: withoutTimings({
 				name: span?.name,
-				attributes: span?.attributes,
-				set,
-				pendingSubrequests: parsedAttribute(pending?.[1])
+				attributes,
+				pendingSubrequests: parsedAttribute(pendingSubrequests)
 			}),
 			records: logs.logs.filter((log) => log.message === overBudget).length
 		}).toStrictEqual({
 			timedOut: true,
 			span: {
 				name: 'critical-section',
-				attributes: { label: 'gated-delete' },
-				set: { overBudget: true, budgetMs: 100, elapsedMs: 'measured' },
+				attributes: {
+					label: 'gated-delete',
+					overBudget: true,
+					budgetMs: 100,
+					elapsedMs: 'measured',
+					'error.type': 'SubrequestTimeoutError'
+				},
 				pendingSubrequests: [{ operation: 'r2.delete', elapsedMs: 'measured' }]
 			},
 			records: 1

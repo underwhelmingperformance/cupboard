@@ -650,7 +650,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
-		this.context = new ServerContext(ctx, env, withSpan);
+		this.context = new ServerContext(ctx, env);
 		this.maintenanceRetry = new MaintenanceRetrySchedule(ctx.storage);
 		this.localStepRun = new LocalStepRun(this.context);
 		this.localSchemaRun = new LocalSchemaRun(this.context);

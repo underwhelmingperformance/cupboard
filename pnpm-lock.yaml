@@ -784,6 +784,12 @@ importers:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
         version: 5.20261026.1
+      '@opentelemetry/context-async-hooks':
+        specifier: ^3.0.0
+        version: 3.0.0(@opentelemetry/api@1.10.0)
+      '@opentelemetry/sdk-trace':
+        specifier: ^3.0.0
+        version: 3.0.0(@opentelemetry/api@1.10.0)
       '@orpc/client':
         specifier: 'catalog:'
         version: 1.16.2(@opentelemetry/api@1.10.0)
