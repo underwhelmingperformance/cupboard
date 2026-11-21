@@ -316,7 +316,10 @@ because they publish trusted builds. They grant it to every workflow that the
 rule accepts, although only the flake publish workflow is meant to use it. The
 pull-request preset doesn't, so a pull request can't change what a cache keeps
 of the store paths that it already has. See
-[Build inputs](../admin/retention.md#build-inputs).
+[Build inputs](../admin/retention.md#build-inputs). Earlier releases wrote these
+presets without it. To add it to such a rule, use `cupboard oidc-trust extend`,
+as [Listing, changing and removing rules](#listing-changing-and-removing-rules)
+describes.
 
 When `read` is combined with other permissions, the CLI creates a separate
 content-read grant with the same cache selector. Content reads apply to the
@@ -511,6 +514,30 @@ cupboard oidc-trust show https://cupboard.example.workers.dev/t/acme <rule-id>
 ```
 
 Add `--output-mode json` to either command for the complete records.
+
+To add grants to a rule, run `cupboard oidc-trust extend` with the rule's ID and
+the same grant options as `add`. This adds the `build-inputs` grant to a branch
+rule, whose grants apply to the default cache:
+
+```sh
+cupboard oidc-trust extend https://cupboard.example.workers.dev/t/acme <rule-id> \
+  --allow build-inputs
+```
+
+`--from-file` reads the grants to add from a JSON file that contains a list of
+grants, in the form of the `permittedGrants` of a rule. The command shows the
+grants that it will add and the resulting rule, then asks for confirmation.
+`--yes` skips the question. The rule keeps its ID, issuer, audience, claims and
+existing grants, and keeps accepting tokens throughout.
+
+The command refuses a grant that the rule already permits for every token that
+it accepts, and lists each such grant. Before it shows the plan, it also refuses
+the owner rule, a disabled rule, and a GitHub Actions rule without a repository
+pin, because the server refuses to extend each of them. See
+[GitHub rules must pin the repository](#github-rules-must-pin-the-repository).
+The server refuses the change if someone changed or disabled the rule after the
+command read it. In that case, check the rule with `cupboard oidc-trust show`
+and run the command again.
 
 `cupboard github check --fix` can extend a matched GitHub rule with missing
 grants. The preview lists the additional grants. The extension preserves the
