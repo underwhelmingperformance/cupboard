@@ -67,6 +67,7 @@ import {
 	CountingSemaphore,
 	mapWithConcurrency
 } from '@cupboard/shared/concurrency';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { DurableObject } from 'cloudflare:workers';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
@@ -147,7 +148,11 @@ import {
 } from '../observability/logging.ts';
 import { warnOfRefusal } from '../observability/refusal-log.ts';
 import { withInternalRequest } from '../observability/request-context.ts';
-import { annotateActiveSpan, withSpan } from '../observability/span.ts';
+import {
+	annotateActiveSpan,
+	recordHandledError,
+	withSpan
+} from '../observability/span.ts';
 import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import {
@@ -2854,6 +2859,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		try {
 			await this.maintenanceEligibility.reconcile(new Date(), change);
 		} catch (error) {
+			recordHandledError(error);
 			rootLogger().error('maintenance eligibility reconciliation failed', {
 				error
 			});
@@ -5224,15 +5230,13 @@ function withCommitSocketEvent(
 
 				if (event === 'error') {
 					span.setAttribute('error.type', 'Error');
+					span.setStatus({ code: SpanStatusCode.ERROR });
 				}
 
 				try {
 					await run();
 				} catch (error) {
-					span.setAttribute(
-						'error.type',
-						error instanceof Error ? error.name : 'Error'
-					);
+					// `withSpan` records the error on the span.
 					rootLogger().error('commit socket event failed', { event, error });
 					throw error;
 				} finally {

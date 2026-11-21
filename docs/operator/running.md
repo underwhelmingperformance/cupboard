@@ -98,6 +98,14 @@ Cloudflare kept the trace. A runtime without the native tracing APIs, such as an
 older `wrangler dev`, logs `Workers tracing is disabled` once per isolate and
 records no spans.
 
+A span whose operation throws, or whose request returns a 5xx response, records
+`error.type` and an error status; a thrown error also records an exception
+event. A failed maintenance reconciliation, which the tenant Durable Object
+handles, records an exception event on the active span without marking it
+failed. An exception event's message ends with up to five causes, and is
+redacted and truncated as log text is. Logs and spans keep the SQL text and the
+cause of a failed database statement, but not its bound parameters.
+
 [workers-traces]:
   https://developers.cloudflare.com/workers/observability/traces/
 

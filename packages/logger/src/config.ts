@@ -20,6 +20,7 @@ import { redactingSink } from './redaction.ts';
 import { serialiseLogProperties } from './serialisation.ts';
 import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 
+export { redactText } from './redaction.ts';
 export type { Logger, LogLevel, LogRecord, Sink } from '@logtape/logtape';
 export { getLogger, withContext } from '@logtape/logtape';
 
