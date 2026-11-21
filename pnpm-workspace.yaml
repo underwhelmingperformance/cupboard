@@ -51,7 +51,7 @@ catalog:
   '@orpc/zod': ^1.15.0
   '@sigstore/bundle': ^5.0.0
   '@sigstore/verify': ^4.0.0
-  '@types/node': ^25.9.1
+  '@types/node': ^26.0.0
   '@types/ws': ^8.18.1
   aws4fetch: ^1.0.20
   cloudflare: ^7.0.0
