@@ -111,6 +111,7 @@ import {
 } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
 import { errorFacts } from '../observability/refusal-log.ts';
+import { annotateActiveSpan } from '../observability/span.ts';
 import { isAudienceBound } from '../oidc/audience-binding.ts';
 import {
 	type SubjectBinding,
@@ -533,7 +534,7 @@ export class TokenExchangeService {
 		}
 
 		this.logUnpinnedGithubMatches(logger, currentRules, verified);
-		logger.debug('read access acquired', { resources: facts.length });
+		annotateActiveSpan({ 'cupboard.access.resources': facts.length });
 
 		return oauthJsonResponse({
 			access_token: token,

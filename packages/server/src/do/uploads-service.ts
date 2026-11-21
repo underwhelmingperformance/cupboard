@@ -68,6 +68,7 @@ import {
 	stagingObjectKey
 } from '../http/http.ts';
 import { rootLogger } from '../observability/logging.ts';
+import { annotateActiveSpan } from '../observability/span.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
@@ -666,10 +667,9 @@ export class UploadsService {
 				};
 			})
 		);
-		rootLogger().debug('upload planning finished', {
-			cache: scope,
-			cacheGeneration,
-			paths: uploads.length
+		annotateActiveSpan({
+			'cupboard.cache.generation': cacheGeneration,
+			'cupboard.upload.paths': uploads.length
 		});
 		return {
 			cacheGeneration,
@@ -1059,11 +1059,10 @@ export class UploadsService {
 				if (requiresUpload && Date.now() >= pushExpiry * 1000) {
 					throw new PublicationPushExpiredError();
 				}
-				rootLogger().debug('publication accepted', {
-					operationId: entry.operationId,
-					isReplay: original !== undefined,
-					recoveryDeadline: stored?.recoveryDeadline,
-					requiresUpload
+				annotateActiveSpan({
+					'cupboard.publication.is_replay': original !== undefined,
+					'cupboard.publication.recovery_deadline': stored?.recoveryDeadline,
+					'cupboard.publication.requires_upload': requiresUpload
 				});
 				return { cache, kind: requiresUpload ? 'needs-upload' : 'pending' };
 			}
