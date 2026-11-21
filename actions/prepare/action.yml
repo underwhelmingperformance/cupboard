@@ -89,6 +89,21 @@ inputs:
       runner that is set up for this job. Cannot be combined with store-ssh-key.
     required: false
     default: 'false'
+  flake-input-cache:
+    description:
+      When true, restore the GitHub Actions cache of flake input sources for the
+      checkout's flake.lock before Nix first evaluates anything, and use it as a
+      substituter for the evaluation of nix-config. At the end, add it to this
+      job's substituters unless store is set or Nix's effective builders setting
+      lists a machine. When there is no such cache, the plan action saves one
+      after it evaluates. The cache contains only the sources of github, tarball
+      and file entries of flake.lock on github.com that the job fetched and that
+      anonymous requests to github.com show to be public. It trusts every entry
+      in the default branch's flake.lock, including the entries that Nix copies
+      from the lock files of upstream flakes. Nix checks each source that it
+      takes from the cache against its content address and the lock's narHash.
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -184,6 +199,36 @@ runs:
           >> "${RUNNER_TEMP}/cupboard-prepare-nix.conf"
         echo "NIX_USER_CONF_FILES=${RUNNER_TEMP}/cupboard-prepare-nix.conf:${HOME}/.config/nix/nix.conf" >> "${GITHUB_ENV}"
 
+    # GITHUB_ENV receives only runner-owned values, which is the safe case
+    # documented by the github-env audit
+    # (https://docs.zizmor.sh/audits/#github-env).
+    - name: Locate the flake input cache
+      id: flake-input-cache
+      shell: bash
+      env:
+        FLAKE_INPUT_CACHE: ${{ inputs.flake-input-cache }}
+        LOCK_HASH: ${{ hashFiles('flake.lock') }}
+      run: | # zizmor: ignore[github-env]
+        bash "${GITHUB_ACTION_PATH}/flake-input-cache.sh" locate
+
+    - name: Restore the flake input cache
+      id: restore-flake-inputs
+      if: ${{ steps.flake-input-cache.outputs.key != '' }}
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/cupboard-flake-inputs
+        key: ${{ steps.flake-input-cache.outputs.key }}
+        # With store set, only the evaluation of nix-config reads the cache.
+        # Without nix-config, the plan action needs only cache-hit.
+        lookup-only: ${{ inputs.store != '' && inputs.nix-config == '' }}
+
+    - name: Record the restored flake input cache
+      if: ${{ steps.restore-flake-inputs.outputs.cache-hit == 'true' }}
+      shell: bash
+      run: | # zizmor: ignore[github-env]
+        bash "${GITHUB_ACTION_PATH}/flake-input-cache.sh" restored
+
     # Write the additional settings to a job-scoped file under RUNNER_TEMP and
     # put that file first in NIX_USER_CONF_FILES. The runner's configuration
     # remains unchanged, so a persistent runner cannot retain these settings for
@@ -197,10 +242,17 @@ runs:
         NIX_CONFIG_INSTALLABLE: ${{ inputs.nix-config }}
       run: | # zizmor: ignore[github-env]
         set -euo pipefail
+        # This evaluation builds nothing, so the restored flake input cache can
+        # be its substituter before the job's builders are known.
+        cache=()
+        if [ "${CUPBOARD_FLAKE_INPUT_CACHE_RESTORED:-}" = true ]; then
+          cache=(--option extra-substituters
+            "file://${CUPBOARD_FLAKE_INPUT_CACHE_DIRECTORY}?priority=10")
+        fi
         # `--raw` prints the evaluated string verbatim, so the trailing newline
         # must be supplied here or a later append would glue onto the last line.
         {
-          nix eval --raw "${NIX_CONFIG_INSTALLABLE}"
+          nix eval ${cache[@]+"${cache[@]}"} --raw "${NIX_CONFIG_INSTALLABLE}"
           printf '\n'
         } >> "${RUNNER_TEMP}/cupboard-prepare-nix.conf"
         echo "NIX_USER_CONF_FILES=${RUNNER_TEMP}/cupboard-prepare-nix.conf:${HOME}/.config/nix/nix.conf" >> "${GITHUB_ENV}"
@@ -235,3 +287,12 @@ runs:
     - name: Configure the remote build hook
       if: ${{ inputs.remote == 'true' }}
       uses: $/actions/prepare-builders
+
+    # Keep this step after every step that configures Nix, so it reads the
+    # job's final `builders` setting, including the caller's `nix-config`.
+    - name: Use the flake input cache
+      if: ${{ env.CUPBOARD_FLAKE_INPUT_CACHE_RESTORED == 'true' }}
+      shell: bash
+      env:
+        STORE: ${{ inputs.store }}
+      run: bash "${GITHUB_ACTION_PATH}/flake-input-cache.sh" use

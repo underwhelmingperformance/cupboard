@@ -21,6 +21,7 @@ import {
 import { registerAttestStatusCommand } from './commands/attest-status.ts';
 import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
+import { registerFlakeInputCacheCommand } from './commands/flake-input-cache.ts';
 import { registerPlanCommand } from './commands/plan.ts';
 import { registerPublicationSettingsCommand } from './commands/publication-settings.ts';
 import { registerPushCommand } from './commands/push.ts';
@@ -93,6 +94,7 @@ export function buildProgram(
 	registerBuildCommand(program, environment, signal);
 	registerBuildCohortCommand(program, environment, signal);
 	registerPlanCommand(program, environment, signal);
+	registerFlakeInputCacheCommand(program, environment, signal);
 	registerPublicationSettingsCommand(program, environment);
 
 	return program;
@@ -128,6 +130,7 @@ async function executeAction(
 		'build',
 		'build-cohort',
 		'plan',
+		'flake-input-cache',
 		'push'
 	].includes(argument[2] ?? '');
 	const controller = isSignalAwareCommand ? new AbortController() : undefined;

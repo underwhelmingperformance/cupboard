@@ -763,6 +763,7 @@ describe('SSH credential isolation', () => {
 				'ssh-key': '${{ secrets.input_ssh_key }}',
 				'input-known-hosts': '${{ inputs.input-known-hosts }}',
 				'nix-config': '${{ inputs.nix-config }}',
+				'flake-input-cache': '${{ inputs.flake-input-cache }}',
 				remote: "${{ inputs.builders != '' && inputs.store == '' }}",
 				builders: "${{ inputs.store == '' && inputs.builders || '' }}",
 				'builder-ssh-key':
@@ -779,6 +780,7 @@ describe('SSH credential isolation', () => {
 				'ssh-key': '${{ secrets.input_ssh_key }}',
 				'input-known-hosts': '${{ inputs.input-known-hosts }}',
 				'nix-config': '${{ inputs.nix-config }}',
+				'flake-input-cache': '${{ inputs.flake-input-cache }}',
 				'maximise-space':
 					"${{ inputs.maximise-space && toJSON(matrix.mayBuild) != 'false' }}",
 				remote: "${{ matrix.remote && inputs.store == '' }}",

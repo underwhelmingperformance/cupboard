@@ -2,11 +2,15 @@ import { fetch as undiciFetch, Headers, Response } from 'undici';
 import { describe, expect, it } from 'vitest';
 
 import {
+	probePublicObject,
 	PublicNarAccessError,
 	verifyPublicNarAccess
 } from './public-nar-access.ts';
 
 const archive = new URL('https://cache.example/nar/app.nar.xz');
+
+const failingFetch: typeof undiciFetch = () =>
+	Promise.reject(new TypeError('fetch failed'));
 
 describe('verifyPublicNarAccess', () => {
 	it.each([
@@ -214,6 +218,120 @@ describe('verifyPublicNarAccess', () => {
 			})
 		).rejects.toBe(reason);
 		expect(isCancelled).toBe(true);
+	});
+});
+
+describe('probePublicObject', () => {
+	const source = new URL('https://github.com/acme/app/archive/main.tar.gz');
+
+	it.each<{
+		name: string;
+		status: number;
+		headers?: Record<string, string>;
+		expected: string;
+	}>([
+		{ name: 'a successful response', status: 200, expected: 'public' },
+		{
+			name: 'a sign-in page',
+			status: 200,
+			headers: { 'content-type': 'text/html; charset=utf-8' },
+			expected: 'private'
+		},
+		{ name: 'a missing repository', status: 404, expected: 'private' },
+		{ name: 'a request for credentials', status: 401, expected: 'private' },
+		{ name: 'a blocked repository', status: 403, expected: 'private' },
+		{ name: 'a removed repository', status: 410, expected: 'private' },
+		{ name: 'a legal takedown', status: 451, expected: 'private' },
+		{
+			name: 'an exhausted rate limit',
+			status: 403,
+			headers: { 'x-ratelimit-remaining': '0' },
+			expected: 'unavailable'
+		},
+		{
+			name: 'a secondary rate limit',
+			status: 403,
+			headers: { 'retry-after': '60' },
+			expected: 'unavailable'
+		},
+		{ name: 'a rate limit', status: 429, expected: 'unavailable' },
+		{ name: 'a server error', status: 500, expected: 'unavailable' },
+		{ name: 'an unavailable service', status: 503, expected: 'unavailable' },
+		{ name: 'an unexpected client error', status: 418, expected: 'unavailable' }
+	])(
+		'reports $name as $expected',
+		async ({ status, headers = {}, expected }) => {
+			const requested: { url: string; authorization: string | undefined }[] =
+				[];
+			const fetcher: typeof undiciFetch = (input, init) => {
+				requested.push({
+					url: requestUrl(input).href,
+					authorization:
+						new Headers(init?.headers).get('authorization') ?? undefined
+				});
+
+				return Promise.resolve(
+					new Response(new Uint8Array([1]), { status, headers })
+				);
+			};
+
+			const access = await probePublicObject(source, {
+				fetch: fetcher,
+				signal: new AbortController().signal
+			});
+
+			expect({ access, requested }).toStrictEqual({
+				access: expected,
+				requested: [{ url: source.href, authorization: undefined }]
+			});
+		}
+	);
+
+	it('reports a redirect to a private address as private', async () => {
+		const requested: string[] = [];
+		const fetcher: typeof undiciFetch = (input) => {
+			requested.push(requestUrl(input).href);
+
+			return Promise.resolve(
+				new Response(undefined, {
+					status: 302,
+					headers: { location: 'http://10.0.0.1/archive.tar.gz' }
+				})
+			);
+		};
+
+		const access = await probePublicObject(source, {
+			fetch: fetcher,
+			signal: new AbortController().signal
+		});
+
+		expect({ access, requested }).toStrictEqual({
+			access: 'private',
+			requested: [source.href]
+		});
+	});
+
+	it('reports a failed request as unavailable', async () => {
+		await expect(
+			probePublicObject(source, {
+				fetch: failingFetch,
+				signal: new AbortController().signal
+			})
+		).resolves.toBe('unavailable');
+	});
+
+	it('rejects with the reason of an abort', async () => {
+		const controller = new AbortController();
+		const reason = new Error('job cancelled');
+		const fetcher: typeof undiciFetch = () => {
+			controller.abort(reason);
+
+			return Promise.reject(reason);
+		};
+
+		await expect(
+			probePublicObject(source, { fetch: fetcher, signal: controller.signal })
+		).rejects.toBe(reason);
 	});
 });
 
