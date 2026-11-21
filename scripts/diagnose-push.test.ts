@@ -896,6 +896,23 @@ describe('parseSpanEvent', () => {
 		).toStrictEqual(['request', 'own']);
 	});
 
+	it('reads the row counts that a span records', () => {
+		expect(
+			parseSpanEvent({
+				timestamp: 1,
+				$metadata: {
+					type: 'span',
+					traceId: 'trace',
+					spanId: 'span',
+					spanName: 'tenant-rpc',
+					startTime: 1,
+					endTime: 2
+				},
+				source: { cupboard: { cost: { rows_read: 4, rows_written: 1 } } }
+			})?.cost
+		).toStrictEqual({ rowsRead: 4, rowsWritten: 1 });
+	});
+
 	it('does not interpret a zero-duration R2 span without response attributes as success', () => {
 		expect(
 			parseSpanEvent({
@@ -1985,6 +2002,49 @@ describe('analyse', () => {
 		span('t3', 's7', undefined, 'POST', 0, 100),
 		span('t3', 's8', 's7', 'r2_put', 0, 30)
 	];
+
+	it('adds the row counts that spans record to their operation', () => {
+		const analysis = analyse('cupboard-tenant', window, [], traces, [
+			span('t1', 's0', undefined, 'PUT', 0, 400),
+			{
+				...span('t1', 's1', 's0', 'cupboard.request', 0, 400),
+				cost: { rowsRead: 7, rowsWritten: 3 }
+			},
+			{
+				...span('t3', 's7', undefined, 'POST', 0, 100),
+				cost: { rowsRead: 2, rowsWritten: 0 }
+			},
+			{
+				...span('unlisted', 's10', undefined, 'tenant-rpc', 0, 10),
+				cost: { rowsRead: 1, rowsWritten: 1 }
+			}
+		]);
+
+		expect({
+			operations: analysis.groups
+				.flatMap((group) => group.operations)
+				.map(({ bucket, rowsRead, rowsWritten }) => ({
+					bucket,
+					rowsRead,
+					rowsWritten
+				}))
+				.toSorted((left, right) => left.bucket.localeCompare(right.bucket)),
+			totals: {
+				rowsRead: analysis.totals.rowsRead,
+				rowsWritten: analysis.totals.rowsWritten
+			}
+		}).toStrictEqual({
+			operations: [
+				{ bucket: 'POST /cache/:cache/uploads', rowsRead: 2, rowsWritten: 0 },
+				{
+					bucket: 'PUT /cache/:cache/uploads/:id',
+					rowsRead: 7,
+					rowsWritten: 3
+				}
+			],
+			totals: { rowsRead: 10, rowsWritten: 4 }
+		});
+	});
 
 	it('rolls traces, logs and spans up by operation, busiest first', () => {
 		const analysis = analyse('cupboard-tenant', window, logs, traces, spans);

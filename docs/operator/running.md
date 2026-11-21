@@ -190,6 +190,22 @@ leaves no record of its own, so lowering
 `observability.traces.head_sampling_rate` below the logs' rate loses those
 requests from the diagnostic report.
 
+Each request, RPC, maintenance pass and queue message that used billed storage
+records it as `cupboard.cost.*` attributes on its span, such as
+`cupboard.cost.rows_read`, `cupboard.cost.d1_calls` and `cupboard.cost.r2_get`.
+Every request also records its matched route as `http.route`. A maintenance pass
+runs in a `maintenance-pass` span with `cupboard.maintenance.pass`, a queue
+message in a `maintenance-queue-message` span with `cupboard.maintenance.job`
+and `cupboard.tenant`, and a tenant's initialisation and its
+maintenance-eligibility drain in `initialise` and
+`maintenance-eligibility-reconcile` spans. An RPC that no narrower span covers
+records its cost on the invocation's root span. When no recording span can take
+a cost, such as a scope that outlives its invocation, the Worker logs it
+instead, as `method finished` at info level or `request finished` at debug
+level. Costs on spans are sampled with the trace, so lowering the trace sampling
+rate also lowers the totals. The diagnostic report sums the rows read and
+written from these attributes and logs.
+
 Responses receive their request ID after cache lookup. Cached responses exclude
 request IDs, trace context, client correlation headers and their `Vary` tokens.
 A cache hit therefore receives a new request ID.

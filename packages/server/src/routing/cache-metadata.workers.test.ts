@@ -67,10 +67,12 @@ const probeSpans = vi.hoisted(() => {
 });
 
 vi.mock('../observability/span.ts', async (importOriginal) => {
-	const { withSpan } =
+	const original =
 		await importOriginal<typeof import('../observability/span.ts')>();
+	const { withSpan } = original;
 
 	return {
+		...original,
 		withSpan: (
 			name: string,
 			attributes: SpanAttributes,

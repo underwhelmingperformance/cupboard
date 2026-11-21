@@ -13,6 +13,23 @@ function definedAttributes(attributes: SpanAttributes): Attributes {
 }
 
 /**
+Whether the active span records attributes. None does outside an invocation,
+in an event whose span the runtime does not expose, after the span has ended,
+or where tracing is unavailable.
+*/
+export function isActiveSpanRecording(): boolean {
+	return trace.getActiveSpan()?.isRecording() === true;
+}
+
+/**
+Sets `attributes` on the active span, which is the invocation's root span
+outside any span that the Worker opens. Undefined attributes are omitted.
+*/
+export function annotateActiveSpan(attributes: SpanAttributes): void {
+	trace.getActiveSpan()?.setAttributes(definedAttributes(attributes));
+}
+
+/**
 Runs `body` inside a span beneath the active span, and ends the span when
 `body` settles. Undefined attributes are omitted. The callback runs
 synchronously, and still runs when no tracer provider is registered.

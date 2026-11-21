@@ -58,7 +58,7 @@ import {
 import { parseRequestBody } from '../http/parse.ts';
 import {
 	loggerMiddleware,
-	logMethodFinished,
+	recordMethodCost,
 	requestCostMiddleware,
 	rootLogger
 } from '../observability/logging.ts';
@@ -734,7 +734,7 @@ export function controlWorker(clock: DeadlineClock = systemClock) {
 						'cron-enqueue',
 						() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
 						(cost) => {
-							logMethodFinished(
+							recordMethodCost(
 								rootLogger().with({ method: 'cron-enqueue' }),
 								cost
 							);
