@@ -1,13 +1,14 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { contentAddressedStorePath } from '@cupboard/nix-store/content-address';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	narInfoGenerationSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, storePathHashOf } from '@cupboard/nix-store/store-path';
 import { cacheListResponseSchema } from '@cupboard/protocol/caches';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
@@ -132,6 +133,29 @@ import { type VerificationService } from './verification-service.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
 
 const env = Object.assign({}, tenantEnv, testControlEnv);
+
+// The negotiation fields of a path named `source` without references. `ca`
+// produces its store path, as for a flake input's source.
+function contentAddressedFields(ca: string) {
+	const storePath = contentAddressedStorePath({
+		storeDirectory: '/nix/store',
+		name: 'source',
+		contentAddress: ca,
+		references: [],
+		hasSelfReference: false
+	});
+
+	if (storePath === undefined) {
+		throw new Error(`Nix computes no store path for ${ca}`);
+	}
+
+	return {
+		storePathHash: storePathHashSchema.parse(storePathHashOf(storePath)),
+		storePath,
+		references: [],
+		ca
+	};
+}
 
 function byUploadId(
 	left: { readonly uploadId: string },
@@ -3449,6 +3473,16 @@ describe('upload flow', () => {
 				references: ['/nix/store/11111111111111111111111111111111-first']
 			},
 			issues: [{ code: 'invalid_format', path: ['paths', 0, 'references', 0] }]
+		},
+		{
+			name: 'a content address that does not produce the store path',
+			fields: { ca: `fixed:r:${narHash}` },
+			issues: [{ code: 'custom', path: ['paths', 0, 'ca'] }]
+		},
+		{
+			name: 'a NAR content address whose hash is not the NAR hash',
+			fields: contentAddressedFields(`fixed:r:${fileHash.toString()}`),
+			issues: [{ code: 'custom', path: ['paths', 0, 'ca'] }]
 		}
 	])('rejects upload negotiation with $name', async ({ fields, issues }) => {
 		const token = await initialise();
@@ -3488,6 +3522,33 @@ describe('upload flow', () => {
 			narBlobs: 0,
 			pendingUploads: 0,
 			totalFileSize: 0
+		});
+	});
+
+	it('publishes a path whose content address produces its store path', async () => {
+		const token = await initialise();
+		const fields = contentAddressedFields(`fixed:r:${narHash}`);
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: fields.storePathHash,
+			name: 'source',
+			references: fields.references,
+			ca: fields.ca
+		});
+
+		await pushPath(token, metadata);
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+
+		expect({
+			storePath: narInfo.storePath.value,
+			narHash: narInfo.narHash.toString(),
+			references: narInfo.references,
+			ca: narInfo.ca
+		}).toStrictEqual({
+			storePath: fields.storePath,
+			narHash,
+			references: [],
+			ca: fields.ca
 		});
 	});
 

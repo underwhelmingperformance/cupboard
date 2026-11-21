@@ -1,4 +1,7 @@
-import { isContentAddress } from '@cupboard/nix-store/content-address';
+import {
+	contentAddressAgreement,
+	isContentAddress
+} from '@cupboard/nix-store/content-address';
 import {
 	cacheGenerationSchema,
 	cacheScopeSchema,
@@ -44,6 +47,42 @@ const uploadContentAddressSchema = narInfoLineSchema.refine(
 	(value) => value === '' || isContentAddress(value)
 );
 
+interface ContentAddressFields {
+	readonly storePath: string;
+	readonly references: readonly string[];
+	readonly narHash: string;
+	readonly ca?: string | undefined;
+}
+
+const contentAddressMismatchMessages = {
+	'store-path-differs': 'ca and references do not produce storePath',
+	'nar-hash-differs':
+		'ca is a NAR SHA-256 address with a hash other than narHash'
+} as const;
+
+// A refinement of the field does not stop zod from running the refinements of
+// the object, so this skips a `ca` that the field check has already refused.
+function checkContentAddress(
+	value: ContentAddressFields,
+	context: z.RefinementCtx
+): void {
+	if (value.ca === undefined || !isContentAddress(value.ca)) {
+		return;
+	}
+
+	const agreement = contentAddressAgreement({ ...value, ca: value.ca });
+
+	if (agreement === 'agrees') {
+		return;
+	}
+
+	context.addIssue({
+		code: 'custom',
+		message: contentAddressMismatchMessages[agreement],
+		path: ['ca']
+	});
+}
+
 const uploadPathNegotiationShape = {
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema,
@@ -65,11 +104,16 @@ const uploadBlobMetadataShape = {
 	compression: compressionSchema
 };
 
+// Nix accepts a narinfo without a trusted signature when its `CA` produces its
+// store path, and refuses the NAR if it does not match the address. Each new
+// upload must therefore agree with its `ca`. The stored-row schemas below do
+// not apply these checks.
 export const uploadPathNegotiationSchema = z
 	.strictObject(uploadPathNegotiationShape)
 	.refine(isStorePathHashForPath, storePathHashMismatchMessage)
 	.refine(hasPairedBuildInputs, pairedBuildInputsMessage)
-	.refine(hasStorableEdges, storableEdgesMessage);
+	.refine(hasStorableEdges, storableEdgesMessage)
+	.superRefine(checkContentAddress);
 export type UploadPathNegotiation = z.output<
 	typeof uploadPathNegotiationSchema
 >;
@@ -84,13 +128,14 @@ export const uploadPathMetadataSchema = z
 	})
 	.refine(isStorePathHashForPath, storePathHashMismatchMessage)
 	.refine(hasPairedBuildInputs, pairedBuildInputsMessage)
-	.refine(hasStorableEdges, storableEdgesMessage);
+	.refine(hasStorableEdges, storableEdgesMessage)
+	.superRefine(checkContentAddress);
 export type UploadPathMetadata = z.output<typeof uploadPathMetadataSchema>;
 
 // The server parses the metadata of an upload row with these schemas. A row
-// can have been written before `ca` had to be a content address, so they check
-// `ca` as a narinfo line only. A stricter check would make every later read of
-// such a row fail.
+// can have been written before `ca` had to be a content address that agrees
+// with the path, so they check `ca` as a narinfo line only. A stricter check
+// would make every later read of such a row fail.
 const storedUploadPathNegotiationShape = {
 	...uploadPathNegotiationShape,
 	ca: narInfoLineSchema.optional()
