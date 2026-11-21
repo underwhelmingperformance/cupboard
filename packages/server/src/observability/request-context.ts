@@ -1,4 +1,5 @@
 import { withContext } from '@cupboard/logger';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 
 import { requestCorrelation } from './correlation.ts';
@@ -68,14 +69,12 @@ export function withInternalRequest(
 
 				if (response.status >= serverErrorStatus) {
 					span.setAttribute('error.type', String(response.status));
+					span.setStatus({ code: SpanStatusCode.ERROR });
 				}
 
 				return response;
 			} catch (error) {
-				span.setAttribute(
-					'error.type',
-					error instanceof Error ? error.name : 'Error'
-				);
+				// `withSpan` records the error on the span.
 				requestLogger(request).error('request failed', {
 					elapsedMs: performance.now() - started,
 					error

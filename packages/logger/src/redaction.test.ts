@@ -472,6 +472,28 @@ describe('log redaction', () => {
 		}
 	);
 
+	it('keeps a failed query statement without its bound parameters', () => {
+		const cause = new Error('D1_ERROR: D1 DB is overloaded.');
+		const error = Object.assign(
+			new Error('Failed query: select ? from cache\nparams: acme,secret-path', {
+				cause
+			}),
+			{ query: 'select ? from cache', params: ['acme', 'secret-path'] }
+		);
+
+		const properties = serialiseLogProperties({ error });
+
+		expect({
+			message: properties.errorMessage,
+			cause: properties.errorCause,
+			hasParameters: JSON.stringify(properties).includes('secret-path')
+		}).toStrictEqual({
+			message: 'Failed query: select ? from cache',
+			cause: 'Error: D1_ERROR: D1 DB is overloaded.',
+			hasParameters: false
+		});
+	});
+
 	it('keeps Error details when an SDK supplies a custom JSON representation', () => {
 		const error = Object.assign(new Error('fetch failed'), {
 			code: 'ECONNRESET',

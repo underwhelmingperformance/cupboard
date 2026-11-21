@@ -1,3 +1,4 @@
+import { isQueryError, telemetryErrorText } from '@cupboard/shared/errors';
 import { configure } from 'safe-stable-stringify';
 
 import { prioritiseProperties, redactLogProperties } from './redaction.ts';
@@ -124,14 +125,17 @@ function projectError(
 		return existing;
 	}
 
+	const { message, stack } = telemetryErrorText(error);
 	const result: Record<string, unknown> = {
 		name: error.name,
-		message: error.message,
-		stack: error.stack,
+		message,
+		stack,
 		cause: error.cause,
 		...(error instanceof AggregateError && { errors: error.errors })
 	};
 	projections.set(error, result);
+	// A failed statement's bound parameters stay out of the log.
+	const omittedKeys = new Set(isQueryError(error) ? ['params'] : []);
 
 	const diagnosticKeys = [
 		'code',
@@ -150,7 +154,9 @@ function projectError(
 			...diagnosticKeys.filter((key) => Reflect.has(error, key)),
 			...Object.keys(error)
 		])
-	].slice(0, 64 - Object.keys(result).length);
+	]
+		.filter((key) => !omittedKeys.has(key))
+		.slice(0, 64 - Object.keys(result).length);
 
 	for (const key of keys) {
 		if (!Object.hasOwn(result, key)) {

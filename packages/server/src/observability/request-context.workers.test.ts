@@ -1,3 +1,4 @@
+import { SpanStatusCode } from '@opentelemetry/api';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
@@ -95,15 +96,21 @@ describe('public request correlation', () => {
 		expect(
 			finishedSpans()
 				.filter((span) => span.name === 'cupboard.request')
-				.map((span) => span.attributes)
+				.map((span) => ({
+					attributes: span.attributes,
+					status: span.status.code
+				}))
 		).toStrictEqual([
 			{
-				'cupboard.request_id': response.headers.get('x-request-id'),
-				'cloudflare.ray_id': 'ray',
-				'http.request.method': 'GET',
-				'url.path': '/t/acme/nix-cache-info',
-				'http.response.status_code': StatusCodes.SERVICE_UNAVAILABLE,
-				'error.type': String(StatusCodes.SERVICE_UNAVAILABLE)
+				attributes: {
+					'cupboard.request_id': response.headers.get('x-request-id'),
+					'cloudflare.ray_id': 'ray',
+					'http.request.method': 'GET',
+					'url.path': '/t/acme/nix-cache-info',
+					'http.response.status_code': StatusCodes.SERVICE_UNAVAILABLE,
+					'error.type': String(StatusCodes.SERVICE_UNAVAILABLE)
+				},
+				status: SpanStatusCode.ERROR
 			}
 		]);
 	});

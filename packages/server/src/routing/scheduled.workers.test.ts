@@ -3,6 +3,7 @@ import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { currentLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { env as tenantEnv } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -13,6 +14,11 @@ import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { noCost } from '../do/operation-cost.test-support.ts';
 import { passThrough } from '../do/pass-through.ts';
+import { withSpan } from '../observability/span.ts';
+import {
+	finishedSpans,
+	recordSpans
+} from '../observability/span-recorder.test-support.ts';
 import {
 	flakyD1,
 	offboardTenant,
@@ -626,19 +632,31 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('retries a tenant-verify message whose pass fails', async () => {
-		const decision = await executeMaintenanceQueueMessage(
-			rootLogger(),
-			env,
-			new NarReadBufferPool(),
-			{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
-			{ verifyTenant: () => Promise.reject(new Error('verify failed')) }
+	it('retries a tenant-verify message whose pass fails and fails its span', async () => {
+		recordSpans();
+		const decision = await withSpan('message', {}, () =>
+			executeMaintenanceQueueMessage(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
+				{ verifyTenant: () => Promise.reject(new RangeError('verify failed')) }
+			)
 		);
 
-		expect(decision).toStrictEqual({
-			action: 'retry',
-			delaySeconds: 60,
-			reason: 'Error: verify failed'
+		const span = finishedSpans().find(({ name }) => name === 'message');
+		expect({
+			decision,
+			status: span?.status.code,
+			errorType: span?.attributes['error.type']
+		}).toStrictEqual({
+			decision: {
+				action: 'retry',
+				delaySeconds: 60,
+				reason: 'RangeError: verify failed'
+			},
+			status: SpanStatusCode.ERROR,
+			errorType: 'RangeError'
 		});
 	});
 

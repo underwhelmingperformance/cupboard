@@ -97,3 +97,39 @@ export function formatErrorWithCauses(error: unknown): string {
 		'\n'
 	);
 }
+
+interface QueryError extends Error {
+	readonly query: string;
+	readonly params: unknown[];
+}
+
+/**
+Whether `error` is the error that Drizzle throws for a failed statement. Its
+message ends with every bound parameter, which can hold tenant data and run to
+kilobytes. Its cause is the driver's error.
+*/
+export function isQueryError(error: Error): error is QueryError {
+	return (
+		'query' in error &&
+		typeof error.query === 'string' &&
+		'params' in error &&
+		Array.isArray(error.params)
+	);
+}
+
+/**
+Returns the message and stack of `error` for telemetry. A failed Drizzle
+statement keeps its SQL text and drops its bound parameters.
+*/
+export function telemetryErrorText(error: Error): {
+	readonly message: string;
+	readonly stack: string | undefined;
+} {
+	if (!isQueryError(error)) {
+		return { message: error.message, stack: error.stack };
+	}
+
+	const message = `Failed query: ${error.query}`;
+
+	return { message, stack: error.stack?.replace(error.message, () => message) };
+}

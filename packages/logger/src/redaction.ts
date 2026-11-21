@@ -126,7 +126,7 @@ function cutText(text: string, length: number): string {
 /**
 Redacts credentials in one string and truncates it to `maximumTextLength`.
 */
-function redactText(text: string): string {
+export function redactText(text: string): string {
 	let result = cutText(text, scannedTextLength);
 	const isCut = result.length < text.length;
 
