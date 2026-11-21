@@ -1,7 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import type { Span } from '@opentelemetry/api';
 
-import type { withSpan } from '../observability/span.ts';
+import { withSpan } from '../observability/span.ts';
 
 import {
 	currentDeadlineSignal,
@@ -25,7 +25,7 @@ class ObservedSection {
 		private readonly budgetMs: number
 	) {}
 
-	recordOverBudget(span: Span | undefined): void {
+	recordOverBudget(span: Span): void {
 		if (this.isRecorded) {
 			return;
 		}
@@ -35,13 +35,10 @@ class ObservedSection {
 		const elapsedMs = now - this.enteredAt;
 		const pendingSubrequests = this.subrequests.snapshot(now);
 
-		span?.setAttribute('overBudget', true);
-		span?.setAttribute('budgetMs', this.budgetMs);
-		span?.setAttribute('elapsedMs', elapsedMs);
-		span?.setAttribute(
-			'pendingSubrequests',
-			JSON.stringify(pendingSubrequests)
-		);
+		span.setAttribute('overBudget', true);
+		span.setAttribute('budgetMs', this.budgetMs);
+		span.setAttribute('elapsedMs', elapsedMs);
+		span.setAttribute('pendingSubrequests', JSON.stringify(pendingSubrequests));
 		rootLogger().warn('critical section over budget', {
 			label: this.label,
 			budgetMs: this.budgetMs,
@@ -49,16 +46,6 @@ class ObservedSection {
 			pendingSubrequests
 		});
 	}
-}
-
-export interface CriticalSectionObservation {
-	readonly budgetMs: number;
-	/**
-	Opens the section's span. The Durable Object supplies it, because this
-	module also loads in Node tests, where `cloudflare:workers` is not
-	available. Without it, the section has no span.
-	*/
-	readonly withSpan: typeof withSpan | undefined;
 }
 
 /**
@@ -84,16 +71,15 @@ budget writes no log record.
 */
 export function observeCriticalSection<T>(
 	body: () => Promise<T>,
-	observation: CriticalSectionObservation
+	budgetMs: number
 ): Promise<T> {
-	const { budgetMs } = observation;
 	const enclosingMs = remainingDeadlineMs();
 	const hasOwnBudget = enclosingMs === undefined || enclosingMs > budgetMs;
 	const section = new ObservedSection(
 		currentOperationCost()?.label ?? 'unscoped',
 		budgetMs
 	);
-	const run = (span?: Span): Promise<T> => {
+	const run = (span: Span): Promise<T> => {
 		const recordOverBudget = (): void => {
 			section.recordOverBudget(span);
 		};
@@ -115,13 +101,5 @@ export function observeCriticalSection<T>(
 		});
 	};
 
-	if (observation.withSpan === undefined) {
-		return run();
-	}
-
-	return observation.withSpan(
-		'critical-section',
-		{ label: section.label },
-		run
-	);
+	return withSpan('critical-section', { label: section.label }, run);
 }
