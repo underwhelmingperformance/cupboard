@@ -35,15 +35,15 @@
 		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@types/make-fetch-happen": "^10.0.4",
+		"@types/make-fetch-happen": "10.0.4",
 		"@types/node": "catalog:",
-		"@types/proper-lockfile": "^4.1.4",
+		"@types/proper-lockfile": "4.1.4",
 		"@types/ws": "catalog:",
 		"esbuild": "catalog:",
 		"miniflare": "catalog:",
-		"msw": "^3.0.2",
+		"msw": "3.0.2",
 		"typescript": "catalog:",
-		"undici": "^8.12.2",
+		"undici": "8.12.3",
 		"vitest": "catalog:"
 	},
 	"engines": {
