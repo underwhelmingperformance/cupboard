@@ -63,7 +63,6 @@ import {
 	rootLogger
 } from '../observability/logging.ts';
 import { withPublicRequest } from '../observability/request-context.ts';
-import { withSpan } from '../observability/span.ts';
 import { canUseLoopbackHttp } from '../oidc/issuer-policy.ts';
 import { readRequestBudgetMs } from '../policy/streaming.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
@@ -718,11 +717,7 @@ export function controlWorker(clock: DeadlineClock = systemClock) {
 					(internal) =>
 						withSubrequestSlice(
 							() =>
-								app.fetch(
-									internal,
-									boundedWorkerEnv(env, withSpan, clock.delay),
-									ctx
-								),
+								app.fetch(internal, boundedWorkerEnv(env, clock.delay), ctx),
 							{
 								subrequests: subrequestsPerInvocation(env)
 							}
@@ -737,7 +732,7 @@ export function controlWorker(clock: DeadlineClock = systemClock) {
 				() =>
 					withOperationCost(
 						'cron-enqueue',
-						() => enqueueMaintenanceJobs(boundedWorkerEnv(env, withSpan)),
+						() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
 						(cost) => {
 							logMethodFinished(
 								rootLogger().with({ method: 'cron-enqueue' }),
@@ -752,11 +747,7 @@ export function controlWorker(clock: DeadlineClock = systemClock) {
 		async queue(batch, env) {
 			await withSubrequestSlice(
 				() =>
-					handleMaintenanceQueue(
-						batch,
-						boundedWorkerEnv(env, withSpan),
-						narReadBuffers
-					),
+					handleMaintenanceQueue(batch, boundedWorkerEnv(env), narReadBuffers),
 				{ subrequests: subrequestsPerInvocation(env) }
 			);
 		}

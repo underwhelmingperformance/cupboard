@@ -53,7 +53,6 @@ import {
 	WorkersCachePurgeError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
-import type { withSpan } from '../observability/span.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
@@ -176,7 +175,6 @@ export type MaterialiseOutcome =
 export class ServerContext {
 	private presigner: R2Presigner | undefined;
 	private credentialIssuer: PushCredentialIssuer | undefined;
-	private readonly enterSpan: typeof withSpan | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
 	// One gate per object, so every service uses the same reading of the schema
@@ -202,13 +200,8 @@ export class ServerContext {
 	readonly objectWrites = new ObjectWriteOrder();
 	readonly narInfoDemotions = new NarInfoDemotionWatches();
 
-	constructor(
-		ctx: DurableObjectState,
-		env: RuntimeEnv,
-		enterSpan?: typeof withSpan
-	) {
+	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
-		this.enterSpan = enterSpan;
 		// Bound all storage subrequests before a service can use them. Otherwise a
 		// stalled request inside the input gate can force the runtime to reset the
 		// Durable Object after about 30 seconds.
@@ -216,7 +209,7 @@ export class ServerContext {
 		// These wrappers reach only the bindings this object holds. Worker code
 		// reaches D1 and R2 through `boundedWorkerEnv`, which also counts their
 		// terminal calls. The row meter applies only to Durable Object storage.
-		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS, enterSpan) };
+		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
 		});
@@ -245,10 +238,7 @@ export class ServerContext {
 				try {
 					return {
 						ok: true,
-						value: await observeCriticalSection(run, {
-							budgetMs: this.gateBudgetMs,
-							withSpan: this.enterSpan
-						})
+						value: await observeCriticalSection(run, this.gateBudgetMs)
 					};
 				} catch (error) {
 					return { ok: false, error };
