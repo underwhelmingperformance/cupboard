@@ -112,7 +112,7 @@ import {
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
 import { recordMethodCost } from '../observability/logging.ts';
-import { withSpan } from '../observability/span.ts';
+import { recordActiveSpanError, withSpan } from '../observability/span.ts';
 import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
@@ -636,6 +636,9 @@ export async function executeMaintenanceQueueMessage(
 			kind: message.kind,
 			error
 		});
+		// The message is retried rather than failing the batch, so its span
+		// records the failure.
+		recordActiveSpanError(error);
 		return {
 			action: 'retry',
 			delaySeconds: queueRetryDelaySeconds,
