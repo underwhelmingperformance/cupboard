@@ -182,6 +182,14 @@ currently support explicit span links, so client parent identifiers are recorded
 as attributes. Cloudflare's account-level incoming trace-context acceptance must
 remain disabled. Forward to origin is not needed for Worker bindings.
 
+Each request runs in a `cupboard.request` span with the request ID, Ray ID,
+method, path and response status; its duration is the request's elapsed time.
+The span is the only per-request record: the Workers log a request only when it
+fails, with `request failed`. A request that Workers tracing does not sample
+leaves no record of its own, so lowering
+`observability.traces.head_sampling_rate` below the logs' rate loses those
+requests from the diagnostic report.
+
 Responses receive their request ID after cache lookup. Cached responses exclude
 request IDs, trace context, client correlation headers and their `Vary` tokens.
 A cache hit therefore receives a new request ID.
