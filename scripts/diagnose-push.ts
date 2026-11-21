@@ -296,7 +296,20 @@ export interface StorageReadEvent {
 	readonly attempt?: number;
 	readonly attempts?: number;
 	readonly elapsedMs?: number;
+	/**
+	The transient error code that an `R2 get retrying` record retries.
+	*/
+	readonly code?: number;
+	readonly delayMs?: number;
 }
+
+/**
+The logs whose content an `r2-get` span also records.
+*/
+const spanOutcomeLogs: ReadonlySet<string> = new Set([
+	'R2 get returned',
+	'R2 get failed'
+]);
 
 const storageReadSchema = z.object({
 	storageOperationId: z.string().max(128),
@@ -305,12 +318,120 @@ const storageReadSchema = z.object({
 	disposition: z.string().max(64).optional(),
 	attempt: z.number().int().nonnegative().optional(),
 	attempts: z.number().int().nonnegative().optional(),
-	elapsedMs: z.number().nonnegative().optional()
+	elapsedMs: z.number().nonnegative().optional(),
+	code: z.number().int().optional(),
+	delayMs: z.number().nonnegative().optional()
 });
+
+const storageReadSpanSchema = z.object({
+	'cupboard.storage.operation_id': z.string().max(128),
+	'cupboard.storage.object_key': z.string().max(1024).optional(),
+	'cupboard.storage.outcome': z.string().max(64).optional(),
+	'cupboard.storage.attempts': z.number().int().nonnegative().optional()
+});
+
+/**
+Reads an `r2-get` span as a storage read event. The span replaced the
+`R2 get started`, `R2 get attempt started` and `R2 get returned` logs; older
+telemetry still contains those logs, which {@link parseStorageReadEvent}
+reads.
+*/
+function parseStorageReadSpan(event: unknown): StorageReadEvent | undefined {
+	const parsed = spanSchema.safeParse(event);
+
+	if (
+		!parsed.success ||
+		parsed.data.$metadata.type !== 'span' ||
+		parsed.data.$metadata.spanName !== 'r2-get'
+	) {
+		return undefined;
+	}
+
+	const source = structuredSource.safeParse(parsed.data.source).data ?? {};
+	const fields = storageReadSpanSchema.safeParse(
+		Object.fromEntries(
+			Object.keys(storageReadSpanSchema.shape).map((key) => [
+				key,
+				probeSourceValue(source, key)
+			])
+		)
+	);
+
+	if (!fields.success) {
+		return undefined;
+	}
+
+	const meta = parsed.data.$metadata;
+	const startMs = meta.startTime ?? parsed.data.timestamp;
+	const objectKey = fields.data['cupboard.storage.object_key'];
+	const disposition = fields.data['cupboard.storage.outcome'];
+	const attempts = fields.data['cupboard.storage.attempts'];
+
+	return {
+		timestamp: parsed.data.timestamp,
+		storageOperationId: fields.data['cupboard.storage.operation_id'],
+		message: 'r2-get',
+		...(meta.traceId !== undefined && { traceId: meta.traceId }),
+		...(objectKey !== undefined && { objectKey }),
+		...(disposition !== undefined && { disposition }),
+		...(attempts !== undefined && { attempts }),
+		...(meta.endTime !== undefined && {
+			elapsedMs: Math.max(0, meta.endTime - startMs)
+		})
+	};
+}
+
+/**
+Fills the request ID of each storage read that lacks one from the
+`cupboard.request` span in the same trace. An `r2-get` span carries no request
+ID of its own.
+*/
+export function withRequestIds(
+	reads: readonly StorageReadEvent[],
+	events: readonly unknown[]
+): StorageReadEvent[] {
+	const requestIds = new Map<string, string>();
+
+	for (const event of events) {
+		const parsed = spanSchema.safeParse(event);
+
+		if (
+			!parsed.success ||
+			parsed.data.$metadata.spanName !== 'cupboard.request' ||
+			parsed.data.$metadata.traceId === undefined
+		) {
+			continue;
+		}
+
+		const source = structuredSource.safeParse(parsed.data.source).data ?? {};
+		const requestId = z
+			.string()
+			.safeParse(probeSourceValue(source, 'cupboard.request_id')).data;
+
+		if (requestId !== undefined) {
+			requestIds.set(parsed.data.$metadata.traceId, requestId);
+		}
+	}
+
+	return reads.map((read) => {
+		const requestId =
+			read.traceId === undefined ? undefined : requestIds.get(read.traceId);
+
+		return requestId === undefined || read.requestId !== undefined
+			? read
+			: { ...read, requestId };
+	});
+}
 
 export function parseStorageReadEvent(
 	event: unknown
 ): StorageReadEvent | undefined {
+	const span = parseStorageReadSpan(event);
+
+	if (span !== undefined) {
+		return span;
+	}
+
 	const parsed = eventSchema.safeParse(event);
 	if (!parsed.success || typeof parsed.data.source !== 'object') {
 		return undefined;
@@ -1421,6 +1542,24 @@ export function groupOperations(
 			)
 		}))
 		.toSorted((a, b) => b.tracedServerMs - a.tracedServerMs);
+}
+
+/**
+Describes a storage read record: a retry by its attempt, error code and
+delay, and any other record by its outcome and attempt count.
+*/
+function formatStorageReadOutcome(event: StorageReadEvent): string {
+	if (event.attempt !== undefined) {
+		return [
+			`attempt ${String(event.attempt)}`,
+			event.code === undefined ? 'unknown code' : `code ${String(event.code)}`,
+			event.delayMs === undefined
+				? 'unknown delay'
+				: `retry after ${formatMs(event.delayMs)}`
+		].join(' · ');
+	}
+
+	return `${event.disposition ?? 'unknown'} · ${event.attempts === undefined ? 'unknown attempts' : `${String(event.attempts)} attempts`}`;
 }
 
 function formatMs(ms: number): string {
@@ -3091,19 +3230,31 @@ function renderDiagnosticAttachments(
 	}
 	const storageReads = analysis.storageReads;
 	if (storageReads !== undefined && storageReads.length > 0) {
+		// An `r2-get` span records its read's outcome, so a read that has one
+		// drops the logs that repeat that outcome. Retries and late completions
+		// are only in the logs.
+		const spanReads = new Set(
+			storageReads
+				.filter((event) => event.message === 'r2-get')
+				.map((event) => event.storageOperationId)
+		);
 		ui.note(
 			'R2 get lifecycle',
 			storageReads
 				.filter(
 					(event) =>
 						event.message !== 'R2 get attempt started' &&
-						event.message !== 'R2 get started'
+						event.message !== 'R2 get started' &&
+						!(
+							spanOutcomeLogs.has(event.message) &&
+							spanReads.has(event.storageOperationId)
+						)
 				)
 				.toSorted((left, right) => left.timestamp - right.timestamp)
 				.slice(-slowestCount)
 				.map((event) => ({
 					label: `${event.storageOperationId} · ${event.message}`,
-					value: `${event.disposition ?? 'unknown'} · ${event.attempts === undefined ? 'unknown attempts' : `${String(event.attempts)} attempts`} · request ${event.requestId ?? 'unknown'} · trace ${event.traceId ?? 'unknown'}`
+					value: `${formatStorageReadOutcome(event)} · request ${event.requestId ?? 'unknown'} · trace ${event.traceId ?? 'unknown'}`
 				}))
 		);
 	}
@@ -3247,9 +3398,12 @@ async function main(): Promise<void> {
 				retrieval: 'identifier-filtered'
 			})
 		},
-		storageReads: rawEvents
-			.map((event) => parseStorageReadEvent(event))
-			.filter((event) => event !== undefined),
+		storageReads: withRequestIds(
+			rawEvents
+				.map((event) => parseStorageReadEvent(event))
+				.filter((event) => event !== undefined),
+			rawEvents
+		),
 		...(clientLogs !== undefined && {
 			clientDiagnostics: analyseClientLogs(clientLogs, [
 				...fetchedTelemetry.rawEvents,

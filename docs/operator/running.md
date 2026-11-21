@@ -402,19 +402,25 @@ cancels a late unused body once, best-effort within the invocation's lifetime.
 Cleanup does not prove that Cloudflare cancelled the underlying operation. A
 client retry can overlap abandoned work in an earlier invocation.
 
-The `cupboard.storage.read` logger records `get()` starts, attempts, retries and
-terminal outcomes at debug level. Each logical read has a `storageOperationId`
-and a bounded `objectKey`; the identifier also accompanies late completion and
-cleanup logs. The `r2-get` span records its outcome and attempt count. The
-recorded time excludes body transfer.
+Each logical read runs in an `r2-get` span, which records the
+`cupboard.storage.operation_id`, a bounded `cupboard.storage.object_key`, the
+budget, the enclosing deadline's remaining time when the read started
+(`cupboard.storage.remaining_budget_ms`), the outcome and the attempt count. The
+recorded time excludes body transfer. A read cut off by a cancelled invocation
+has no outcome or attempt count. The `cupboard.storage.read` logger records only
+retries, failed reads, late completion and cleanup, at debug level, with the
+read's `storageOperationId` and `objectKey`.
 
 The diagnostic report includes `get()` lifecycle records, native R2 outcomes,
 invocation outcomes and invocation wall time separately from span duration.
-Missing-object probes are separate from native read failures. A span without
-terminal response attributes has an unknown outcome, even if its duration is
-zero or its metadata says `OK`. Cancelled invocations can force-close spans, so
-the recorded span duration can understate the elapsed time. A missing terminal
-record does not prove that the backend did not execute the operation.
+Missing-object probes are separate from native read failures. A read's lifecycle
+shows its `r2-get` span, or its outcome log when it has no span, and its
+retries, with their attempt, error code and delay, its late completion and its
+cleanup. A span without terminal response attributes has an unknown outcome,
+even if its duration is zero or its metadata says `OK`. Cancelled invocations
+can force-close spans, so the recorded span duration can understate the elapsed
+time. A missing terminal record does not prove that the backend did not execute
+the operation.
 
 Verify both deployed Worker revisions as well as the action or CLI revision.
 Updating only the client does not enable server deadlines. After deployment,

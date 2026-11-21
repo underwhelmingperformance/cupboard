@@ -136,6 +136,20 @@ describe('bounded Worker environment', () => {
 		}
 	});
 
+	it('records the remaining deadline on the read span', async () => {
+		recordSpans();
+		await withDeadlineBudget(1000, () =>
+			boundedBlobs(env.BLOBS).get('budgeted-missing-key')
+		);
+
+		const [remaining] = finishedSpans()
+			.filter((span) => span.name === 'r2-get')
+			.map((span) => span.attributes['cupboard.storage.remaining_budget_ms']);
+		expect(
+			typeof remaining === 'number' && remaining > 0 && remaining <= 1000
+		).toBe(true);
+	});
+
 	it('returns conditional metadata without retrying or cancelling it', async () => {
 		await env.BLOBS.put('conditional-key', 'bytes');
 		const metadata = await env.BLOBS.head('conditional-key');
@@ -350,6 +364,7 @@ describe('bounded Worker environment', () => {
 		const get = vi.spyOn(env.BLOBS, 'get').mockReturnValue(completion.promise);
 		const worker = boundedWorkerEnv(env);
 		const capture = startCapture();
+		recordSpans();
 		vi.useFakeTimers();
 
 		try {
@@ -382,14 +397,26 @@ describe('bounded Worker environment', () => {
 					}))
 			).toStrictEqual(
 				[
-					'R2 get started',
-					'R2 get attempt started',
 					'storage request failed',
 					'R2 get failed',
 					'storage request completed after timeout',
 					'R2 late body cancelled'
 				].map((message) => ({ message, level: 'debug', storageOperationId }))
 			);
+			expect(
+				finishedSpans()
+					.filter((span) => span.name === 'r2-get')
+					.map((span) => span.attributes)
+			).toStrictEqual([
+				{
+					'cupboard.storage.operation_id': storageOperationId,
+					'cupboard.storage.object_key': 'hung-key',
+					'cupboard.storage.budget_ms': 15_000,
+					'cupboard.storage.outcome': 'timeout',
+					'cupboard.storage.attempts': 1,
+					'error.type': 'SubrequestTimeoutError'
+				}
+			]);
 		} finally {
 			capture.stop();
 			completion.reject(new Error('Test completed'));

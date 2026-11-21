@@ -48,6 +48,7 @@ import {
 	type TraceSummary,
 	triggerGroup,
 	windowForGitHubJob,
+	withRequestIds,
 	type WorkerLog
 } from './diagnose-push.ts';
 
@@ -824,6 +825,97 @@ describe('parseSpanEvent', () => {
 			attempts: 1,
 			elapsedMs: 15_000
 		});
+	});
+
+	it('keeps the code and delay of an R2 get retry', () => {
+		expect(
+			parseStorageReadEvent({
+				timestamp: 1,
+				source: {
+					msg: 'R2 get retrying',
+					storageOperationId: 'operation',
+					attempt: 1,
+					code: 10_001,
+					delayMs: 50
+				}
+			})
+		).toStrictEqual({
+			timestamp: 1,
+			message: 'R2 get retrying',
+			storageOperationId: 'operation',
+			attempt: 1,
+			code: 10_001,
+			delayMs: 50
+		});
+	});
+
+	it('reads an R2 get span as a storage read', () => {
+		expect(
+			parseStorageReadEvent({
+				timestamp: 1,
+				$metadata: {
+					type: 'span',
+					traceId: 'native',
+					spanId: 'span',
+					spanName: 'r2-get',
+					startTime: 1,
+					endTime: 41
+				},
+				source: {
+					cupboard: {
+						storage: {
+							operation_id: 'operation',
+							object_key: 't/acme/nar/key',
+							budget_ms: 15_000,
+							outcome: 'returned',
+							attempts: 2
+						}
+					}
+				}
+			})
+		).toStrictEqual({
+			timestamp: 1,
+			traceId: 'native',
+			message: 'r2-get',
+			storageOperationId: 'operation',
+			objectKey: 't/acme/nar/key',
+			disposition: 'returned',
+			attempts: 2,
+			elapsedMs: 40
+		});
+	});
+
+	it('fills an R2 read request ID from the request span of its trace', () => {
+		expect(
+			withRequestIds(
+				[
+					{
+						timestamp: 1,
+						storageOperationId: 'span-read',
+						message: 'r2-get',
+						traceId: 'traced'
+					},
+					{
+						timestamp: 2,
+						storageOperationId: 'logged-read',
+						message: 'R2 get failed',
+						requestId: 'own',
+						traceId: 'traced'
+					}
+				],
+				[
+					{
+						timestamp: 0,
+						$metadata: {
+							type: 'span',
+							traceId: 'traced',
+							spanName: 'cupboard.request'
+						},
+						source: { cupboard: { request_id: 'request' } }
+					}
+				]
+			).map((read) => read.requestId)
+		).toStrictEqual(['request', 'own']);
 	});
 
 	it('does not interpret a zero-duration R2 span without response attributes as success', () => {
@@ -2231,6 +2323,76 @@ describe('renderAnalysis', () => {
 				wallTimeMs: 30_000,
 				spanDurationMs: 100
 			}))
+		});
+	});
+
+	it('shows the outcome of a read that has a span once, from the span', () => {
+		const { ui, captured } = fakeCliUi();
+		renderAnalysis(ui, ui.reporter(), 'terminal', {
+			...analysis,
+			groups: [],
+			slowest: [],
+			workerInvocations: [],
+			storageReads: [
+				{
+					timestamp: 0,
+					storageOperationId: 'failed-read',
+					message: 'R2 get retrying',
+					attempt: 1,
+					code: 10_001,
+					delayMs: 50,
+					requestId: 'request',
+					traceId: 'trace'
+				},
+				{
+					timestamp: 1,
+					storageOperationId: 'failed-read',
+					message: 'R2 get failed',
+					disposition: 'timeout',
+					attempts: 1,
+					requestId: 'request',
+					traceId: 'trace'
+				},
+				{
+					timestamp: 2,
+					storageOperationId: 'failed-read',
+					message: 'r2-get',
+					disposition: 'timeout',
+					attempts: 1,
+					requestId: 'request',
+					traceId: 'trace'
+				},
+				{
+					timestamp: 3,
+					storageOperationId: 'old-read',
+					message: 'R2 get returned',
+					disposition: 'returned',
+					attempts: 1,
+					requestId: 'request',
+					traceId: 'trace'
+				}
+			]
+		});
+
+		expect(
+			captured.notes.find((note) => note.title === 'R2 get lifecycle')
+		).toStrictEqual({
+			title: 'R2 get lifecycle',
+			body: noteBody([
+				{
+					label: 'failed-read · R2 get retrying',
+					value:
+						'attempt 1 · code 10001 · retry after 50ms · request request · trace trace'
+				},
+				{
+					label: 'failed-read · r2-get',
+					value: 'timeout · 1 attempts · request request · trace trace'
+				},
+				{
+					label: 'old-read · R2 get returned',
+					value: 'returned · 1 attempts · request request · trace trace'
+				}
+			])
 		});
 	});
 
