@@ -49,11 +49,49 @@ type Expression =
 	| { readonly kind: 'repository'; readonly field: RepositoryField }
 	| { readonly kind: 'string'; readonly value: string }
 	| { readonly kind: 'boolean'; readonly value: boolean }
+	| { readonly kind: 'number'; readonly value: number }
+	| { readonly kind: 'null' }
+	| { readonly kind: 'input'; readonly name: string }
 	| {
 			readonly kind: 'status';
 			readonly value: 'success' | 'always' | 'cancelled';
 	  }
-	| { readonly kind: 'unknown' };
+	| { readonly kind: 'unknown'; readonly text: string };
+
+/**
+A value of the GitHub Actions expression language other than an object or
+an array. `undefined` is the language's `null`.
+*/
+export type ExpressionValue = string | number | boolean | undefined;
+
+/**
+The values that one modelled run supplies to an expression. `ref` is the
+run's `github.ref`, when the model fixes it. `inputs` has the run's
+`inputs` context, keyed by lowercase input name. For a `pull_request` run,
+the pull request comes from the repository itself.
+*/
+export interface ExpressionRun {
+	readonly event: string;
+	readonly repository: { readonly fullName: string; readonly id: number };
+	readonly ref?: string;
+	readonly inputs: Readonly<Record<string, string | number | boolean>>;
+}
+
+/**
+The value of an expression for one run, or the first part of the expression
+that the evaluator does not support.
+*/
+export type ExpressionResult =
+	| { readonly outcome: 'value'; readonly value: ExpressionValue }
+	| { readonly outcome: 'unsupported'; readonly part: string };
+
+/**
+The inputs that an expression reads, as lowercase names, or the first part
+of the expression that the evaluator does not support.
+*/
+export type ExpressionInputs =
+	| { readonly outcome: 'supported'; readonly inputs: readonly string[] }
+	| { readonly outcome: 'unsupported'; readonly part: string };
 
 type RepositoryField = 'id' | 'name';
 
@@ -118,6 +156,76 @@ const whitespace = /^\s+/u;
 const quotedString = /^'((?:[^']|'')*)'/u;
 const bareWord = /^[\w.*-]+/u;
 const expressionWrapper = /^\s*\$\{\{(.*)\}\}\s*$/su;
+const inputContext = /^inputs\.([a-z_][\w-]*)$/u;
+const decimalNumber = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/iu;
+const hexadecimalNumber = /^0x[\dA-Fa-f]+$/u;
+const octalNumber = /^0o[0-7]+$/u;
+
+/**
+Reads the digits of a `0x` or `0o` integer as the runner's .NET conversion
+to a signed 32-bit integer does: as the bits of a two's complement value, so
+that 0x80000000 to 0xFFFFFFFF are negative. A value of more than 32 bits
+fails the conversion, and the runner then returns NaN.
+*/
+function signedInt32(digits: string, radix: number): number {
+	const unsigned = Number.parseInt(digits, radix);
+
+	if (unsigned > 0xff_ff_ff_ff) {
+		return NaN;
+	}
+
+	return unsigned > 0x7f_ff_ff_ff ? unsigned - 2 ** 32 : unsigned;
+}
+
+/**
+Converts a string to a number as the GitHub Actions runner does, for number
+literals and for comparisons of a string with another type. The runner
+trims the string, reads an empty string as 0, accepts decimal numbers with
+an optional sign and exponent, `0x` and `0o` integers, `Infinity` and
+`-Infinity`, and reads anything else as NaN. See
+`ExpressionUtility.ParseNumber` in
+https://github.com/actions/runner/blob/main/src/Sdk/DTExpressions2/Expressions2/Sdk/ExpressionUtility.cs.
+*/
+function parseNumber(text: string): number {
+	const trimmed = text.trim();
+
+	if (trimmed === '') {
+		return 0;
+	}
+
+	if (decimalNumber.test(trimmed)) {
+		return Number(trimmed);
+	}
+
+	if (hexadecimalNumber.test(trimmed)) {
+		return signedInt32(trimmed.slice(2), 16);
+	}
+
+	if (octalNumber.test(trimmed)) {
+		return signedInt32(trimmed.slice(2), 8);
+	}
+
+	if (trimmed === 'Infinity') {
+		return Infinity;
+	}
+
+	return trimmed === '-Infinity' ? -Infinity : NaN;
+}
+
+// GitHub reads false, 0, -0, NaN, an empty string and null as false, and every
+// other value as true. See "Operators" in
+// https://docs.github.com/en/actions/reference/workflows-and-actions/expressions
+// and `EvaluationResult.IsFalsy` in
+// https://github.com/actions/runner/blob/main/src/Sdk/DTExpressions2/Expressions2/EvaluationResult.cs.
+function isTruthy(value: ExpressionValue): boolean {
+	return (
+		value !== false &&
+		value !== 0 &&
+		value !== '' &&
+		value !== undefined &&
+		!Number.isNaN(value)
+	);
+}
 
 function tokens(source: string): Token[] {
 	const result: Token[] = [];
@@ -271,7 +379,7 @@ class Parser {
 			const status = statusFunctions.get(token.value.toLowerCase());
 
 			return hasArguments || status === undefined
-				? { kind: 'unknown' }
+				? { kind: 'unknown', text: `${token.value}()` }
 				: {
 						kind: 'status',
 						value: status
@@ -309,11 +417,31 @@ class Parser {
 			return repositoryContext;
 		}
 
+		if (isIndexed) {
+			return { kind: 'unknown', text: `${token.value}[...]` };
+		}
+
 		if (token.value === 'true' || token.value === 'false') {
 			return { kind: 'boolean', value: token.value === 'true' };
 		}
 
-		return { kind: 'unknown' };
+		if (token.value === 'null') {
+			return { kind: 'null' };
+		}
+
+		const input = inputContext.exec(name)?.[1];
+
+		if (input !== undefined) {
+			return { kind: 'input', name: input };
+		}
+
+		const number = parseNumber(token.value);
+
+		if (!Number.isNaN(number)) {
+			return { kind: 'number', value: number };
+		}
+
+		return { kind: 'unknown', text: token.value };
 	}
 
 	private expectEnd(): void {
@@ -487,6 +615,9 @@ function evaluate(
 		}
 		case 'head-repository':
 		case 'repository':
+		case 'number':
+		case 'null':
+		case 'input':
 		case 'unknown': {
 			return undefined;
 		}
@@ -628,4 +759,268 @@ export function jobConditionOutcome(
 	return expression === undefined
 		? undefined
 		: evaluate(expression, event, source, activity);
+}
+
+function numericValue(value: ExpressionValue): number {
+	if (value === undefined) {
+		return 0;
+	}
+
+	if (typeof value === 'boolean') {
+		return value ? 1 : 0;
+	}
+
+	return typeof value === 'number' ? value : parseNumber(value);
+}
+
+// GitHub compares two values of the same type directly, and strings without
+// regard to case. It compares values of different types by their numeric
+// values, so `true == 1` and `'' == null` are true. See "Operators" in the
+// expressions documentation and `EvaluationResult.AbstractEqual` in the
+// runner.
+function isLooselyEqual(
+	left: ExpressionValue,
+	right: ExpressionValue
+): boolean {
+	if (typeof left === 'string' && typeof right === 'string') {
+		return left.toLowerCase() === right.toLowerCase();
+	}
+
+	if (typeof left !== typeof right) {
+		return numericValue(left) === numericValue(right);
+	}
+
+	return left === right;
+}
+
+const unsupportedContexts: Readonly<Record<'action' | 'merged', string>> = {
+	action: 'github.event.action',
+	merged: 'github.event.pull_request.merged'
+};
+
+function unsupported(part: string): ExpressionResult {
+	return { outcome: 'unsupported', part };
+}
+
+function value(result: ExpressionValue): ExpressionResult {
+	return { outcome: 'value', value: result };
+}
+
+function evaluateValue(
+	expression: Expression,
+	run: ExpressionRun
+): ExpressionResult {
+	switch (expression.kind) {
+		case 'or':
+		case 'and': {
+			const values: ExpressionValue[] = [];
+
+			for (const term of expression.terms) {
+				const result = evaluateValue(term, run);
+
+				if (result.outcome === 'unsupported') {
+					return result;
+				}
+
+				values.push(result.value);
+			}
+
+			// `&&` and `||` return one of their operands, not a boolean: `&&` the
+			// first falsy operand and `||` the first truthy operand, or otherwise
+			// the last operand. See `And.EvaluateCore` and `Or.EvaluateCore` in
+			// https://github.com/actions/runner/tree/main/src/Sdk/DTExpressions2/Expressions2/Sdk/Operators.
+			const isOr = expression.kind === 'or';
+			const deciding = values.findIndex(
+				(operand) => isTruthy(operand) === isOr
+			);
+
+			return value(deciding === -1 ? values.at(-1) : values[deciding]);
+		}
+		case 'not': {
+			const result = evaluateValue(expression.term, run);
+
+			return result.outcome === 'unsupported'
+				? result
+				: value(!isTruthy(result.value));
+		}
+		case 'compare': {
+			if (expression.operator !== '==' && expression.operator !== '!=') {
+				return unsupported(`the ${expression.operator} operator`);
+			}
+
+			const left = evaluateValue(expression.left, run);
+
+			if (left.outcome === 'unsupported') {
+				return left;
+			}
+
+			const right = evaluateValue(expression.right, run);
+
+			if (right.outcome === 'unsupported') {
+				return right;
+			}
+
+			return value(
+				isLooselyEqual(left.value, right.value) ===
+					(expression.operator === '==')
+			);
+		}
+		case 'event': {
+			return value(run.event);
+		}
+		case 'activity': {
+			if (expression.field !== 'ref') {
+				return unsupported(unsupportedContexts[expression.field]);
+			}
+
+			return run.ref === undefined ? unsupported('github.ref') : value(run.ref);
+		}
+		// A run for any other event has no pull request, and GitHub evaluates a
+		// property of a missing object as an empty string. See "Available
+		// contexts" in
+		// https://docs.github.com/en/actions/reference/workflows-and-actions/contexts.
+		case 'head-repository': {
+			if (run.event !== 'pull_request') {
+				return value('');
+			}
+
+			return value(
+				expression.field === 'id' ? run.repository.id : run.repository.fullName
+			);
+		}
+		// `github.repository_id` is a string, unlike the numeric ID of the pull
+		// request's head repository.
+		case 'repository': {
+			return value(
+				expression.field === 'id'
+					? String(run.repository.id)
+					: run.repository.fullName
+			);
+		}
+		case 'string':
+		case 'boolean':
+		case 'number': {
+			return value(expression.value);
+		}
+		case 'null': {
+			return value(undefined);
+		}
+		// The inputs object inherits properties such as `constructor`, which are
+		// not inputs.
+		case 'input': {
+			return Object.hasOwn(run.inputs, expression.name)
+				? value(run.inputs[expression.name])
+				: unsupported(`inputs.${expression.name}`);
+		}
+		case 'status': {
+			return unsupported(`${expression.value}()`);
+		}
+		case 'unknown': {
+			return unsupported(expression.text);
+		}
+	}
+}
+
+function parseValueExpression(
+	source: string
+):
+	| { readonly outcome: 'parsed'; readonly expression: Expression }
+	| { readonly outcome: 'unsupported'; readonly part: string } {
+	const body = expressionWrapper.exec(source)?.[1];
+
+	if (body === undefined || body.includes('${{')) {
+		return { outcome: 'unsupported', part: `'${source}'` };
+	}
+
+	try {
+		return { outcome: 'parsed', expression: new Parser(tokens(body)).parse() };
+	} catch (error) {
+		if (error instanceof ConditionSyntaxError) {
+			return {
+				outcome: 'unsupported',
+				part: `the expression '${source.trim()}'`
+			};
+		}
+
+		throw error;
+	}
+}
+
+function subexpressions(expression: Expression): readonly Expression[] {
+	switch (expression.kind) {
+		case 'or':
+		case 'and': {
+			return expression.terms;
+		}
+		case 'not': {
+			return [expression.term];
+		}
+		case 'compare': {
+			return [expression.left, expression.right];
+		}
+		default: {
+			return [];
+		}
+	}
+}
+
+function inputNames(expression: Expression): Set<string> {
+	const names = new Set<string>();
+	const pending = [expression];
+
+	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+		if (node.kind === 'input') {
+			names.add(node.name);
+		}
+
+		pending.push(...subexpressions(node));
+	}
+
+	return names;
+}
+
+/**
+Evaluates a value of the form `${{ <expression> }}` for one run, with the
+semantics of GitHub Actions expressions. The evaluator supports boolean,
+null, number and string literals, `&&`, `||`, `!`, `==`, `!=`, parentheses,
+`inputs.<name>`, `github.event_name`, `github.ref`, `github.repository`,
+`github.repository_id`, and the full name and ID of a pull request's head
+repository. It returns the first other part of the expression as
+unsupported, even when the result does not depend on that part.
+*/
+export function evaluateExpression(
+	source: string,
+	run: ExpressionRun
+): ExpressionResult {
+	const parsed = parseValueExpression(source);
+
+	return parsed.outcome === 'unsupported'
+		? parsed
+		: evaluateValue(parsed.expression, run);
+}
+
+/**
+Lists the inputs that a value of the form `${{ <expression> }}` reads, so
+that a caller can resolve them before it calls `evaluateExpression`.
+*/
+export function expressionInputs(source: string): ExpressionInputs {
+	const parsed = parseValueExpression(source);
+
+	if (parsed.outcome === 'unsupported') {
+		return parsed;
+	}
+
+	const inputs = [...inputNames(parsed.expression)];
+	// This run supplies every input and `github.ref`, so the evaluation reports
+	// only the parts that no run can supply.
+	const probe = evaluateValue(parsed.expression, {
+		event: '',
+		repository: { fullName: '', id: 0 },
+		ref: '',
+		inputs: Object.fromEntries(inputs.map((name) => [name, '']))
+	});
+
+	return probe.outcome === 'unsupported'
+		? probe
+		: { outcome: 'supported', inputs };
 }

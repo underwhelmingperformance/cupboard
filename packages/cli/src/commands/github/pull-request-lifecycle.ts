@@ -13,6 +13,7 @@ import {
 	jobConditionOutcome,
 	jobDependencyOutcome
 } from './job-condition.ts';
+import { runPushInput } from './push-input.ts';
 import { ReferencePattern } from './reference-pattern.ts';
 
 export type PullRequestLifecycle = 'closed' | 'merged-close' | 'reopened';
@@ -47,8 +48,18 @@ const knownActivities = new Set([
 	'demilestoned'
 ]);
 
+function pullRequestPush(
+	job: DiscoveredPublishingJob,
+	identity: RepositoryIdentity
+): ConditionOutcome {
+	const push = runPushInput(job, identity, { event: 'pull_request' });
+
+	return push.outcome === 'resolved' ? push.push : undefined;
+}
+
 export function isPullRequestCacheManaged(
-	job: DiscoveredPublishingJob
+	job: DiscoveredPublishingJob,
+	identity: RepositoryIdentity
 ): boolean {
 	if (job.inputs.publish === 'none') {
 		return false;
@@ -56,15 +67,19 @@ export function isPullRequestCacheManaged(
 
 	return job.kind === 'flake'
 		? job.inputs.preset === 'pull-request-and-branch' &&
-				job.inputs.push !== false
+				pullRequestPush(job, identity) === true
 		: job.inputs['manage-pr-cache'] === true;
 }
 
-function managementOutcome(job: DiscoveredPublishingJob): ConditionOutcome {
-	if (isPullRequestCacheManaged(job)) {
+function managementOutcome(
+	job: DiscoveredPublishingJob,
+	identity: RepositoryIdentity
+): ConditionOutcome {
+	if (isPullRequestCacheManaged(job, identity)) {
 		return true;
 	}
-	if (job.inputs.publish === 'none' || job.inputs.push === false) {
+	const push = pullRequestPush(job, identity);
+	if (push === false || job.inputs.publish === 'none') {
 		return false;
 	}
 	if (job.kind === 'installable') {
@@ -77,8 +92,9 @@ function managementOutcome(job: DiscoveredPublishingJob): ConditionOutcome {
 		return undefined;
 	}
 	if (
-		typeof job.inputs.preset === 'string' &&
-		job.inputs.preset.includes('${{')
+		(typeof job.inputs.preset === 'string' &&
+			job.inputs.preset.includes('${{')) ||
+		(push === undefined && job.inputs.preset === 'pull-request-and-branch')
 	) {
 		return undefined;
 	}
@@ -261,7 +277,7 @@ export function pullRequestLifecycleFindings(
 	readonly finding: CheckFinding;
 }[] {
 	if (
-		!isPullRequestCacheManaged(job) ||
+		!isPullRequestCacheManaged(job, identity) ||
 		pullRequestTrigger(job) === undefined
 	) {
 		return [];
@@ -271,7 +287,7 @@ export function pullRequestLifecycleFindings(
 	const candidates = jobs.filter(
 		(candidate) =>
 			candidate.caller === job.caller &&
-			managementOutcome(candidate) !== false &&
+			managementOutcome(candidate, identity) !== false &&
 			(selected === undefined ||
 				cacheIdentity(candidate) === undefined ||
 				cacheIdentity(candidate) === selected)
@@ -288,7 +304,7 @@ export function pullRequestLifecycleFindings(
 				if (outcome === false) {
 					return outcome;
 				}
-				if (managementOutcome(candidate) === undefined) {
+				if (managementOutcome(candidate, identity) === undefined) {
 					return;
 				}
 				if (candidate === job) {

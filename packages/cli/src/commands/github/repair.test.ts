@@ -69,6 +69,7 @@ import {
 	DiscoveryUnverifiedFinding,
 	inspectDiscoveredGithubCheck
 } from './discovered-check.ts';
+import { dotfilesWorkflows } from './dotfiles-workflows.test-support.ts';
 import {
 	GithubRepairPartialError,
 	GithubRepairShadowsRuleError,
@@ -5346,5 +5347,43 @@ it.each(
 				}
 			)
 		]);
+	}
+);
+
+async function repairPrivateWorkflows(
+	workflowFiles: Record<string, string>
+): Promise<{ statuses: string[]; added: OidcTrustAddBodyInput[] }> {
+	const { ui, added, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		content,
+		{ workflowFiles, cacheAccess: 'private' }
+	);
+
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+
+	return { statuses: check.jobs.map((job) => job.status), added };
+}
+
+it.each([
+	{ name: 'the default of inputs.push', callerPush: undefined, push: true },
+	{ name: 'a caller that sets push to false', callerPush: false, push: false }
+])(
+	'repairs the dotfiles push expression with $name like a literal push input',
+	async ({ callerPush, push }) => {
+		const literal = await repairPrivateWorkflows(
+			await dotfilesWorkflows({ push })
+		);
+
+		expect(literal.added).not.toStrictEqual([]);
+		expect(
+			await repairPrivateWorkflows(await dotfilesWorkflows({ callerPush }))
+		).toStrictEqual(literal);
 	}
 );

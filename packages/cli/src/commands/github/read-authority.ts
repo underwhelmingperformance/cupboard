@@ -26,7 +26,7 @@ import {
 } from './discovery.ts';
 import {
 	isPresetJob,
-	isReadOnlyJob,
+	isReadOnlyCase,
 	jobCache,
 	type PublicationCase
 } from './publication.ts';
@@ -67,7 +67,7 @@ export async function publicationReadAuthority(
 	}
 
 	const isPreset = isPresetJob(job);
-	const isReadOnly = isReadOnlyJob(job);
+	const isReadOnly = isReadOnlyCase(job, publication);
 	const cacheMode = job.inputs['cache-access-mode'];
 	const isPresetPullRequest =
 		isPreset && publication.trigger === 'pull_request' && !isReadOnly;
