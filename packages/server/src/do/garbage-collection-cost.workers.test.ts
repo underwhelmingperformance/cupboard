@@ -432,7 +432,7 @@ describe('garbage collection cost', () => {
 
 			expect(await cronSweepCost()).toStrictEqual({
 				invocations: 1,
-				rowsRead: 301,
+				rowsRead: 311,
 				rowsWritten: 5
 			});
 		}));
@@ -455,8 +455,8 @@ describe('garbage collection cost', () => {
 			const manyDeadlines = await cronSweepCost();
 
 			expect({ fewDeadlines, manyDeadlines }).toStrictEqual({
-				fewDeadlines: { invocations: 1, rowsRead: 305, rowsWritten: 5 },
-				manyDeadlines: { invocations: 1, rowsRead: 305, rowsWritten: 5 }
+				fewDeadlines: { invocations: 1, rowsRead: 315, rowsWritten: 5 },
+				manyDeadlines: { invocations: 1, rowsRead: 315, rowsWritten: 5 }
 			});
 		}));
 
@@ -477,7 +477,7 @@ describe('garbage collection cost', () => {
 
 			expect(await cronSweepCost()).toStrictEqual({
 				invocations: 1,
-				rowsRead: 557,
+				rowsRead: 567,
 				rowsWritten: 5
 			});
 		}));
@@ -498,8 +498,8 @@ describe('garbage collection cost', () => {
 			const twoHundredDeleted = await cronSweepCost();
 
 			expect({ fourDeleted, twoHundredDeleted }).toStrictEqual({
-				fourDeleted: { invocations: 1, rowsRead: 301, rowsWritten: 5 },
-				twoHundredDeleted: { invocations: 1, rowsRead: 301, rowsWritten: 5 }
+				fourDeleted: { invocations: 1, rowsRead: 311, rowsWritten: 5 },
+				twoHundredDeleted: { invocations: 1, rowsRead: 311, rowsWritten: 5 }
 			});
 		}));
 
@@ -520,8 +520,8 @@ describe('garbage collection cost', () => {
 			});
 
 			expect({ idle, waiting: await cronSweepCost() }).toStrictEqual({
-				idle: { invocations: 1, rowsRead: 301, rowsWritten: 5 },
-				waiting: { invocations: 1, rowsRead: 299, rowsWritten: 5 }
+				idle: { invocations: 1, rowsRead: 311, rowsWritten: 5 },
+				waiting: { invocations: 1, rowsRead: 309, rowsWritten: 5 }
 			});
 		}));
 
@@ -539,7 +539,7 @@ describe('garbage collection cost', () => {
 				cost: await cronSweepCost(),
 				deleted: before - (await uploadCount())
 			}).toStrictEqual({
-				cost: { invocations: 1, rowsRead: 419, rowsWritten: 25 },
+				cost: { invocations: 1, rowsRead: 429, rowsWritten: 25 },
 				deleted: 4 * uploadsPerVerdict
 			});
 		}));
@@ -629,8 +629,8 @@ describe('garbage collection cost', () => {
 			const withAbsent = await scanWithAbsentInputs(absent);
 
 			expect({ presentOnly, withAbsent }).toStrictEqual({
-				presentOnly: { invocations: 1, rowsRead: 418, rowsWritten: 54 },
-				withAbsent: { invocations: 1, rowsRead: 4142, rowsWritten: 54 }
+				presentOnly: { invocations: 1, rowsRead: 428, rowsWritten: 54 },
+				withAbsent: { invocations: 1, rowsRead: 4152, rowsWritten: 54 }
 			});
 		}));
 
@@ -679,7 +679,7 @@ describe('garbage collection cost', () => {
 			expect(steps).toStrictEqual(
 				[-1, 127, 255, 383, 511].map((referenceCursor) => ({
 					referenceCursor,
-					rowsRead: 1047,
+					rowsRead: 1057,
 					rowsWritten: 1
 				}))
 			);
@@ -723,7 +723,7 @@ describe('garbage collection cost', () => {
 			const unchanged = { inputsChanged: false, scanCompletedAt: firstSweepAt };
 
 			expect({ cost, caches }).toStrictEqual({
-				cost: { invocations: 2, rowsRead: 9595, rowsWritten: 2837 },
+				cost: { invocations: 2, rowsRead: 9615, rowsWritten: 2837 },
 				caches: {
 					isAddedPathKept: false,
 					completions: {
@@ -752,7 +752,7 @@ describe('garbage collection cost', () => {
 			const seedPage = {
 				before: 'roots',
 				after: 'roots',
-				rowsRead: 664,
+				rowsRead: 674,
 				rowsWritten: 257
 			};
 
@@ -760,13 +760,13 @@ describe('garbage collection cost', () => {
 				steps: [
 					seedPage,
 					seedPage,
-					{ before: 'roots', after: 'grace', rowsRead: 308, rowsWritten: 21 },
-					{ before: 'mark', after: 'clear', rowsRead: 277, rowsWritten: 1 }
+					{ before: 'roots', after: 'grace', rowsRead: 318, rowsWritten: 21 },
+					{ before: 'mark', after: 'clear', rowsRead: 287, rowsWritten: 1 }
 				],
 				lastMarkStep: {
 					before: 'mark',
 					after: 'mark',
-					rowsRead: 278,
+					rowsRead: 288,
 					rowsWritten: 3
 				}
 			});
@@ -797,10 +797,10 @@ describe('garbage collection cost', () => {
 
 			expect({ steps, narInfos }).toStrictEqual({
 				steps: [
-					{ before: 'roots', after: 'roots', rowsRead: 665, rowsWritten: 257 },
-					{ before: 'roots', after: 'roots', rowsRead: 535, rowsWritten: 257 },
-					{ before: 'roots', after: 'grace', rowsRead: 297, rowsWritten: 21 },
-					{ before: 'mark', after: 'collect', rowsRead: 278, rowsWritten: 1 }
+					{ before: 'roots', after: 'roots', rowsRead: 675, rowsWritten: 257 },
+					{ before: 'roots', after: 'roots', rowsRead: 545, rowsWritten: 257 },
+					{ before: 'roots', after: 'grace', rowsRead: 307, rowsWritten: 21 },
+					{ before: 'mark', after: 'collect', rowsRead: 288, rowsWritten: 1 }
 				],
 				narInfos: [syntheticStorePathHash(seedBase)]
 			});

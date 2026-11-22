@@ -27,7 +27,7 @@ import {
 
 import { type SchemaWriter } from './context.ts';
 import { type DatabaseCostMeter } from './database-cost-meter.ts';
-import { noCost } from './operation-cost.test-support.ts';
+import { noCost, rowsReadBy } from './operation-cost.test-support.ts';
 import {
 	type OperationCostRecord,
 	withOperationCost
@@ -148,6 +148,49 @@ describe('db cost meter', () => {
 		);
 
 		expect(measured).toStrictEqual({ a: 8, b: 4 });
+	});
+
+	// The lifetime counter also counts a concurrent scope's rows, so a cost test
+	// that reads it depends on what else runs while the measured call awaits.
+	it('counts in rowsReadBy only the rows of the measured body', async () => {
+		const measured = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const { db, dbCost } = instance.context;
+				insertUploads(db, resolvedCache(instance.context).id, 0, 4);
+
+				const scanAll = (): void => {
+					db.select().from(schema.pendingUploads).all();
+				};
+				let concurrentRows: number | undefined;
+				const concurrent = withOperationCost(
+					'concurrent',
+					async () => {
+						await Promise.resolve();
+						scanAll();
+					},
+					(cost) => {
+						concurrentRows = cost.rowsRead;
+					}
+				);
+
+				dbCost.recordOutstanding();
+				const before = dbCost.rowsRead;
+				const scoped = await rowsReadBy(async () => {
+					scanAll();
+					await concurrent;
+				});
+				dbCost.recordOutstanding();
+
+				return {
+					scoped,
+					concurrent: concurrentRows,
+					lifetime: dbCost.rowsRead - before
+				};
+			}
+		);
+
+		expect(measured).toStrictEqual({ scoped: 4, concurrent: 4, lifetime: 8 });
 	});
 
 	it('logs the row cost of a request handled through the entrypoint', async () => {

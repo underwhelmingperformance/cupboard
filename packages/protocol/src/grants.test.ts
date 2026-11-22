@@ -15,8 +15,10 @@ import {
 	cacheOperations,
 	controlOperations,
 	domainOperations,
+	isAccessKeyCovered,
 	isAuthorizationDetailCovered,
 	isCoveredByToken,
+	isOperationCoveredForDetail,
 	isOperationPermittedAtIssuance,
 	isOperationSatisfiedByPresentedActions,
 	type Operation,
@@ -1259,6 +1261,27 @@ describe('content-read grants', () => {
 			}).success
 		).toBe(false);
 	});
+	it.each(['access-key:create', 'access-key:list', 'access-key:delete'])(
+		'rejects a root selector on a grant or rule that lists %s',
+		(operation) => {
+			expect({
+				detail: authorizationDetailSchema.safeParse({
+					type: 'cupboard_cache',
+					actions: ['root:set', operation],
+					cache: { kind: 'default' },
+					root: 'main'
+				}).success,
+				rule: permittedGrantSchema.safeParse({
+					type: 'cupboard_cache',
+					actions: ['root:set', operation],
+					resources: {
+						cache: { kind: 'default' },
+						root: { exact: 'main', validate: 'rootName' }
+					}
+				}).success
+			}).toStrictEqual({ detail: false, rule: false });
+		}
+	);
 });
 
 it.each([
@@ -1418,4 +1441,231 @@ describe('control session operations', () => {
 			});
 		}
 	);
+});
+
+describe('access-key operations', () => {
+	const builds = namedCacheScope('builds');
+	const other = namedCacheScope('other');
+
+	it.each([
+		'access-key:create',
+		'access-key:list',
+		'access-key:delete'
+	] as const)(
+		'covers %s for the cache or domain that a grant selects',
+		(operation) => {
+			const grant = authorizationDetailSchema.parse({
+				type: 'cupboard_cache',
+				cache: builds,
+				actions: [operation]
+			});
+
+			expect({
+				wildcard: isCoveredByToken(
+					[{ type: 'cupboard_wildcard' }],
+					operation,
+					{}
+				),
+				domain: isCoveredByToken(
+					[{ type: 'cupboard_domain', actions: [operation] }],
+					operation,
+					{}
+				),
+				sameCache: isCoveredByToken([grant], operation, { cache: builds }),
+				otherCache: isCoveredByToken([grant], operation, { cache: other }),
+				domainFromCache: isCoveredByToken([grant], operation, {}),
+				metadataRead: isCoveredByToken([grant], 'cache:read', {
+					cache: builds
+				})
+			}).toStrictEqual({
+				wildcard: true,
+				domain: true,
+				sameCache: true,
+				otherCache: false,
+				domainFromCache: false,
+				metadataRead: false
+			});
+		}
+	);
+});
+
+describe('isOperationCoveredForDetail', () => {
+	const builds = namedCacheScope('builds');
+	const keyCreationInBuilds = authorizationDetailSchema.parse({
+		type: 'cupboard_cache',
+		cache: builds,
+		actions: ['access-key:create']
+	});
+	const keyCreationInDomain = authorizationDetailSchema.parse({
+		type: 'cupboard_domain',
+		actions: ['access-key:create']
+	});
+
+	it.each<{
+		readonly name: string;
+		readonly grants: AuthorizationDetail[];
+		readonly detail: AuthorizationDetail;
+		readonly covered: boolean;
+	}>([
+		{
+			name: 'a cache grant for a detail in the same cache',
+			grants: [keyCreationInBuilds],
+			detail: authorizationDetailSchema.parse({
+				type: 'cupboard_cache',
+				cache: builds,
+				root: 'release/',
+				actions: ['root:set']
+			}),
+			covered: true
+		},
+		{
+			name: 'a cache grant for a detail in another cache',
+			grants: [keyCreationInBuilds],
+			detail: {
+				type: 'cupboard_cache',
+				cache: { kind: 'default' },
+				actions: ['cache:content-read']
+			},
+			covered: false
+		},
+		{
+			name: 'a domain grant for a domain detail',
+			grants: [keyCreationInDomain],
+			detail: { type: 'cupboard_domain', actions: ['session:list'] },
+			covered: true
+		},
+		{
+			name: 'a domain grant for a cache detail',
+			grants: [keyCreationInDomain],
+			detail: {
+				type: 'cupboard_cache',
+				cache: builds,
+				actions: ['cache:read']
+			},
+			covered: false
+		},
+		{
+			name: 'a domain grant for a view detail',
+			grants: [keyCreationInDomain],
+			detail: {
+				type: 'cupboard_view',
+				view: reuseViewNameSchema.parse('shared'),
+				actions: ['view:content-read']
+			},
+			covered: false
+		},
+		{
+			name: 'a domain grant for a wildcard detail',
+			grants: [keyCreationInDomain],
+			detail: { type: 'cupboard_wildcard' },
+			covered: false
+		},
+		{
+			name: 'a wildcard grant for a wildcard detail',
+			grants: [{ type: 'cupboard_wildcard' }],
+			detail: { type: 'cupboard_wildcard' },
+			covered: true
+		}
+	])('decides $name', ({ grants, detail, covered }) => {
+		expect(
+			isOperationCoveredForDetail(grants, 'access-key:create', detail)
+		).toBe(covered);
+	});
+});
+
+describe('isAccessKeyCovered', () => {
+	const keyGrants = ['builds', 'release'].map((name) =>
+		authorizationDetailSchema.parse({
+			type: 'cupboard_cache',
+			cache: namedCacheScope(name),
+			actions: ['cache:content-read']
+		})
+	);
+
+	function deleteIn(name: string): AuthorizationDetail {
+		return authorizationDetailSchema.parse({
+			type: 'cupboard_cache',
+			cache: namedCacheScope(name),
+			actions: ['access-key:delete']
+		});
+	}
+
+	it.each([
+		{
+			name: 'every grant',
+			grants: [deleteIn('builds'), deleteIn('release')],
+			covered: true
+		},
+		{ name: 'some grants', grants: [deleteIn('builds')], covered: false },
+		{
+			name: 'a wildcard',
+			grants: [authorizationDetailSchema.parse({ type: 'cupboard_wildcard' })],
+			covered: true
+		}
+	])(
+		'decides a caller who can delete $name of the key',
+		({ grants, covered }) => {
+			expect(isAccessKeyCovered(grants, 'access-key:delete', keyGrants)).toBe(
+				covered
+			);
+		}
+	);
+	function detail(fields: Record<string, unknown>): AuthorizationDetail {
+		return authorizationDetailSchema.parse(fields);
+	}
+
+	const viewRead = detail({
+		type: 'cupboard_view',
+		view: 'prior',
+		actions: ['view:content-read']
+	});
+	const domainStats = detail({
+		type: 'cupboard_domain',
+		actions: ['stats:read']
+	});
+
+	it.each([
+		{
+			name: 'a view grant that lists the operation on that view',
+			grants: [
+				detail({
+					type: 'cupboard_view',
+					view: 'prior',
+					actions: ['access-key:create', 'access-key:list', 'access-key:delete']
+				})
+			],
+			key: [viewRead],
+			covered: true
+		},
+		{
+			name: 'a view grant on another view',
+			grants: [
+				detail({
+					type: 'cupboard_view',
+					view: 'other',
+					actions: ['access-key:list']
+				})
+			],
+			key: [viewRead],
+			covered: false
+		},
+		{
+			name: 'a domain grant, for a key with a view grant',
+			grants: [
+				detail({ type: 'cupboard_domain', actions: ['access-key:list'] })
+			],
+			key: [viewRead],
+			covered: false
+		},
+		{
+			name: 'a domain grant, for a key with only domain grants',
+			grants: [
+				detail({ type: 'cupboard_domain', actions: ['access-key:list'] })
+			],
+			key: [domainStats],
+			covered: true
+		}
+	])('decides a listing by $name', ({ grants, key, covered }) => {
+		expect(isAccessKeyCovered(grants, 'access-key:list', key)).toBe(covered);
+	});
 });

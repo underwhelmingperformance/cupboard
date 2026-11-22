@@ -46,13 +46,21 @@ export const cacheOperationSchema = z.enum([
 	'narinfo:delete',
 	'build-inputs:record',
 	'gc:run',
-	'stats:read'
+	'stats:read',
+	'access-key:create',
+	'access-key:list',
+	'access-key:delete'
 ]);
 export type CacheOperation = z.infer<typeof cacheOperationSchema>;
 export const cacheOperations: readonly CacheOperation[] =
 	cacheOperationSchema.options;
 
-const viewOperationSchema = z.enum(['view:content-read']);
+const viewOperationSchema = z.enum([
+	'view:content-read',
+	'access-key:create',
+	'access-key:list',
+	'access-key:delete'
+]);
 export type ViewOperation = z.infer<typeof viewOperationSchema>;
 
 // Tenant-domain operations use authority over the tenant established by the
@@ -81,7 +89,10 @@ const domainOperationSchema = z.enum([
 	'policy:remove',
 	'reuse-view:list',
 	'reuse-view:set',
-	'reuse-view:remove'
+	'reuse-view:remove',
+	'access-key:create',
+	'access-key:list',
+	'access-key:delete'
 ]);
 export const domainOperations = domainOperationSchema.options;
 
@@ -171,6 +182,9 @@ export const operationSchema = z.enum([
 	'reuse-view:list',
 	'reuse-view:set',
 	'reuse-view:remove',
+	'access-key:create',
+	'access-key:list',
+	'access-key:delete',
 	'control:check',
 	'instance:read',
 	'instance:initialise',
@@ -239,6 +253,12 @@ const domainActionsSchema = z.array(domainOperationSchema).min(1);
 const tenantActionsSchema = z.array(tenantOperationSchema).min(1);
 const controlActionsSchema = z.array(controlOperationSchema).min(1);
 
+// The access-key operations cover the keys of a whole cache, so a root on the
+// same grant would suggest a narrower scope than the grant has.
+function hasAccessKeyOperation(actions: readonly string[]): boolean {
+	return actions.some((action) => action.startsWith('access-key:'));
+}
+
 const cacheAuthorizationDetailSchema = z
 	.strictObject({
 		type: z.literal('cupboard_cache'),
@@ -251,6 +271,13 @@ const cacheAuthorizationDetailSchema = z
 			value.root === undefined || !value.actions.includes('cache:content-read'),
 		{
 			message: 'Content-read grants cannot select a root'
+		}
+	)
+	.refine(
+		(value) =>
+			value.root === undefined || !hasAccessKeyOperation(value.actions),
+		{
+			message: 'Access-key grants cannot select a root'
 		}
 	);
 
@@ -302,7 +329,9 @@ const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 const metadataImplyingCacheOperations: ReadonlySet<Operation> = new Set(
 	cacheOperations.filter(
 		(operation) =>
-			operation !== 'cache:content-read' && operation !== 'cache:close'
+			operation !== 'cache:content-read' &&
+			operation !== 'cache:close' &&
+			!operation.startsWith('access-key:')
 	)
 );
 
@@ -462,6 +491,38 @@ export function isAuthorizationDetailCovered(
 
 	return actions.every((operation) =>
 		isCoveredByToken(grants, operation, resource)
+	);
+}
+
+/**
+Checks whether `grants` authorises `operation` on the resource that `detail`
+selects. A wildcard detail selects every resource, so only a wildcard grant
+covers it.
+*/
+export function isOperationCoveredForDetail(
+	grants: readonly AuthorizationDetail[],
+	operation: Operation,
+	detail: AuthorizationDetail
+): boolean {
+	if (detail.type === 'cupboard_wildcard') {
+		return grants.some((grant) => grant.type === 'cupboard_wildcard');
+	}
+
+	return isCoveredByToken(grants, operation, detailResource(detail));
+}
+
+/**
+Checks whether `grants` authorises `operation` on every resource that the
+grants of an access key select. Deciding whether a caller may act on a key
+and filtering a listing of keys both use it.
+*/
+export function isAccessKeyCovered(
+	grants: readonly AuthorizationDetail[],
+	operation: Operation,
+	keyGrants: readonly AuthorizationDetail[]
+): boolean {
+	return keyGrants.every((detail) =>
+		isOperationCoveredForDetail(grants, operation, detail)
 	);
 }
 
@@ -633,6 +694,14 @@ const cachePermittedGrantSchema = z
 		{
 			message: 'Content-read rules cannot select a root'
 		}
+	)
+	.refine(
+		(value) =>
+			value.resources.root === undefined ||
+			!hasAccessKeyOperation(value.actions),
+		{
+			message: 'Access-key rules cannot select a root'
+		}
 	);
 
 export const permittedGrantSchema = z.discriminatedUnion('type', [
@@ -794,6 +863,18 @@ export const storedPermittedGrantsSchema = z.preprocess(
 				.values()
 				.toArray()
 		)
+);
+
+/**
+Validates grants that an earlier release may have written: the stored grants
+of an access key, and the grants in an issued access token or refresh
+credential. Before strict validation, the preprocessor removes retired
+operations and any grant with no recognised operation, as for stored trust
+rules. Grants that are all removed parse to an empty list.
+*/
+export const grantsWithoutRetiredOperationsSchema = z.preprocess(
+	withoutRetiredActions,
+	authorizationDetailsSchema
 );
 
 const legacyIssuedCacheGrantSchema = z.looseObject({

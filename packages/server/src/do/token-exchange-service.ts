@@ -988,7 +988,8 @@ export class TokenExchangeService {
 						detail.actions.every(
 							(action) => action === 'cache:content-read'
 						)) ||
-					detail.type === 'cupboard_view'
+					(detail.type === 'cupboard_view' &&
+						detail.actions.every((action) => action === 'view:content-read'))
 			);
 		const isInteractive =
 			authority.kind === 'refresh' ||
