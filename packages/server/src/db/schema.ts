@@ -18,6 +18,7 @@ import {
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import type { AccessKeyId } from '@cupboard/protocol/access-keys';
 import type { BackfillEntryDefect } from '@cupboard/protocol/keys';
 import type {
 	OidcIssuer,
@@ -934,6 +935,71 @@ export const refreshTokenMembers = sqliteTable(
 		index('refresh_session_member_successor_expiry_idx')
 			.on(table.successorExpiresAt, table.id)
 			.where(sql`${table.successorExpiresAt} IS NOT NULL`)
+	]
+);
+
+// The parent is the session or access key that created the key, or neither
+// for a key that a token without a session created.
+export const accessKeys = sqliteTable(
+	'access_key',
+	{
+		id: text('id').$type<AccessKeyId>().primaryKey(),
+		secretHash: text('secret_hash').notNull(),
+		grantsJson: text('grants_json').notNull(),
+		parentKind: text('parent_kind', { enum: ['session', 'access-key'] }),
+		parentId: text('parent_id'),
+		rootIdentityJson: text('root_identity_json').notNull(),
+		rootRule: text('root_rule').$type<TrustRuleId>(),
+		creatorSubject: text('creator_subject').$type<OidcSubject>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>(),
+		// Whether a session is above the key, at any depth. The keys of a
+		// subject that have no session above them are one origin.
+		sessionAbove: integer('session_above', { mode: 'boolean' })
+			.notNull()
+			.default(false)
+	},
+	(table) => [
+		check(
+			'access_key_parent_check',
+			sql`(${table.parentKind} IS NULL) = (${table.parentId} IS NULL)`
+		),
+		// The origin count must repeat this literal predicate, or SQLite cannot
+		// use the partial index.
+		index('access_key_subject_origin_idx')
+			.on(table.creatorSubject)
+			.where(sql`${table.sessionAbove} = 0`),
+		index('access_key_expires_at_idx')
+			.on(table.expiresAt, table.id)
+			.where(sql`${table.expiresAt} IS NOT NULL`)
+	]
+);
+
+// Triggers on `access_key` keep `key_count` equal to the number of rows, so a
+// creation checks the tenant limit without counting the keys.
+export const accessKeyState = sqliteTable('access_key_state', {
+	id: integer('id').primaryKey(),
+	keyCount: integer('key_count').notNull()
+});
+
+// One row for each session or access key above an access key. When the
+// garbage collector deletes an expired key, it deletes the rows where that key
+// is the descendant and keeps the rows where it is the ancestor. Revoking a
+// session or key further up then still reaches the keys below the expired key.
+export const accessKeyAncestors = sqliteTable(
+	'access_key_ancestor',
+	{
+		ancestorKind: text('ancestor_kind', {
+			enum: ['session', 'access-key']
+		}).notNull(),
+		ancestorId: text('ancestor_id').notNull(),
+		descendantId: text('descendant_id').$type<AccessKeyId>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.ancestorKind, table.ancestorId, table.descendantId]
+		}),
+		index('access_key_ancestor_descendant_idx').on(table.descendantId)
 	]
 );
 

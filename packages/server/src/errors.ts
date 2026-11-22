@@ -10,6 +10,10 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import {
+	type AccessKeyLimit,
+	type AccessKeyRefusalProblem
+} from '@cupboard/protocol/access-keys';
 import { type AttestationInfoError } from '@cupboard/protocol/attestations';
 import {
 	type CacheMetadataError,
@@ -1104,6 +1108,50 @@ export class OidcTrustRuleNotFoundError extends ServerHttpError {
 	constructor(public readonly id: string) {
 		super('No such OIDC trust rule');
 		this.name = 'OidcTrustRuleNotFoundError';
+	}
+}
+
+export class AccessKeyRefusedError extends ServerHttpError {
+	readonly status = StatusCodes.FORBIDDEN;
+
+	constructor(readonly problem: AccessKeyRefusalProblem) {
+		super(`The caller may not create this access key: ${problem}`);
+		this.name = 'AccessKeyRefusedError';
+	}
+}
+
+function accessKeyLimitMessage(limit: AccessKeyLimit, maximum: number): string {
+	switch (limit) {
+		case 'depth': {
+			return `A chain of access keys can be at most ${String(maximum)} keys long. Create the key from a key higher in the chain or from a sign-in session.`;
+		}
+		case 'origin': {
+			return `This sign-in session, or this subject's keys without a session, already has ${String(maximum)} unexpired access keys. Delete keys that are no longer needed, or sign in again to start a new session.`;
+		}
+		case 'tenant': {
+			return `The tenant already has ${String(maximum)} access keys. Delete keys that are no longer needed. Expired keys count until collection deletes them.`;
+		}
+	}
+}
+
+export class AccessKeyLimitError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		readonly limit: AccessKeyLimit,
+		readonly maximum: number
+	) {
+		super(accessKeyLimitMessage(limit, maximum));
+		this.name = 'AccessKeyLimitError';
+	}
+}
+
+export class AccessKeyExpiryPastError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor() {
+		super('The requested expiry of the access key is not in the future');
+		this.name = 'AccessKeyExpiryPastError';
 	}
 }
 

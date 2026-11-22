@@ -15,6 +15,7 @@
 		"vitest": "catalog:"
 	},
 	"exports": {
+		"./access-keys": "./src/access-keys.ts",
 		"./attestations": "./src/attestations.ts",
 		"./build": "./src/build.ts",
 		"./build-inputs": "./src/build-inputs.ts",

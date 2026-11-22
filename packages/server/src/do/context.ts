@@ -60,6 +60,7 @@ import {
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
+import { AccessKeyStore } from './access-key-store.ts';
 import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 import { observeCriticalSection } from './critical-section-telemetry.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
@@ -183,6 +184,7 @@ export class ServerContext {
 	grantsContracted = false;
 	referenceStorageContracted = false;
 	readonly planArchives: PlanArchiveStore;
+	readonly accessKeys: AccessKeyStore;
 	readonly cacheRepository: CacheRepository;
 	readonly subrequestsPerInvocation: number;
 	gateBudgetMs = criticalSectionBudgetMs;
@@ -224,6 +226,7 @@ export class ServerContext {
 		this.transitions = new TransitionGate(this.d1);
 		this.subrequestsPerInvocation = subrequestsPerInvocation(env);
 		this.planArchives = new PlanArchiveStore(this.db);
+		this.accessKeys = new AccessKeyStore(this.db);
 		this.cacheRepository = new CacheRepository(this.db);
 	}
 

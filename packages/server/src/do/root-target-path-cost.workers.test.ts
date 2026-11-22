@@ -409,7 +409,7 @@ describe.each(sizes)(
 				// The page queues the kept path and the first 127 paths of `live`.
 				expect({ costs, ...progress }).toStrictEqual({
 					costs: [
-						{ method: 'garbage-collection', rowsRead: 778, rowsWritten: 257 }
+						{ method: 'garbage-collection', rowsRead: 788, rowsWritten: 257 }
 					],
 					scan: [{ phase: 'roots', cursor: `b${'127'.padStart(31, '0')}` }],
 					frontier: [{ count: 128 }]

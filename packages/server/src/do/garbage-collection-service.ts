@@ -2004,6 +2004,10 @@ export class GarbageCollectionService {
 			now,
 			phaseStepSize
 		);
+		const hasMoreExpiredAccessKeys = this.context.accessKeys.deleteExpired(
+			now,
+			phaseStepSize
+		);
 		const hasMoreExpiredSubjectNonces = this.collectExpiredSubjectNonces(now);
 
 		if (expiredRefreshFamilies.hasMoreWork) {
@@ -2077,6 +2081,7 @@ export class GarbageCollectionService {
 				hasMoreReplacementCleanups ||
 				expiredRefreshFamilies.hasMoreWork ||
 				hasMoreExpiredArchives ||
+				hasMoreExpiredAccessKeys ||
 				hasMoreExpiredSubjectNonces ||
 				hasMorePendingRows,
 			stagingKeys

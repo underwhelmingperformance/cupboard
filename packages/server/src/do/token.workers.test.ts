@@ -53,9 +53,11 @@ import { z } from 'zod';
 
 import { type AccessIdentityKeyContext } from '../auth/access-identity.ts';
 import {
+	adminJwtTtlSeconds,
 	consumedSubjectNonceRetentionSeconds,
 	maxRefreshTokenFamilyMembers,
-	refreshTokenFamilyTtlSeconds
+	refreshTokenFamilyTtlSeconds,
+	writeJwtTtlSeconds
 } from '../auth/auth.ts';
 import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
 import {
@@ -5383,6 +5385,37 @@ describe('access-token identity and session', () => {
 			ruleId: 'write-rule'
 		});
 	});
+
+	it.each([
+		{
+			name: 'only reads',
+			outcome: 'a token without a session',
+			actions: ['view:content-read'],
+			isSession: false
+		},
+		{
+			name: 'can also create access keys',
+			outcome: 'a session',
+			actions: ['view:content-read', 'access-key:create'],
+			isSession: true
+		}
+	])(
+		'issues $outcome for a view grant that $name',
+		async ({ actions, isSession }) => {
+			const subjectToken = await installTrustedIdp('admin');
+			const exchanged = await exchange(subjectToken, [
+				{ type: 'cupboard_view', view: 'prior', actions }
+			]);
+
+			expect({
+				lifetime: exchanged.expires_in,
+				hasRefreshToken: exchanged.refresh_token !== undefined
+			}).toStrictEqual({
+				lifetime: isSession ? adminJwtTtlSeconds : writeJwtTtlSeconds,
+				hasRefreshToken: isSession
+			});
+		}
+	);
 
 	it('keeps the identity and session of the family in a refreshed token', async () => {
 		const subjectToken = await installTrustedIdp('admin');
