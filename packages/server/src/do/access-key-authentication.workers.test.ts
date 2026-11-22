@@ -1,5 +1,7 @@
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type AccessKeyCreateResponse,
+	accessKeyCreateResponseSchema,
 	accessKeyListResponseSchema
 } from '@cupboard/protocol/access-keys';
 import {
@@ -18,6 +20,7 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
+	createTestAccessKey,
 	currentServer,
 	narBytes,
 	pushPath,
@@ -75,6 +78,22 @@ const listGrants = authorizationDetailsSchema.parse([
 
 function listKeys(secret: string): Promise<Response> {
 	return authorisedFetch('/access-keys', secret);
+}
+
+const readDefault = authorizationDetailsSchema.parse([
+	{
+		type: 'cupboard_cache',
+		cache: { kind: 'default' },
+		actions: ['cache:content-read']
+	}
+]);
+
+function createWith(secret: string, body: unknown): Promise<Response> {
+	return authorisedFetch('/access-keys', secret, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(body)
+	});
 }
 
 function storedKeyCount(): Promise<number> {
@@ -219,15 +238,7 @@ describe('access-key authentication in the tenant object', () => {
 	});
 
 	it('refuses a publication to a key with only read grants', async () => {
-		const key = await aliceKey(
-			authorizationDetailsSchema.parse([
-				{
-					type: 'cupboard_cache',
-					cache: { kind: 'default' },
-					actions: ['cache:content-read']
-				}
-			])
-		);
+		const key = await aliceKey(readDefault);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const response = await authorisedFetch('/uploads', key.secret, {
 			method: 'POST',
@@ -239,5 +250,115 @@ describe('access-key authentication in the tenant object', () => {
 		});
 
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
+	});
+});
+
+describe('access keys acting on access keys', () => {
+	beforeEach(resetTestServer);
+
+	it('creates a key below the key that authenticates the request', async () => {
+		const parent = await aliceKey(readDefault);
+		const response = await createWith(parent.secret, { grants: readDefault });
+		const created = accessKeyCreateResponseSchema.parse(await response.json());
+		const stored = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({
+					parentKind: accessKeys.parentKind,
+					parentId: accessKeys.parentId,
+					rootIdentityJson: accessKeys.rootIdentityJson,
+					rootRule: accessKeys.rootRule,
+					creatorSubject: accessKeys.creatorSubject
+				})
+				.from(accessKeys)
+				.where(eq(accessKeys.id, created.id))
+				.get()
+		);
+
+		expect({ status: response.status, stored }).toStrictEqual({
+			status: StatusCodes.OK,
+			stored: {
+				parentKind: 'access-key',
+				parentId: parent.id,
+				rootIdentityJson: JSON.stringify(testTokenIdentity('alice')),
+				rootRule: rule,
+				creatorSubject: 'alice'
+			}
+		});
+	});
+
+	it('lets a key delete itself and the keys below it without access-key:delete', async () => {
+		const parent = await aliceKey(readDefault);
+		const created = await createWith(parent.secret, { grants: readDefault });
+		const beforeDeletion = await storedKeyCount();
+		const response = await authorisedFetch(
+			`/access-keys/${parent.id}`,
+			parent.secret,
+			{ method: 'DELETE' }
+		);
+
+		expect({
+			created: created.status,
+			beforeDeletion,
+			status: response.status,
+			body: await response.json(),
+			afterDeletion: await storedKeyCount()
+		}).toStrictEqual({
+			created: StatusCodes.OK,
+			beforeDeletion: 2,
+			status: StatusCodes.OK,
+			body: { id: parent.id, deleted: true },
+			afterDeletion: 0
+		});
+	});
+
+	it('leaves the keys below a collected key when its id is deleted', async () => {
+		const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+		const parent = await aliceKey(readDefault, expiry);
+		const created = await createWith(parent.secret, {
+			grants: readDefault,
+			expiresAt: expiry.toISOString()
+		});
+		const child = accessKeyCreateResponseSchema.parse(await created.json());
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(accessKeys)
+				.set({ expiresAt: isoTimestamp(new Date(0)) })
+				.where(eq(accessKeys.id, parent.id))
+				.run();
+			instance.context.accessKeys.deleteExpired(isoTimestamp(new Date()), 100);
+		});
+		const unrelated = await createTestAccessKey(
+			currentServer(),
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'other' },
+					actions: ['access-key:delete']
+				}
+			])
+		);
+		const response = await authorisedFetch(
+			`/access-keys/${parent.id}`,
+			unrelated.secret,
+			{ method: 'DELETE' }
+		);
+		const remaining = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({ id: accessKeys.id })
+				.from(accessKeys)
+				.all()
+				.map((row) => row.id)
+				.toSorted(byCodeUnit)
+		);
+
+		expect({
+			status: response.status,
+			body: await response.json(),
+			remaining
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: { id: parent.id, deleted: false },
+			remaining: [child.id, unrelated.id].toSorted(byCodeUnit)
+		});
 	});
 });

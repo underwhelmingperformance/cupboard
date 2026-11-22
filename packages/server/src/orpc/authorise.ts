@@ -321,6 +321,15 @@ async function authoriseAccessKey(
 	}
 
 	const id = inputField(input, location.field);
+
+	if (
+		location.self === true &&
+		principal.kind === 'access-key' &&
+		id === principal.key.id
+	) {
+		return;
+	}
+
 	const keyGrants = id === undefined ? undefined : await accessKeyGrants(id);
 
 	if (keyGrants === undefined) {
