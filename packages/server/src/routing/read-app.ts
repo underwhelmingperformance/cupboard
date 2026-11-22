@@ -22,12 +22,12 @@ import { upstreamTraceAttributes } from '../observability/trace-context.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
 	guardScopedRead,
-	isKeyAuthorisedWithoutVerifier,
 	narAuthorityForScope,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
 
+import { isAccessKeyReadAuthorised } from './access-key-reads.ts';
 import { answerAttestationInfo } from './attestation-info.ts';
 import { answerCacheMetadata } from './cache-metadata.ts';
 import {
@@ -298,7 +298,14 @@ function guardRead(
 							cache,
 							context.get('isCacheDeleted')
 						),
-					isKeyAuthorised: isKeyAuthorisedWithoutVerifier
+					isKeyAuthorised: (secret, cache) =>
+						isAccessKeyReadAuthorised(
+							context.env,
+							context.get('tenant'),
+							secret,
+							cache,
+							context.get('isCacheDeleted')
+						)
 				}
 			),
 		'read.authentication'

@@ -1,4 +1,5 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import { oidcIssuerSchema } from '@cupboard/protocol/oidc';
 import {
 	readTokenBasicUser,
@@ -10,6 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	cacheWriteGrants,
+	createTestAccessKey,
 	currentNarObjectKey,
 	fixtureWorkerServer,
 	initialiseViaWorker,
@@ -59,6 +61,20 @@ function tokenBasic(token: string): RequestInit {
 		headers: {
 			authorization: `Basic ${btoa(`${readTokenBasicUser}:${readTokenPasswordPrefix}${token}`)}`
 		}
+	};
+}
+
+const readDefault = authorizationDetailsSchema.parse([
+	{
+		type: 'cupboard_cache',
+		cache: { kind: 'default' },
+		actions: ['cache:content-read']
+	}
+]);
+
+function keyBasic(secret: string, user = 'anyone'): RequestInit {
+	return {
+		headers: { authorization: `Basic ${btoa(`${user}:${secret}`)}` }
 	};
 }
 
@@ -432,6 +448,87 @@ describe('per-cache private reads', () => {
 		}).toStrictEqual({
 			privateControl: 'no-store, no-transform',
 			publicControl: 'public, max-age=3600, must-revalidate, no-transform'
+		});
+	});
+});
+
+describe('access-key reads', () => {
+	beforeEach(async () => {
+		await resetTestServer();
+		await recordTransition('cache-identity', 'complete');
+	});
+
+	it('reads a private cache with a key from Bearer or a Basic password with any username', async () => {
+		const admin = await initialiseViaWorker();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPathToTenant(fixtureTenant, admin, metadata);
+		await putCache(admin, { kind: 'default' }, 'private');
+		const key = await createTestAccessKey(fixtureWorkerServer(), readDefault);
+		const path = `/${metadata.storePathHash}.narinfo`;
+
+		const responses = {
+			basic: await readFetch(path, keyBasic(key.secret)),
+			otherUser: await readFetch(path, keyBasic(key.secret, 'nix')),
+			bearer: await readFetch(path, {
+				headers: { authorization: `Bearer ${key.secret}` }
+			}),
+			nar: await readFetch(
+				`/${await currentNarObjectKey(metadata.narHash)}`,
+				keyBasic(key.secret)
+			)
+		};
+
+		expect(
+			Object.fromEntries(
+				Object.entries(responses).map(([name, response]) => [
+					name,
+					response.status
+				])
+			)
+		).toStrictEqual({
+			basic: StatusCodes.OK,
+			otherUser: StatusCodes.OK,
+			bearer: StatusCodes.OK,
+			nar: StatusCodes.OK
+		});
+	});
+
+	it('refuses a key on a cache outside its read grants', async () => {
+		const admin = await initialiseViaWorker();
+		await putCache(admin, { kind: 'default' }, 'private');
+		await putCache(admin, namedCache('other'), 'private');
+		const key = await createTestAccessKey(fixtureWorkerServer(), readDefault);
+
+		const inside = await readFetch('/nix-cache-info', keyBasic(key.secret));
+		const outside = await readFetch(
+			'/cache/other/nix-cache-info',
+			keyBasic(key.secret)
+		);
+
+		expect({ inside: inside.status, outside: outside.status }).toStrictEqual({
+			inside: StatusCodes.OK,
+			outside: StatusCodes.UNAUTHORIZED
+		});
+	});
+
+	it('refuses a wrong secret for a key that this isolate has verified', async () => {
+		const admin = await initialiseViaWorker();
+		await putCache(admin, { kind: 'default' }, 'private');
+		const key = await createTestAccessKey(fixtureWorkerServer(), readDefault);
+		const wrongSecret = key.secret.replace(/[\da-f]{64}$/u, '0'.repeat(64));
+
+		const warm = await readFetch('/nix-cache-info', keyBasic(key.secret));
+		const wrong = await readFetch('/nix-cache-info', keyBasic(wrongSecret));
+		const right = await readFetch('/nix-cache-info', keyBasic(key.secret));
+
+		expect({
+			warm: warm.status,
+			wrong: wrong.status,
+			right: right.status
+		}).toStrictEqual({
+			warm: StatusCodes.OK,
+			wrong: StatusCodes.UNAUTHORIZED,
+			right: StatusCodes.OK
 		});
 	});
 });
