@@ -1,7 +1,6 @@
 import {
 	type AuthKeyId,
-	type CacheAccessMode,
-	tenantIdSchema
+	type CacheAccessMode
 } from '@cupboard/nix-store/scalars';
 import { authKeyListResponseSchema } from '@cupboard/protocol/keys';
 import {
@@ -10,7 +9,6 @@ import {
 } from '@cupboard/protocol/read-access';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { tenantReadCredentialSchema } from '@cupboard/protocol/tenants';
 import {
 	createExecutionContext,
 	runInDurableObject,
@@ -18,13 +16,10 @@ import {
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
-import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { accessJwtClockToleranceSeconds } from '../auth/auth.ts';
-import { setCacheReadCredential } from '../control/tenant-registry.ts';
-import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { committedPath, setView } from '../do/reuse-view-read.test-support.ts';
 import { type CupboardServer } from '../do/server.ts';
@@ -32,10 +27,12 @@ import {
 	authorisedWorkerFetch,
 	currentOrigin,
 	defaultCache,
+	fixtureReaderAuthorization,
 	fixtureWorkerServer,
 	initialiseViaWorker,
 	issueWorkerSignedToken,
 	namedCache,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	readFetch,
 	recordTransition,
@@ -49,11 +46,6 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 type Source = 'default' | 'named' | 'reuse';
 type Mutation = (instance?: CupboardServer) => Promise<void>;
 
-const tenantReader = { user: 'alice', password: 'secret' };
-const cacheReader = tenantReadCredentialSchema.parse({
-	user: 'reader',
-	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-});
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const sources: readonly Source[] = ['default', 'named', 'reuse'];
 
@@ -100,7 +92,7 @@ async function readDuringMutation(
 	source: Source,
 	prefix: string,
 	storePath: string,
-	credential: { readonly user: string; readonly password: string },
+	authorization: string,
 	mutate: Mutation
 ): Promise<{ response: Response; mutations: number }> {
 	let mutations = 0;
@@ -112,7 +104,7 @@ async function readDuringMutation(
 		method: 'POST',
 		headers: {
 			'content-type': 'application/json',
-			authorization: `Basic ${btoa(`${credential.user}:${credential.password}`)}`
+			authorization
 		},
 		body: JSON.stringify({ storePaths: [storePath] })
 	};
@@ -215,7 +207,8 @@ describe('buffered metadata authority', () => {
 				`authority-public-${source}`,
 				'public'
 			);
-			await provisionFixtureTenant({ read: tenantReader });
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const original = await readFetch(
 				`${prefix}/${path.storePathHash}.narinfo`
 			);
@@ -224,8 +217,11 @@ describe('buffered metadata authority', () => {
 				source,
 				prefix,
 				path.storePath,
-				tenantReader,
-				() => provisionFixtureTenant()
+				fixtureReaderAuthorization,
+				() =>
+					runInDurableObject(fixtureWorkerServer(), (instance) => {
+						instance.context.db.delete(schema.accessKeys).run();
+					})
 			);
 			expect({
 				status: result.response.status,
@@ -241,80 +237,6 @@ describe('buffered metadata authority', () => {
 				},
 				mutations: 1
 			});
-		}
-	);
-
-	it.each(
-		sources.flatMap((source) =>
-			['replace', 'remove'].map((change) => [source, change] as const)
-		)
-	)(
-		'refuses %s metadata after a tenant credential change (%s) during storage reads',
-		async (source, change) => {
-			const { path, prefix } = await sourcePath(
-				source,
-				`authority-tenant-${source}-${change}`
-			);
-			await provisionFixtureTenant({
-				read: tenantReader,
-				defaultCacheAccess: 'private'
-			});
-			await expectRefusal(
-				await readDuringMutation(
-					source,
-					prefix,
-					path.storePath,
-					tenantReader,
-					() =>
-						provisionFixtureTenant({
-							defaultCacheAccess: 'private',
-							...(change === 'replace' && {
-								read: { ...tenantReader, password: 'replacement' }
-							})
-						})
-				)
-			);
-		}
-	);
-
-	it.each(
-		(['default', 'named'] as const).flatMap((source) =>
-			['replace', 'remove'].map((change) => [source, change] as const)
-		)
-	)(
-		'refuses %s metadata after a cache credential change (%s) during storage reads',
-		async (source, change) => {
-			const { cache, path, prefix } = await sourcePath(
-				source,
-				`authority-cache-${source}-${change}`
-			);
-			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-			const tenant = tenantIdSchema.parse(fixtureTenant);
-			await setCacheReadCredential(database, tenant, cache, cacheReader, now);
-			await expectRefusal(
-				await readDuringMutation(
-					source,
-					prefix,
-					path.storePath,
-					cacheReader,
-					async () => {
-						if (change === 'replace') {
-							await setCacheReadCredential(
-								database,
-								tenant,
-								cache,
-								{ ...cacheReader, password: 'x'.repeat(43) },
-								now
-							);
-							return;
-						}
-						await database
-							.delete(d1Schema.tenantCacheReadCredential)
-							.where(eq(d1Schema.tenantCacheReadCredential.tenant, tenant))
-							.run();
-					}
-				)
-			);
 		}
 	);
 
@@ -374,10 +296,7 @@ describe('buffered metadata authority', () => {
 					source,
 					prefix,
 					path.storePath,
-					{
-						user: readTokenBasicUser,
-						password: `${readTokenPasswordPrefix}${token}`
-					},
+					`Basic ${btoa(`${readTokenBasicUser}:${readTokenPasswordPrefix}${token}`)}`,
 					async (instance) => {
 						if (change === 'expire') {
 							vi.useFakeTimers({ toFake: ['Date'] });

@@ -1,9 +1,7 @@
 import {
 	cacheAccessModeSchema,
-	cacheScopeSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
@@ -23,44 +21,19 @@ export const tenantStatusSchema = z.enum([
 ]);
 export type TenantStatus = z.infer<typeof tenantStatusSchema>;
 
-// A read password is 32 random bytes, rendered as 43 base64url characters.
-export const readPasswordByteLength = 32;
-const readPasswordLength = 43;
-
-export const defaultReadUser = readUserInputSchema.parse('cupboard');
-
-// A read password is generated, never chosen. The control plane stores a
-// salted digest of it, so the credential is protected by the password's own
-// entropy, and this schema is exact so that all 256 bits stay random.
-export const readPasswordSchema = z
-	.string()
-	.length(readPasswordLength)
-	.regex(/^[A-Za-z0-9_-]+$/);
-
-// base64url is visible ASCII and contains no colon, so Basic authentication can
-// split the user from the password and netrc can store both unquoted.
-// `readUserInputSchema` excludes colons for the same reason.
-export const tenantReadCredentialSchema = z.strictObject({
-	user: readUserInputSchema,
-	password: readPasswordSchema
-});
-export type TenantReadCredential = z.output<typeof tenantReadCredentialSchema>;
-
 // A tenant's storage quota, in bytes. It counts the tenant's compressed NAR
 // objects and attestation CAS objects. Each object is counted once, however
 // many paths share it.
 export const tenantQuotaBytesSchema = countSchema;
 
 // The caller selects the initial access of the default cache and supplies the
-// OIDC identity for the first admin trust rule. A read credential is the
-// fallback credential for private caches that have no credential of their own.
+// OIDC identity for the first admin trust rule.
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	defaultCacheAccess: cacheAccessModeSchema,
 	ownerIssuer: oidcTrustIssuerInputSchema,
 	ownerSubject: z.string().min(1).brand('OidcSubject'),
 	ownerAudience: z.string().min(1).brand('OidcAudience'),
-	read: tenantReadCredentialSchema.optional(),
 	// Leave it out for unlimited storage.
 	quotaBytes: tenantQuotaBytesSchema.optional()
 });
@@ -204,30 +177,4 @@ export type MembershipRebuildResponse = z.output<
 >;
 export type MembershipRebuildResponseInput = z.input<
 	typeof membershipRebuildResponseSchema
->;
-
-export const tenantReadCredentialResponseSchema = z.strictObject({
-	id: tenantIdSchema,
-	hasCredential: z.boolean()
-});
-export type TenantReadCredentialResponse = z.output<
-	typeof tenantReadCredentialResponseSchema
->;
-export type TenantReadCredentialResponseInput = z.input<
-	typeof tenantReadCredentialResponseSchema
->;
-
-// The result of setting or clearing one cache's read credential. When a private
-// cache has no credential of its own, readers authenticate with the tenant
-// credential.
-export const cacheReadCredentialResponseSchema = z.strictObject({
-	id: tenantIdSchema,
-	cache: cacheScopeSchema,
-	hasCredential: z.boolean()
-});
-export type CacheReadCredentialResponse = z.output<
-	typeof cacheReadCredentialResponseSchema
->;
-export type CacheReadCredentialResponseInput = z.input<
-	typeof cacheReadCredentialResponseSchema
 >;

@@ -42,10 +42,10 @@ function cacheKeyVersionOf(request: Request): string {
 /**
 Creates the request used as the Workers Cache key for a public tenant read.
 
-Client query parameters, fragments, and read credentials do not select
+Client query parameters, fragments, and credentials do not select
 different cache content. Every request passed here has cleared the guard
 without relying on a credential. Strip `authorization` and `cookie` before
-forwarding the request so no read credential enters the cache-owning tenant
+forwarding the request so no credential enters the cache-owning tenant
 Worker and requests that differ only in their credentials share one cache
 entry.
 

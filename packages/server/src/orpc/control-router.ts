@@ -19,15 +19,11 @@ import {
 	controlOidcTrustRemove,
 	controlSessionList,
 	controlSessionRevoke,
-	controlTenantClearCacheReadCredential,
-	controlTenantClearReadCredential,
 	controlTenantCreate,
 	controlTenantGetQuota,
 	controlTenantList,
 	controlTenantOffboard,
 	controlTenantResume,
-	controlTenantRotateCacheReadCredential,
-	controlTenantRotateReadCredential,
 	controlTenantSetQuota,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
@@ -154,46 +150,6 @@ export const controlRouter = os.router({
 		setQuota: os.tenants.setQuota.handler(({ input, context }) =>
 			controlTenantSetQuota(context.env, input.id, input.quota)
 		),
-		rotateReadCredential: os.tenants.rotateReadCredential.handler(
-			({ input, context }) =>
-				controlTenantRotateReadCredential(context.env, input.id, input.read)
-		),
-		clearReadCredential: os.tenants.clearReadCredential.handler(
-			({ input, context }) =>
-				controlTenantClearReadCredential(context.env, input.id)
-		),
-		rotateDefaultCacheReadCredential:
-			os.tenants.rotateDefaultCacheReadCredential.handler(
-				({ input, context }) =>
-					controlTenantRotateCacheReadCredential(
-						context.env,
-						input.id,
-						{ kind: 'default' },
-						input.read
-					)
-			),
-		rotateNamedCacheReadCredential:
-			os.tenants.rotateNamedCacheReadCredential.handler(({ input, context }) =>
-				controlTenantRotateCacheReadCredential(
-					context.env,
-					input.id,
-					{ kind: 'named', name: input.cacheName },
-					input.read
-				)
-			),
-		clearDefaultCacheReadCredential:
-			os.tenants.clearDefaultCacheReadCredential.handler(({ input, context }) =>
-				controlTenantClearCacheReadCredential(context.env, input.id, {
-					kind: 'default'
-				})
-			),
-		clearNamedCacheReadCredential:
-			os.tenants.clearNamedCacheReadCredential.handler(({ input, context }) =>
-				controlTenantClearCacheReadCredential(context.env, input.id, {
-					kind: 'named',
-					name: input.cacheName
-				})
-			),
 		remove: os.tenants.remove.handler(({ input, context }) =>
 			controlTenantOffboard(context.env, input.id)
 		)

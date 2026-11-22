@@ -283,31 +283,25 @@ function guardRead(
 ): Promise<Response | undefined> {
 	return context.get('admissionDeadline').run(
 		() =>
-			guardScopedRead(
-				context.req.raw,
-				context.get('tenantEntry'),
-				context.get('readScope'),
-				{
-					cacheVerifier: context.get('cacheVerifier'),
-					isTokenAuthorised: (token, cache) =>
-						tenantServer(
-							context.env,
-							context.get('tenant')
-						).authoriseCacheContentRead(
-							token,
-							cache,
-							context.get('isCacheDeleted')
-						),
-					isKeyAuthorised: (secret, cache) =>
-						isAccessKeyReadAuthorised(
-							context.env,
-							context.get('tenant'),
-							secret,
-							cache,
-							context.get('isCacheDeleted')
-						)
-				}
-			),
+			guardScopedRead(context.req.raw, context.get('readScope'), {
+				isTokenAuthorised: (token, cache) =>
+					tenantServer(
+						context.env,
+						context.get('tenant')
+					).authoriseCacheContentRead(
+						token,
+						cache,
+						context.get('isCacheDeleted')
+					),
+				isKeyAuthorised: (secret, cache) =>
+					isAccessKeyReadAuthorised(
+						context.env,
+						context.get('tenant'),
+						secret,
+						cache,
+						context.get('isCacheDeleted')
+					)
+			}),
 		'read.authentication'
 	);
 }

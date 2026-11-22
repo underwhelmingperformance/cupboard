@@ -1,6 +1,3 @@
-import { randomBytes } from 'node:crypto';
-
-import { readPasswordByteLength } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 
 import { InvalidReadUserError } from './errors.ts';
@@ -22,8 +19,4 @@ export function parseReadUser(value: string | undefined): ReadUser | undefined {
 	}
 
 	return parsed.data;
-}
-
-export function generateReadPassword(): string {
-	return randomBytes(readPasswordByteLength).toString('base64url');
 }

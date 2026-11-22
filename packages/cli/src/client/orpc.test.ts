@@ -117,11 +117,6 @@ const notImplemented = (): Response =>
 const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 
 // A read password is exactly 43 base64url characters, which this satisfies.
-const readCredential = {
-	user: 'cupboard',
-	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-};
-
 const nonReplayableMutations = [
 	{
 		name: 'a cache registration',
@@ -1491,42 +1486,23 @@ describe('controlRpc', () => {
 		]);
 	});
 
-	// A rotation stores the password from the request, so the server accepts the
-	// same body twice. A clear deletes by name and must not be sent again.
-	const credentialCalls = [
+	// Setting a quota stores the value from the request, so the server accepts
+	// the same body twice. Removing a tenant must not be sent again.
+	const mutationCalls = [
 		{
-			name: 'a tenant read-credential rotation',
+			name: 'a quota change',
 			attempts: 2,
 			request: (rpc: ReturnType<typeof controlRpc>) =>
-				rpc.tenants.rotateReadCredential({
+				rpc.tenants.setQuota({
 					id: tenantIdSchema.parse('acme'),
-					read: readCredential
+					quota: { kind: 'unlimited' }
 				})
 		},
 		{
-			name: 'a private-cache read-credential rotation',
-			attempts: 2,
-			request: (rpc: ReturnType<typeof controlRpc>) =>
-				rpc.tenants.rotateNamedCacheReadCredential({
-					id: tenantIdSchema.parse('acme'),
-					cacheName: cacheNameSchema.parse('builds'),
-					read: readCredential
-				})
-		},
-		{
-			name: 'a tenant read-credential clear',
+			name: 'a tenant removal',
 			attempts: 1,
 			request: (rpc: ReturnType<typeof controlRpc>) =>
-				rpc.tenants.clearReadCredential({ id: tenantIdSchema.parse('acme') })
-		},
-		{
-			name: 'a private-cache read-credential clear',
-			attempts: 1,
-			request: (rpc: ReturnType<typeof controlRpc>) =>
-				rpc.tenants.clearNamedCacheReadCredential({
-					id: tenantIdSchema.parse('acme'),
-					cacheName: cacheNameSchema.parse('builds')
-				})
+				rpc.tenants.remove({ id: tenantIdSchema.parse('acme') })
 		}
 	] as const;
 
@@ -1555,7 +1531,7 @@ describe('controlRpc', () => {
 		}
 	});
 
-	it.each(credentialCalls)(
+	it.each(mutationCalls)(
 		'sends $name $attempts times after a gateway failure',
 		async ({ attempts, request }) => {
 			vi.useFakeTimers();
@@ -1596,15 +1572,15 @@ describe('admin API redirects', () => {
 				}).oidcTrust.list()
 		},
 		{
-			name: 'a control procedure with a read password in its body',
-			method: 'POST',
-			path: '/control/tenants/acme/read-credential',
+			name: 'a control procedure with a body',
+			method: 'PUT',
+			path: '/control/tenants/acme/quota',
 			request: (origin: RedirectingOrigin) =>
 				controlRpc(new URL(origin.origin), {
 					credential: 'admin-token'
-				}).tenants.rotateReadCredential({
+				}).tenants.setQuota({
 					id: tenantIdSchema.parse('acme'),
-					read: { user: 'cupboard', password: 'A'.repeat(43) }
+					quota: { kind: 'unlimited' }
 				})
 		}
 	])(

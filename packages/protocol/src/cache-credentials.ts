@@ -3,16 +3,21 @@ import {
 	cacheScopeSchema,
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
-import {
-	type TenantReadCredential,
-	tenantReadCredentialSchema
-} from './tenants.ts';
+// A read password is 32 random bytes, rendered as 43 base64url characters.
+const readCredentialSchema = z.strictObject({
+	user: readUserInputSchema,
+	password: z
+		.string()
+		.length(43)
+		.regex(/^[A-Za-z0-9_-]+$/u)
+});
 
 export interface CacheCredential {
 	readonly cache: CacheScope;
-	readonly credential: TenantReadCredential;
+	readonly credential: z.output<typeof readCredentialSchema>;
 }
 
 export type CacheCredentials = readonly CacheCredential[];
@@ -25,7 +30,7 @@ export const cacheCredentialsSchema = z
 	.array(
 		z.strictObject({
 			cache: cacheScopeSchema,
-			credential: tenantReadCredentialSchema
+			credential: readCredentialSchema
 		})
 	)
 	.superRefine((entries, context) => {

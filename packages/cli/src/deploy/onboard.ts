@@ -25,9 +25,7 @@ import type {
 } from '@cupboard/protocol/reports';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
-	defaultReadUser,
 	type TenantCreateBodyInput,
-	type TenantReadCredential,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { collectProgressively } from '@cupboard/shared/collections';
@@ -64,14 +62,12 @@ import {
 	UnreachableHostError
 } from '../errors.ts';
 import { ownDisplayName, principalLabel } from '../principal.ts';
-import { generateReadPassword } from '../read-user.ts';
 
 import { claimTargets, type DeployAuthority } from './authority.ts';
 import { removeClaimSecret } from './claim-secret.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import { deploymentUrl } from './deployment-url.ts';
 import type { CloudflareAccountId, ScriptName } from './identifiers.ts';
-import { showCacheCredential } from './onboard-ready.ts';
 import {
 	adminLoginCommand,
 	type Claimant,
@@ -107,7 +103,6 @@ type Probe<T> =
 
 interface CreatedCache {
 	readonly access: CacheAccessMode;
-	readonly read: TenantReadCredential;
 }
 
 export type OnboardOutcome =
@@ -274,7 +269,6 @@ export interface OnboardOptions {
 	*/
 	readonly removeClaimSecret?: () => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
-	readonly readPassword?: () => string;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly attempts?: number;
 }
@@ -519,11 +513,7 @@ export async function onboardDeployment(
 			{ ...owner, audience: ownerAudience },
 			{
 				slug: firstSlug,
-				access: options.cacheAccess,
-				read: {
-					user: defaultReadUser,
-					password: (options.readPassword ?? generateReadPassword)()
-				}
+				access: options.cacheAccess
 			}
 		);
 
@@ -532,12 +522,6 @@ export async function onboardDeployment(
 		}
 
 		slug = first.slug;
-		showCacheCredential(
-			ui,
-			tenantUrl(parseWorkerUrl(url), slug),
-			first,
-			'confirmed'
-		);
 	} else {
 		ui.info(`The tenant "${sole.id}" already exists; nothing to create.`);
 		slug = sole.id;
@@ -606,7 +590,7 @@ export async function onboardDeployment(
 		cacheUrl,
 		publicKey: key.value,
 		...(first !== undefined && {
-			created: { access: first.access, read: first.read }
+			created: { access: first.access }
 		})
 	};
 }
@@ -1435,14 +1419,13 @@ interface FirstTenantRequest {
 	*/
 	readonly slug: string | undefined;
 	readonly access: CacheAccessMode | undefined;
-	readonly read: TenantReadCredential;
 }
 
 /**
 Create the first tenant under the requested slug, or ask for one, and ask
 for its default cache's access if none was supplied. If another caller takes
-the slug first, ask for another slug and reuse the chosen access and read
-credential. Without a terminal, the prompts return `undefined`, so no tenant
+the slug first, ask for another slug and reuse the chosen access. Without a
+terminal, the prompts return `undefined`, so no tenant
 is created.
 */
 async function createFirstTenant(
@@ -1453,7 +1436,6 @@ async function createFirstTenant(
 	owner: Required<OwnerBinding>,
 	request: FirstTenantRequest
 ): Promise<FirstTenant | undefined> {
-	const { read } = request;
 	let chosen = request.access;
 	let requestedSlug = request.slug;
 
@@ -1480,12 +1462,11 @@ async function createFirstTenant(
 					defaultCacheAccess: access,
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience,
-					read
+					ownerAudience: owner.audience
 				})
 			);
 
-			return { slug, tenant, access, read };
+			return { slug, tenant, access };
 		} catch (error) {
 			if (error instanceof ORPCError && error.status === conflictStatusCode) {
 				if (!ui.interactive) {
@@ -1494,19 +1475,6 @@ async function createFirstTenant(
 
 				ui.warn(`"${slug}" is already taken; choose another.`);
 				continue;
-			}
-
-			const status =
-				error instanceof ORPCError || error instanceof CupboardHttpError
-					? error.status
-					: undefined;
-			if (status === undefined || status === 408 || status >= 500) {
-				showCacheCredential(
-					ui,
-					tenantUrl(parseWorkerUrl(url), slug),
-					{ access, read },
-					'unconfirmed'
-				);
 			}
 
 			throw error;
@@ -1574,7 +1542,7 @@ function chooseCacheAccess(ui: DeployUi): Promise<CacheAccessMode | undefined> {
 	return ui.menu<CacheAccessMode>('Who may read from this cache?', [
 		{
 			value: 'private',
-			label: 'Only clients with a read credential',
+			label: 'Only clients with an access key or a token',
 			hint: 'private'
 		},
 		{

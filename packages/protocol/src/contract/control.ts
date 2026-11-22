@@ -1,8 +1,4 @@
-import {
-	authKeyIdSchema,
-	cacheNameSchema,
-	tenantIdSchema
-} from '@cupboard/nix-store/scalars';
+import { authKeyIdSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { oc } from '@orpc/contract';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -36,7 +32,6 @@ import {
 	refreshSessionRevokeResponseSchema
 } from '../sessions.ts';
 import {
-	cacheReadCredentialResponseSchema,
 	membershipRebuildInputSchema,
 	membershipRebuildResponseSchema,
 	tenantCreateBodySchema,
@@ -47,8 +42,6 @@ import {
 	tenantOffboardingErrorDataSchema,
 	tenantQuotaBelowUsageErrorDataSchema,
 	tenantQuotaResponseSchema,
-	tenantReadCredentialResponseSchema,
-	tenantReadCredentialSchema,
 	tenantSetQuotaBodySchema,
 	tenantSummarySchema
 } from '../tenants.ts';
@@ -209,89 +202,6 @@ export const controlContract = {
 				}
 			})
 			.output(tenantQuotaResponseSchema),
-
-		// Both rotations write a verifier built from the password in the request,
-		// with a fresh salt each time, so a repeat leaves the same password valid.
-		// The two clears keep the default: a retry sent after the credential was
-		// set again would clear the new one.
-		rotateReadCredential: controlProcedure
-			.meta({
-				requires: 'tenant:rotate-read-credential',
-				resource: { tenant: { field: 'id' } },
-				replaySafety: 'replay-safe'
-			})
-			.route({ method: 'POST', path: '/tenants/{id}/read-credential' })
-			.input(
-				z.strictObject({ id: tenantIdSchema, read: tenantReadCredentialSchema })
-			)
-			.output(tenantReadCredentialResponseSchema),
-
-		clearReadCredential: controlProcedure
-			.meta({
-				requires: 'tenant:clear-read-credential',
-				resource: { tenant: { field: 'id' } }
-			})
-			.route({ method: 'DELETE', path: '/tenants/{id}/read-credential' })
-			.input(z.strictObject({ id: tenantIdSchema }))
-			.output(tenantReadCredentialResponseSchema),
-
-		rotateDefaultCacheReadCredential: controlProcedure
-			.meta({
-				requires: 'tenant:rotate-cache-read-credential',
-				resource: { tenant: { field: 'id' } },
-				replaySafety: 'replay-safe'
-			})
-			.route({
-				method: 'POST',
-				path: '/tenants/{id}/default-cache/read-credential'
-			})
-			.input(
-				z.strictObject({ id: tenantIdSchema, read: tenantReadCredentialSchema })
-			)
-			.output(cacheReadCredentialResponseSchema),
-
-		rotateNamedCacheReadCredential: controlProcedure
-			.meta({
-				requires: 'tenant:rotate-cache-read-credential',
-				resource: { tenant: { field: 'id' } },
-				replaySafety: 'replay-safe'
-			})
-			.route({
-				method: 'POST',
-				path: '/tenants/{id}/caches/{cacheName}/read-credential'
-			})
-			.input(
-				z.strictObject({
-					id: tenantIdSchema,
-					cacheName: cacheNameSchema,
-					read: tenantReadCredentialSchema
-				})
-			)
-			.output(cacheReadCredentialResponseSchema),
-
-		clearDefaultCacheReadCredential: controlProcedure
-			.meta({
-				requires: 'tenant:clear-cache-read-credential',
-				resource: { tenant: { field: 'id' } }
-			})
-			.route({
-				method: 'DELETE',
-				path: '/tenants/{id}/default-cache/read-credential'
-			})
-			.input(z.strictObject({ id: tenantIdSchema }))
-			.output(cacheReadCredentialResponseSchema),
-
-		clearNamedCacheReadCredential: controlProcedure
-			.meta({
-				requires: 'tenant:clear-cache-read-credential',
-				resource: { tenant: { field: 'id' } }
-			})
-			.route({
-				method: 'DELETE',
-				path: '/tenants/{id}/caches/{cacheName}/read-credential'
-			})
-			.input(z.strictObject({ id: tenantIdSchema, cacheName: cacheNameSchema }))
-			.output(cacheReadCredentialResponseSchema),
 
 		remove: controlProcedure
 			.meta({

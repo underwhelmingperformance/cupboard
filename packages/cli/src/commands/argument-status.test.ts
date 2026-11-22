@@ -63,26 +63,6 @@ it.each([
 	},
 	{
 		arguments: [
-			'tenant',
-			'create',
-			'http://127.0.0.1:1',
-			'acme',
-			'--owner-issuer',
-			'https://issuer.example',
-			'--owner-subject',
-			'owner',
-			'--owner-audience',
-			'cupboard',
-			'--access',
-			'public',
-			'--no-read-password',
-			'--read-user',
-			'alice'
-		],
-		advice: '--read-user cannot be combined with --no-read-password'
-	},
-	{
-		arguments: [
 			'oidc-trust',
 			'add-github-pr',
 			tenantUrl,

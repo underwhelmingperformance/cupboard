@@ -254,7 +254,7 @@ it('does not publish worker output when the outer credential wrapper fails', asy
 	);
 	onTestFinished(() => rm(directory, { recursive: true, force: true }));
 	const output = path.join(directory, 'output');
-	const failure = new Error('Read credential renewal refused');
+	const failure = new Error('Read token renewal refused');
 	await expect(
 		nativeEvaluationMain(
 			{

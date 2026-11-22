@@ -91,7 +91,7 @@ export function parseTenantCacheUrl(value: URL): TenantCacheUrl {
 }
 
 /**
-A read credential for a substituter URL.
+The user name and password for a substituter URL, such as an access key.
 */
 export interface CacheUrlCredential {
 	readonly user: string;

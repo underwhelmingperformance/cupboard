@@ -16,10 +16,12 @@ import {
 	bootstrap,
 	currentOrigin,
 	defaultCache,
+	fixtureReaderAuthorization,
 	md5Etag,
 	namedCache,
 	narBytes,
 	narHash,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPath,
 	readFetch,
@@ -30,9 +32,7 @@ import worker from '../worker.ts';
 
 const size = narBytes.byteLength;
 const privateCache = namedCache('builds');
-const reader = { user: 'alice', password: 'secret' };
 const hsts = 'max-age=31536000';
-const credentials = `Basic ${btoa(`${reader.user}:${reader.password}`)}`;
 
 interface ServedResponse {
 	readonly status: number;
@@ -92,10 +92,11 @@ async function publishNar(
 	}
 
 	await setView([{ kind: 'all' }]);
-	await provisionFixtureTenant({ read: reader });
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 	const narinfo = await readFetch(
 		`/cache/builds/${metadata.storePathHash}.narinfo`,
-		{ headers: { authorization: credentials } }
+		{ headers: { authorization: fixtureReaderAuthorization } }
 	);
 
 	return `/${NarInfo.parse(await narinfo.text()).url}`;
@@ -109,7 +110,7 @@ function readNar(
 ): Promise<Response> {
 	return readFetch(`${route.prefix}${narPath}`, {
 		method,
-		headers: { ...headers, authorization: credentials }
+		headers: { ...headers, authorization: fixtureReaderAuthorization }
 	});
 }
 

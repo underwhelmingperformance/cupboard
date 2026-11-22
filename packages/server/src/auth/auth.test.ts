@@ -201,6 +201,44 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		});
 	});
 
+	it('drops a retired operation from the grants of an issued token', async () => {
+		const keyPair = await generateAuthKeyPair();
+		const signingKey = await importPrivateKey(keyPair.privateJwk);
+		const issuedAt = Math.floor(now.getTime() / 1000);
+		const token = await new SignJWT({
+			authorization_details: [
+				{
+					type: 'cupboard_tenant',
+					tenant: 'acme',
+					actions: ['tenant:suspend', 'tenant:rotate-read-credential']
+				}
+			]
+		})
+			.setProtectedHeader({ alg: 'EdDSA', typ: accessTokenType, kid })
+			.setIssuer(issuer)
+			.setAudience(audience)
+			.setSubject(subject)
+			.setIssuedAt(issuedAt)
+			.setNotBefore(issuedAt)
+			.setExpirationTime(issuedAt + ttlSeconds)
+			.sign(signingKey);
+
+		expect(
+			await verifyAccessJwt(
+				keySet(keyPair.publicJwk),
+				token,
+				{ issuer, audience },
+				now
+			)
+		).toStrictEqual({
+			subject,
+			grants: [
+				{ type: 'cupboard_tenant', tenant: 'acme', actions: ['tenant:suspend'] }
+			],
+			expiresAt: new Date((issuedAt + ttlSeconds) * 1000)
+		});
+	});
+
 	it('marks issued tokens with the private Cupboard access-token type', async () => {
 		const keyPair = await generateAuthKeyPair();
 		const token = await issueAccessJwt(

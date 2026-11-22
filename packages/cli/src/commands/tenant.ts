@@ -1,22 +1,16 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type CacheAccessMode,
-	type CacheName,
-	cacheNameSchema,
-	type CacheScope,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import {
-	type CacheReadCredentialResponse,
-	defaultReadUser,
 	type TenantCreateBody,
 	tenantCreateBodySchema,
 	type TenantListResponse,
 	type TenantMutateResponse,
 	type TenantQuota,
 	type TenantQuotaResponse,
-	type TenantReadCredentialResponse,
 	type TenantStatus,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
@@ -27,27 +21,22 @@ import {
 	shouldShowDebug
 } from '@cupboard/reporter';
 import { collectProgressively } from '@cupboard/shared/collections';
-import type { ReadUser } from '@cupboard/shared/http';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import { abortableSleep } from '@cupboard/shared/retry';
-import { ORPCError } from '@orpc/client';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { cacheLabel } from '../client/client.ts';
 import { listingLimits, tenantPages } from '../client/listings.ts';
 import { type CallOptions, controlRpc } from '../client/orpc.ts';
 import { tenantMembershipUnpublishedErrorOf } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	CliUsageError,
-	CupboardHttpError,
 	TenantCreateIncompleteError,
 	type TenantMembershipUnpublishedError
 } from '../errors.ts';
-import { generateReadPassword, parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 export interface TenantClient {
@@ -63,34 +52,7 @@ export interface TenantClient {
 		id: TenantId;
 		quota: TenantQuota;
 	}): Promise<TenantQuotaResponse>;
-	rotateReadCredential(input: {
-		id: TenantId;
-		read: { user: ReadUser; password: string };
-	}): Promise<TenantReadCredentialResponse>;
-	clearReadCredential(input: {
-		id: TenantId;
-	}): Promise<TenantReadCredentialResponse>;
-	rotateDefaultCacheReadCredential(input: {
-		id: TenantId;
-		read: { user: ReadUser; password: string };
-	}): Promise<CacheReadCredentialResponse>;
-	rotateNamedCacheReadCredential(input: {
-		id: TenantId;
-		cacheName: CacheName;
-		read: { user: ReadUser; password: string };
-	}): Promise<CacheReadCredentialResponse>;
-	clearDefaultCacheReadCredential(input: {
-		id: TenantId;
-	}): Promise<CacheReadCredentialResponse>;
-	clearNamedCacheReadCredential(input: {
-		id: TenantId;
-		cacheName: CacheName;
-	}): Promise<CacheReadCredentialResponse>;
 	remove(input: { id: TenantId }): Promise<TenantMutateResponse>;
-}
-
-interface RotateCredentialOptions {
-	readonly readUser?: ReadUser;
 }
 
 interface ConfirmableOptions {
@@ -102,8 +64,6 @@ interface CreateOptions {
 	readonly ownerSubject: string;
 	readonly ownerAudience: string;
 	readonly access: CacheAccessMode;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: boolean;
 	readonly quotaBytes?: number;
 }
 
@@ -119,13 +79,6 @@ class QuotaBytesSelectionError extends CliUsageError {
 				: 'Pass the quota once: use either the positional bytes argument or --quota-bytes.'
 		);
 		this.name = 'QuotaBytesSelectionError';
-	}
-}
-
-export class ReadUserWithoutCredentialError extends CliUsageError {
-	constructor(public readonly readUser: string) {
-		super('--read-user cannot be combined with --no-read-password');
-		this.name = 'ReadUserWithoutCredentialError';
 	}
 }
 
@@ -152,36 +105,6 @@ export function parseQuotaBytes(value: string): number {
 	return parsed;
 }
 
-interface ReadCredentialSelection {
-	readonly read:
-		undefined | { readonly user: ReadUser; readonly password: string };
-	readonly generatedPassword: string | undefined;
-}
-
-function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
-	return supplied ?? defaultReadUser;
-}
-
-export function readCredentialFromOptions(options: {
-	readonly readUser?: ReadUser;
-	readonly readPassword?: boolean;
-}): ReadCredentialSelection {
-	if (options.readPassword === false) {
-		if (options.readUser !== undefined) {
-			throw new ReadUserWithoutCredentialError(options.readUser);
-		}
-
-		return { read: undefined, generatedPassword: undefined };
-	}
-
-	const password = generateReadPassword();
-
-	return {
-		read: { user: readUserOrDefault(options.readUser), password },
-		generatedPassword: password
-	};
-}
-
 export function registerTenantCommands(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -189,7 +112,7 @@ export function registerTenantCommands(
 	const tenant = program
 		.command('tenant')
 		.description(
-			'Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).'
+			'Create, suspend and remove tenants, and manage their quotas (operator only).'
 		);
 
 	tenant
@@ -215,49 +138,30 @@ export function registerTenantCommands(
 			parseCacheAccess
 		)
 		.option(
-			'--read-user <user>',
-			'user name for the tenant read credential (default: cupboard)',
-			parseReadUser
-		)
-		.option('--no-read-password', 'do not create a tenant read credential')
-		.option(
 			'--quota-bytes <bytes>',
 			'storage quota in bytes (unlimited by default); tenant set-quota accepts the same option',
 			parseQuotaBytes
 		)
 		.action(async (url: URL, id: string, options: CreateOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			// The client obtains the owner's token before its first fetch, so a
-			// failed sign-in throws before any request reaches the deployment.
-			let wasRequestSent = false;
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal,
-				fetcher: (input, init) => {
-					wasRequestSent = true;
-
-					return keepAliveFetch(input, init);
-				}
+				fetcher: keepAliveFetch
 			});
-			const readSelection = readCredentialFromOptions(options);
 			const body = tenantCreateBodySchema.parse({
 				id,
 				defaultCacheAccess: options.access,
 				ownerIssuer: options.ownerIssuer,
 				ownerSubject: options.ownerSubject,
 				ownerAudience: options.ownerAudience,
-				...(readSelection.read !== undefined && { read: readSelection.read }),
 				...(options.quotaBytes !== undefined && {
 					quotaBytes: options.quotaBytes
 				})
 			});
 
 			await runTenantCreate(body, reporter, rpc.tenants, {
-				...(readSelection.generatedPassword !== undefined && {
-					generatedReadPassword: readSelection.generatedPassword
-				}),
-				sleep: (ms) => abortableSleep(ms, programOptions.signal),
-				wasRequestSent: () => wasRequestSent
+				sleep: (ms) => abortableSleep(ms, programOptions.signal)
 			});
 		});
 
@@ -375,91 +279,6 @@ export function registerTenantCommands(
 		});
 
 	tenant
-		.command('rotate-credential')
-		.description(
-			'Replace the tenant read credential, and print the new password.'
-		)
-		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'tenant slug')
-		.option(
-			'--read-user <user>',
-			'user name for the new credential (default: cupboard)',
-			parseReadUser
-		)
-		.action(async (url: URL, id: string, options: RotateCredentialOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			await runTenantRotateCredential(
-				tenantIdSchema.parse(id),
-				options,
-				reporter,
-				tenantClient(url, programOptions)
-			);
-		});
-
-	tenant
-		.command('clear-credential')
-		.description('Remove the tenant read credential.')
-		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'tenant slug')
-		.action(async (url: URL, id: string) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			await runTenantClearCredential(
-				tenantIdSchema.parse(id),
-				reporter,
-				tenantClient(url, programOptions)
-			);
-		});
-
-	tenant
-		.command('rotate-cache-credential')
-		.description(
-			'Create or replace the cache read credential for one cache, and print the password.'
-		)
-		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'tenant slug')
-		.argument('[cache]', 'named cache; omit it for the default cache')
-		.option(
-			'--read-user <user>',
-			'user name for the new credential (default: cupboard)',
-			parseReadUser
-		)
-		.action(
-			async (
-				url: URL,
-				id: string,
-				cache: string | undefined,
-				options: RotateCredentialOptions
-			) => {
-				const reporter = commandUi(program, programOptions).reporter();
-				await runTenantRotateCacheCredential(
-					tenantIdSchema.parse(id),
-					cacheScopeFromName(cache),
-					options,
-					reporter,
-					tenantClient(url, programOptions)
-				);
-			}
-		);
-
-	tenant
-		.command('clear-cache-credential')
-		.description(
-			'Remove the cache read credential for one cache. The cache then accepts the tenant read credential again.'
-		)
-		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'tenant slug')
-		.argument('[cache]', 'named cache; omit it for the default cache')
-		.action(async (url: URL, id: string, cache: string | undefined) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			await runTenantClearCacheCredential(
-				tenantIdSchema.parse(id),
-				cacheScopeFromName(cache),
-				reporter,
-				tenantClient(url, programOptions)
-			);
-		});
-
-	tenant
 		.command('remove')
 		.alias('delete')
 		.description(
@@ -478,12 +297,6 @@ export function registerTenantCommands(
 		});
 }
 
-function cacheScopeFromName(name: string | undefined): CacheScope {
-	return name === undefined
-		? { kind: 'default' }
-		: { kind: 'named', name: cacheNameSchema.parse(name) };
-}
-
 function tenantClient(url: URL, options: ProgramOptions): TenantClient {
 	return controlRpc(url, {
 		credential: cachedOwnerProvider(url, { signal: options.signal }),
@@ -496,38 +309,18 @@ function tenantClient(url: URL, options: ProgramOptions): TenantClient {
 const maxCreateAttempts = 3;
 const maxCreateRetryWaitSeconds = 10;
 
-const serverErrorStatus = 500;
-const requestTimeoutStatus = 408;
-
 export interface TenantCreateOptions {
-	/**
-	The read password that the command generated and put in the request body.
-	*/
-	readonly generatedReadPassword?: string;
 	readonly sleep?: (ms: number) => Promise<void>;
-	/**
-	Whether the client has sent a request to the deployment. A failure before
-	the first request, such as a missing sign-in, cannot have created the
-	tenant. The default treats every failure as one after a request.
-	*/
-	readonly wasRequestSent?: () => boolean;
 }
 
 /**
 Creates the tenant and reports it. When the deployment answers that it created
 the tenant but could not publish its membership, the function repeats the
-identical request, with the same generated read password, after the delay
-that the deployment asks for, up to `maxCreateAttempts` requests. The create
-is idempotent for an identical request. When every request gets that answer,
-or a later request fails in another way, the function throws
-`TenantCreateIncompleteError`. Its cause is the last failure.
-
-A new run generates a different password, which the deployment refuses for an
-existing tenant. So whenever the tenant may exist and the function fails, it
-prints the generated credential through the reporter before it throws: after
-any failure that follows a `TENANT_MEMBERSHIP_UNPUBLISHED` answer, including an
-abort, and after a failure of a sent request whose outcome is unknown, such as
-a 5xx, a timeout or a lost connection.
+identical request after the delay that the deployment asks for, up to
+`maxCreateAttempts` requests. The create is idempotent for an identical
+request. When every request gets that answer, or a later request fails in
+another way, the function throws `TenantCreateIncompleteError`. Its cause is
+the last failure.
 */
 export async function runTenantCreate(
 	body: TenantCreateBody,
@@ -535,65 +328,22 @@ export async function runTenantCreate(
 	client: Pick<TenantClient, 'create'>,
 	options: TenantCreateOptions = {}
 ): Promise<void> {
-	const {
-		generatedReadPassword,
-		sleep = (ms) => abortableSleep(ms),
-		wasRequestSent = () => true
-	} = options;
-	const generated =
-		generatedReadPassword === undefined || body.read === undefined
-			? undefined
-			: { user: body.read.user, password: generatedReadPassword };
+	const { sleep = (ms) => abortableSleep(ms) } = options;
 	const progress: CreateProgress = { wasUnpublished: false };
-	let summary: TenantSummary;
-
-	try {
-		summary = await reporter.phase('Creating tenant', () =>
-			createRepeatingUnpublished(
-				body,
-				client,
-				generated !== undefined,
-				sleep,
-				progress
-			)
-		);
-	} catch (error) {
-		if (
-			generated !== undefined &&
-			(progress.wasUnpublished ||
-				(wasRequestSent() && hasUnknownOutcome(error)))
-		) {
-			reportUnconfirmedCredential(reporter, body.id, generated);
-		}
-
-		throw error;
-	}
+	const summary = await reporter.phase('Creating tenant', () =>
+		createRepeatingUnpublished(body, client, sleep, progress)
+	);
 
 	const rows: ResultRow[] = [
 		{ label: 'Tenant', value: summary.id },
 		{ label: 'Status', value: tenantStatusLabel(summary.status) },
-		{ label: 'Default cache access', value: body.defaultCacheAccess },
-		...(body.defaultCacheAccess === 'private' && body.read === undefined
-			? [
-					{
-						label: 'Warning',
-						value:
-							'the private default cache has no read credential; it refuses every read until one is set'
-					}
-				]
-			: []),
-		...(generatedReadPassword === undefined || body.read === undefined
-			? []
-			: [
-					{ label: 'Read user', raw: true, value: body.read.user },
-					{ label: 'Read password', raw: true, value: generatedReadPassword }
-				])
+		{ label: 'Default cache access', value: body.defaultCacheAccess }
 	];
 
 	reporter.result({
 		kind: 'tenant',
 		title: 'Tenant',
-		data: { ...summary, generatedReadPassword },
+		data: summary,
 		rows
 	});
 }
@@ -609,7 +359,6 @@ interface CreateProgress {
 async function createRepeatingUnpublished(
 	body: TenantCreateBody,
 	client: Pick<TenantClient, 'create'>,
-	hasGeneratedPassword: boolean,
 	sleep: (ms: number) => Promise<void>,
 	progress: CreateProgress
 ): Promise<TenantSummary> {
@@ -630,12 +379,9 @@ async function createRepeatingUnpublished(
 			const answer = tenantMembershipUnpublishedErrorOf(error);
 
 			if (answer === undefined && progress.wasUnpublished) {
-				throw new TenantCreateIncompleteError(
-					body.id,
-					attempt,
-					hasGeneratedPassword,
-					{ cause: error }
-				);
+				throw new TenantCreateIncompleteError(body.id, attempt, {
+					cause: error
+				});
 			}
 
 			if (answer === undefined) {
@@ -647,53 +393,8 @@ async function createRepeatingUnpublished(
 		}
 	}
 
-	throw new TenantCreateIncompleteError(
-		body.id,
-		maxCreateAttempts,
-		hasGeneratedPassword,
-		{ cause: unpublished }
-	);
-}
-
-// Whether the deployment may have created the tenant although a sent request
-// failed. A refusal with a 4xx status other than 408 created nothing. The
-// caller checks first that a request was sent.
-function hasUnknownOutcome(error: unknown): boolean {
-	const status =
-		error instanceof ORPCError || error instanceof CupboardHttpError
-			? error.status
-			: undefined;
-
-	return (
-		status === undefined ||
-		status === requestTimeoutStatus ||
-		status >= serverErrorStatus
-	);
-}
-
-function reportUnconfirmedCredential(
-	reporter: Reporter,
-	tenant: TenantId,
-	credential: { readonly user: ReadUser; readonly password: string }
-): void {
-	reporter.result({
-		kind: 'tenant-credential',
-		title: 'Unconfirmed tenant read credential',
-		data: {
-			id: tenant,
-			readUser: credential.user,
-			generatedReadPassword: credential.password
-		},
-		rows: [
-			{ label: 'Tenant', value: tenant },
-			{ label: 'Read user', raw: true, value: credential.user },
-			{ label: 'Read password', raw: true, value: credential.password },
-			{
-				label: 'Note',
-				value:
-					'the tenant may exist with this credential; save it now, because running the command again generates a different password, which the deployment refuses for an existing tenant'
-			}
-		]
+	throw new TenantCreateIncompleteError(body.id, maxCreateAttempts, {
+		cause: unpublished
 	});
 }
 
@@ -811,121 +512,6 @@ function reportTenantQuota(
 
 function quotaLabel(quota: TenantQuota): string {
 	return quota.kind === 'limited' ? formatBytes(quota.bytes) : 'unlimited';
-}
-
-export async function runTenantRotateCredential(
-	id: TenantId,
-	options: RotateCredentialOptions,
-	reporter: Reporter,
-	client: Pick<TenantClient, 'rotateReadCredential'>
-): Promise<void> {
-	const user = readUserOrDefault(options.readUser);
-	const password = generateReadPassword();
-	const result = await reporter.phase('Rotating read credential', () =>
-		client.rotateReadCredential({ id, read: { user, password } })
-	);
-
-	reporter.result({
-		kind: 'tenant',
-		title: 'Tenant',
-		data: { ...result, readUser: user, generatedReadPassword: password },
-		rows: [
-			{ label: 'Tenant', value: result.id },
-			{ label: 'Read user', raw: true, value: user },
-			{ label: 'Read password', raw: true, value: password }
-		]
-	});
-}
-
-export async function runTenantClearCredential(
-	id: TenantId,
-	reporter: Reporter,
-	client: Pick<TenantClient, 'clearReadCredential'>
-): Promise<void> {
-	const result = await reporter.phase('Clearing read credential', () =>
-		client.clearReadCredential({ id })
-	);
-
-	reporter.result({
-		kind: 'tenant',
-		title: 'Tenant',
-		data: result,
-		rows: [
-			{ label: 'Tenant', value: result.id },
-			{ label: 'Read credential', value: 'cleared' }
-		]
-	});
-}
-
-/**
-Generates a read password for one cache, sets it as that cache's own read
-credential, and prints it once. The deployment stores only a verifier, so
-the password cannot be recovered later.
-*/
-export async function runTenantRotateCacheCredential(
-	id: TenantId,
-	cache: CacheScope,
-	options: RotateCredentialOptions,
-	reporter: Reporter,
-	client: Pick<
-		TenantClient,
-		'rotateDefaultCacheReadCredential' | 'rotateNamedCacheReadCredential'
-	>
-): Promise<void> {
-	const user = readUserOrDefault(options.readUser);
-	const password = generateReadPassword();
-	const read = { user, password };
-	const result = await reporter.phase('Rotating cache read credential', () =>
-		cache.kind === 'default'
-			? client.rotateDefaultCacheReadCredential({ id, read })
-			: client.rotateNamedCacheReadCredential({
-					id,
-					cacheName: cache.name,
-					read
-				})
-	);
-
-	reporter.result({
-		kind: 'cache-credential',
-		title: 'Cache read credential',
-		data: { ...result, readUser: user, generatedReadPassword: password },
-		rows: [
-			{ label: 'Tenant', value: result.id },
-			{ label: 'Cache', value: cacheLabel(result.cache) },
-			{ label: 'Read user', raw: true, value: user },
-			{ label: 'Read password', raw: true, value: password }
-		]
-	});
-}
-
-export async function runTenantClearCacheCredential(
-	id: TenantId,
-	cache: CacheScope,
-	reporter: Reporter,
-	client: Pick<
-		TenantClient,
-		'clearDefaultCacheReadCredential' | 'clearNamedCacheReadCredential'
-	>
-): Promise<void> {
-	const result = await reporter.phase('Clearing cache read credential', () =>
-		cache.kind === 'default'
-			? client.clearDefaultCacheReadCredential({ id })
-			: client.clearNamedCacheReadCredential({ id, cacheName: cache.name })
-	);
-
-	reporter.result({
-		kind: 'cache-credential',
-		title: 'Cache read credential',
-		data: result,
-		rows: [
-			{ label: 'Tenant', value: result.id },
-			{ label: 'Cache', value: cacheLabel(result.cache) },
-			{
-				label: 'Read credential',
-				value: 'cleared; readers now use the tenant credential'
-			}
-		]
-	});
 }
 
 export async function runTenantRemove(

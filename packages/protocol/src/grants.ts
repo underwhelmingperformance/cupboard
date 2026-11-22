@@ -102,10 +102,6 @@ const tenantOperationSchema = z.enum([
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:rotate-read-credential',
-	'tenant:clear-read-credential',
-	'tenant:rotate-cache-read-credential',
-	'tenant:clear-cache-read-credential',
 	'tenant:read-quota',
 	'tenant:set-quota'
 ]);
@@ -198,10 +194,6 @@ export const operationSchema = z.enum([
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:rotate-read-credential',
-	'tenant:clear-read-credential',
-	'tenant:rotate-cache-read-credential',
-	'tenant:clear-cache-read-credential',
 	'tenant:read-quota',
 	'tenant:set-quota',
 	'membership:rebuild',

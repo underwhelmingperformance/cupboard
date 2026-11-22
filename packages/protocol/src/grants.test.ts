@@ -770,6 +770,35 @@ describe('storedPermittedGrantsSchema', () => {
 		]);
 	});
 
+	it('strips the removed read-credential operations from a control rule', () => {
+		const tenant = { tenant: { exact: 'acme', validate: 'tenant' } };
+		const parsed = storedPermittedGrantsSchema.parse([
+			{
+				type: 'cupboard_tenant',
+				actions: [
+					'tenant:suspend',
+					'tenant:rotate-read-credential',
+					'tenant:clear-read-credential',
+					'tenant:rotate-cache-read-credential',
+					'tenant:clear-cache-read-credential'
+				],
+				resources: tenant
+			},
+			{
+				type: 'cupboard_control',
+				actions: ['tenant:rotate-read-credential']
+			}
+		]);
+
+		expect(parsed).toStrictEqual([
+			{
+				type: 'cupboard_tenant',
+				actions: ['tenant:suspend'],
+				resources: tenant
+			}
+		]);
+	});
+
 	it('drops a grant left with no recognised action', () => {
 		const parsed = storedPermittedGrantsSchema.parse([
 			{

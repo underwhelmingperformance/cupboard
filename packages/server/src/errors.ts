@@ -1938,9 +1938,9 @@ export class TenantAdmissionUnavailableError extends ServerHttpError {
 A tenant creation wrote the tenant's row, configured its object and wrote its
 marker, but could not write the membership filter or delete it. The stored
 filter can still exclude the tenant, and admission then refuses every request
-to it. The create is idempotent for an identical request, including the same
-read credential, so repeating that request publishes the filter. A redeploy
-also publishes it, because the deploy rebuilds the membership of every tenant.
+to it. The create is idempotent for an identical request, so repeating that
+request publishes the filter. A redeploy also publishes it, because the deploy
+rebuilds the membership of every tenant.
 */
 export class TenantMembershipUnpublishedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
@@ -1951,7 +1951,7 @@ export class TenantMembershipUnpublishedError extends ServerHttpError {
 		public override readonly cause: unknown
 	) {
 		super(
-			`Tenant ${tenant} was created, but the membership filter could not be published. Repeat the identical create request, with the same read credential, or run \`cupboard deploy\` again to publish it`
+			`Tenant ${tenant} was created, but the membership filter could not be published. Repeat the identical create request, or run \`cupboard deploy\` again to publish it`
 		);
 		this.name = 'TenantMembershipUnpublishedError';
 	}

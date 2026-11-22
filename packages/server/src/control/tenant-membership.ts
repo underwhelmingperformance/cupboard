@@ -16,7 +16,6 @@ import {
 	type ExponentialBackoffPolicy,
 	type RandomSource
 } from '@cupboard/shared/backoff';
-import { type ReadUser } from '@cupboard/shared/http';
 import { and, eq, gt, lte, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -36,10 +35,6 @@ import {
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import { readRequestBudgetMs } from '../policy/streaming.ts';
-import {
-	type ReadPasswordHash,
-	type ReadPasswordSalt
-} from '../read/read-auth.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
@@ -67,19 +62,8 @@ const filterCacheTtlSeconds = 10;
 // distinct-slug spray, so this only blunts repeated probes.
 const memberKeyCacheTtlSeconds = 60;
 
-/**
-A read verifier loaded from D1. It can come from the authoritative tenant row
-or from one private cache's credential row.
-*/
-export interface TenantReadVerifier {
-	readonly user: ReadUser;
-	readonly passwordHash: ReadPasswordHash;
-	readonly passwordSalt: ReadPasswordSalt;
-}
-
 export interface TenantEntry {
 	readonly status: TenantStatus;
-	readonly readVerifier?: TenantReadVerifier;
 }
 
 // Current admission reads D1 and returns `fresh: true`. The flag remains in the
@@ -91,7 +75,6 @@ export interface TenantAdmission {
 		readonly access: CacheAccessMode;
 		readonly isDeleted: boolean;
 	};
-	readonly cacheVerifier?: TenantReadVerifier;
 	// The generation and read revision of the addressed cache. The Workers
 	// Cache key of a public read carries both, so a response the previous cache
 	// of that name produced is not served.
@@ -233,22 +216,13 @@ async function loadMembershipFilter(
 
 const tenantAdmissionColumns = {
 	status: d1Schema.tenant.status,
-	cacheCatalogueVersion: d1Schema.tenant.cacheCatalogueVersion,
-	readUser: d1Schema.tenant.readUser,
-	readPasswordHash: d1Schema.tenant.readPasswordHash,
-	readPasswordSalt: d1Schema.tenant.readPasswordSalt
-};
-
-const cacheCredentialColumns = {
-	readUser: d1Schema.tenantCacheReadCredential.readUser,
-	readPasswordHash: d1Schema.tenantCacheReadCredential.readPasswordHash,
-	readPasswordSalt: d1Schema.tenantCacheReadCredential.readPasswordSalt
+	cacheCatalogueVersion: d1Schema.tenant.cacheCatalogueVersion
 };
 
 // Every push and fetch depends on this authoritative row. Retry one transient
 // D1 failure, then return a retryable refusal for a persistent failure.
-// Reads the tenant row, the addressed cache's credential row and its lifecycle
-// row in one D1 batch.
+// Reads the tenant row and the addressed cache's lifecycle row in one D1
+// batch.
 async function readTenantAndCacheRows(
 	database: Database,
 	slug: TenantId,
@@ -256,20 +230,11 @@ async function readTenantAndCacheRows(
 	phase: RefusalPhase
 ): Promise<{
 	tenant: TenantAdmissionRow | undefined;
-	credential: TenantReadVerifier | undefined;
 	cache:
 		| { readonly access: CacheAccessMode; readonly isDeleted: boolean }
 		| undefined;
 	version: CacheLifecycleVersion;
 }> {
-	const credentialRow = and(
-		eq(d1Schema.tenantCacheReadCredential.tenant, slug),
-		cacheIdentityCondition(
-			d1Schema.tenantCacheReadCredential.cacheKind,
-			d1Schema.tenantCacheReadCredential.cacheName,
-			cache
-		)
-	);
 	const lifecycleRow = and(
 		eq(d1Schema.cacheLifecycle.tenant, slug),
 		cacheIdentityCondition(
@@ -280,41 +245,27 @@ async function readTenantAndCacheRows(
 	);
 
 	try {
-		const [tenantRows, credentialRows, lifecycleRows] = await readWithOneRetry(
-			() =>
-				database.batch([
-					database
-						.select(tenantAdmissionColumns)
-						.from(d1Schema.tenant)
-						.where(eq(d1Schema.tenant.id, slug)),
-					database
-						.select(cacheCredentialColumns)
-						.from(d1Schema.tenantCacheReadCredential)
-						.where(credentialRow),
-					database
-						.select({
-							access: d1Schema.cacheLifecycle.access,
-							generation: d1Schema.cacheLifecycle.generation,
-							readRevision: d1Schema.cacheLifecycle.readRevision,
-							deletedAt: d1Schema.cacheLifecycle.deletedAt
-						})
-						.from(d1Schema.cacheLifecycle)
-						.where(lifecycleRow)
-				])
+		const [tenantRows, lifecycleRows] = await readWithOneRetry(() =>
+			database.batch([
+				database
+					.select(tenantAdmissionColumns)
+					.from(d1Schema.tenant)
+					.where(eq(d1Schema.tenant.id, slug)),
+				database
+					.select({
+						access: d1Schema.cacheLifecycle.access,
+						generation: d1Schema.cacheLifecycle.generation,
+						readRevision: d1Schema.cacheLifecycle.readRevision,
+						deletedAt: d1Schema.cacheLifecycle.deletedAt
+					})
+					.from(d1Schema.cacheLifecycle)
+					.where(lifecycleRow)
+			])
 		);
-		const credential = credentialRows[0];
 		const lifecycle = lifecycleRows[0];
 
 		return {
 			tenant: tenantRows[0],
-			credential:
-				credential === undefined
-					? undefined
-					: {
-							user: credential.readUser,
-							passwordHash: credential.readPasswordHash,
-							passwordSalt: credential.readPasswordSalt
-						},
 			cache:
 				lifecycle === undefined
 					? undefined
@@ -369,48 +320,11 @@ export function tenantRefusal(
 interface TenantAdmissionRow {
 	status: TenantEntry['status'];
 	cacheCatalogueVersion: number | null;
-	readUser: ReadUser | null;
-	readPasswordHash: ReadPasswordHash | null;
-	readPasswordSalt: ReadPasswordSalt | null;
-}
-
-function entryFromRow(row: TenantAdmissionRow): TenantEntry {
-	if (
-		row.readUser !== null &&
-		row.readPasswordHash !== null &&
-		row.readPasswordSalt !== null
-	) {
-		return {
-			status: row.status,
-			readVerifier: {
-				user: row.readUser,
-				passwordHash: row.readPasswordHash,
-				passwordSalt: row.readPasswordSalt
-			}
-		};
-	}
-
-	return { status: row.status };
-}
-
-export async function readTenantReadVerifier(
-	database: Database,
-	slug: TenantId
-): Promise<TenantReadVerifier | undefined> {
-	const row = await readWithOneRetry(() =>
-		database
-			.select(tenantAdmissionColumns)
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, slug))
-			.get()
-	);
-
-	return row === undefined ? undefined : entryFromRow(row).readVerifier;
 }
 
 // Tier 3 reads the authoritative tenant row and the addressed cache's
-// credential and lifecycle rows. It reads D1 directly, so suspension, deletion
-// and credential changes take effect as soon as the control API commits them.
+// lifecycle row. It reads D1 directly, so suspension and deletion take effect
+// as soon as the control API commits them.
 export async function readTenantEntry(
 	env: Env,
 	slug: TenantId,
@@ -442,19 +356,12 @@ export async function readTenantEntry(
 		}
 	}
 
-	const entry = entryFromRow(rows.tenant);
-	const admission = {
-		entry,
+	return {
+		entry: { status: rows.tenant.status },
 		fresh: true,
 		cache: rows.cache,
 		cacheVersion: rows.version
 	};
-
-	if (rows.credential === undefined) {
-		return admission;
-	}
-
-	return { ...admission, cacheVerifier: rows.credential };
 }
 
 /**

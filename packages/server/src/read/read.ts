@@ -24,7 +24,6 @@ import {
 	type NarInfoReferenceVersion,
 	recordedNarInfoMetadata
 } from '../blob/narinfo-object-metadata.ts';
-import { type TenantEntry } from '../control/tenant-membership.ts';
 import {
 	cacheIdentityCondition,
 	cacheSelectorsCondition
@@ -66,11 +65,7 @@ import {
 import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 
 import { isCacheReadCovered } from './cache-read-grants.ts';
-import {
-	isReadAuthorised,
-	type ReadVerifier,
-	unauthorisedResponse
-} from './read-auth.ts';
+import { unauthorisedResponse } from './read-auth.ts';
 
 export interface CacheNarInfoVersion extends NarInfoReferenceVersion {
 	readonly cacheGeneration: CacheGeneration;
@@ -94,7 +89,6 @@ export interface ReadScope {
 }
 
 export interface CacheReadAuthentication {
-	readonly cacheVerifier?: ReadVerifier;
 	readonly isTokenAuthorised: (
 		token: string,
 		cache: CacheScope
@@ -106,7 +100,6 @@ export interface CacheReadAuthentication {
 }
 
 export interface ViewReadAuthentication {
-	readonly verifier: ReadVerifier | undefined;
 	readonly isTokenAuthorised: (token: string) => Promise<boolean>;
 	readonly isKeyAuthorised: (secret: string) => Promise<boolean>;
 }
@@ -134,17 +127,13 @@ export function publicReadGrants(scope: ReadScope): AuthorizationDetails {
 /**
 Authenticates a read, or returns the refusal to send instead.
 
-Admission reads every verifier from the authoritative D1 rows on each
-request, so a rotated or deleted verifier takes effect immediately.
-
-A private cache must authenticate. A content-read token can authorise the
-cache directly. For a static credential, the cache-specific verifier takes
-precedence over the tenant verifier. The control Worker streams private
-content; token verification calls the tenant Worker once per request.
+A read of a private cache must present an access token or an access key whose
+grants cover it. The control Worker streams private content. It asks the
+tenant object to verify a token on every request, and a key whenever the
+isolate's key cache does not have it.
 */
 export async function guardScopedRead(
 	request: Request,
-	entry: TenantEntry,
 	scope: ReadScope,
 	authentication: CacheReadAuthentication
 ): Promise<Response | undefined> {
@@ -155,18 +144,15 @@ export async function guardScopedRead(
 		return undefined;
 	}
 
-	return authenticateRead(
-		request,
-		authentication.cacheVerifier ?? entry.readVerifier,
-		(credential) =>
-			boundedSubrequest(
-				() =>
-					credential.kind === 'access-token'
-						? authentication.isTokenAuthorised(credential.token, scope.scope)
-						: authentication.isKeyAuthorised(credential.secret, scope.scope),
-				'tenant.authoriseCacheContentRead',
-				unboundedCapMs
-			)
+	return authenticateRead(request, (credential) =>
+		boundedSubrequest(
+			() =>
+				credential.kind === 'access-token'
+					? authentication.isTokenAuthorised(credential.token, scope.scope)
+					: authentication.isKeyAuthorised(credential.secret, scope.scope),
+			'tenant.authoriseCacheContentRead',
+			unboundedCapMs
+		)
 	);
 }
 
@@ -174,15 +160,14 @@ export async function guardScopedRead(
 Authenticates a read of a private reuse view, or returns the refusal to send
 instead.
 
-A view can select several caches. An exact view content-read token or the
-tenant's static credential can authorise it; a cache-specific credential
-grants access only to that cache.
+A view can select several caches. Only an access token or an access key with
+`view:content-read` for that view can authorise it.
 */
 export function guardPrivateViewRead(
 	request: Request,
 	authentication: ViewReadAuthentication
 ): Promise<Response | undefined> {
-	return authenticateRead(request, authentication.verifier, (credential) =>
+	return authenticateRead(request, (credential) =>
 		credential.kind === 'access-token'
 			? authentication.isTokenAuthorised(credential.token)
 			: authentication.isKeyAuthorised(credential.secret)
@@ -191,22 +176,15 @@ export function guardPrivateViewRead(
 
 async function authenticateRead(
 	request: Request,
-	verifier: ReadVerifier | undefined,
 	isCredentialAuthorised: (credential: PresentedCredential) => Promise<boolean>
 ): Promise<Response | undefined> {
 	const credential = presentedCredential(request);
 
-	if (credential !== undefined) {
-		return (await isCredentialAuthorised(credential))
-			? undefined
-			: unauthorisedResponse();
+	if (credential === undefined || !(await isCredentialAuthorised(credential))) {
+		return unauthorisedResponse();
 	}
 
-	if (verifier !== undefined && (await isReadAuthorised(request, verifier))) {
-		return undefined;
-	}
-
-	return unauthorisedResponse();
+	return undefined;
 }
 
 /**

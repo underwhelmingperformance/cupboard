@@ -1,10 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import { type TenantId } from '@cupboard/nix-store/scalars';
 
-import {
-	type TenantEntry,
-	type TenantReadVerifier
-} from '../control/tenant-membership.ts';
+import { type TenantEntry } from '../control/tenant-membership.ts';
 import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 import { type DeadlineClock, type SharedDeadline } from '../do/deadline.ts';
 import { type ReadScope } from '../read/read.ts';
@@ -33,9 +30,6 @@ export interface WorkerHonoEnv {
 		tenantEntryFresh: boolean;
 		tenantRest: string;
 		readScope: ReadScope;
-		// The addressed cache's own read verifier, when it has one. Admission loads
-		// it alongside the tenant row.
-		cacheVerifier?: TenantReadVerifier;
 		// Whether the addressed cache is absent or deleted. Content routes return
 		// 404 in either case.
 		isCacheDeleted: boolean;

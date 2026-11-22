@@ -509,17 +509,19 @@ it('serves a suspended predecessor private cache immediately after resume', asyn
 		await wakeUntilStep(server, client, currentLocalStep);
 
 		await server.resumeTenant('upgrade-suspended');
-		await server.configureTenantReadCredential('upgrade-suspended');
+		const readKey = await server.createReadKey('upgrade-suspended', 'secrets');
 		const immediate = await server.tenantNarInfo(
 			'upgrade-suspended',
-			'secrets'
+			'secrets',
+			readKey
 		);
 		await immediate.arrayBuffer();
 
 		await client.wakeLocalStep();
 		const afterWake = await server.tenantNarInfo(
 			'upgrade-suspended',
-			'secrets'
+			'secrets',
+			readKey
 		);
 		await afterWake.arrayBuffer();
 

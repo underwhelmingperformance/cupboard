@@ -434,7 +434,7 @@ export class CacheAdminService {
 			throw new CacheNotFoundError(cache.scope);
 		}
 
-		await this.deletionQueue.revokeCacheGenerationAndClearCredential(cache);
+		await this.deletionQueue.revokeCacheGeneration(cache);
 
 		// Each statement changes at most one row, so the removal costs the same
 		// for every cache. The cache's narinfo, root, grace and upload rows stay
@@ -841,7 +841,6 @@ export class CacheAdminService {
 					update.access
 				);
 				version = await this.registration.recordLifecycle(updated);
-				await this.registration.clearReadCredential(updated.scope);
 			}
 
 			const cache = this.context.cacheRepository.stampGeneration(

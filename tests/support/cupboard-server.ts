@@ -71,7 +71,6 @@ const harnessAdminSubject = 'harness-admin';
 // the fallback credential for private cache reads.
 export interface TenantProvisionSpec {
 	readonly defaultCacheAccess: CacheAccessMode;
-	readonly read?: { readonly user: string; readonly password: string };
 }
 
 export const r2Credentials = {
@@ -459,8 +458,7 @@ export class CupboardTestServer {
 			defaultCacheAccess: spec.defaultCacheAccess,
 			ownerIssuer: this.issuer.issuer,
 			ownerSubject,
-			ownerAudience,
-			...(spec.read !== undefined && { read: spec.read })
+			ownerAudience
 		};
 		const response = await fetch(new URL('/control/tenants', this.url), {
 			method: 'POST',

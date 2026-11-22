@@ -558,7 +558,7 @@ function ordinaryError(error: unknown, options: HumanErrorOptions): string {
 		error instanceof errors.CacheInfoUnavailableError ||
 		error instanceof errors.NarInfoUnavailableError
 	) {
-		return `Could not read cache information from ${error.target.href}. Check the URL, cache availability and read credentials. Use --debug for diagnostic information.`;
+		return `Could not read cache information from ${error.target.href}. Check the URL, cache availability and credentials. Use --debug for diagnostic information.`;
 	}
 
 	if (

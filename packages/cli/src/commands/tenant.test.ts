@@ -2,49 +2,32 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
-	cacheNameSchema,
-	type CacheScope,
-	tenantIdSchema
-} from '@cupboard/nix-store/scalars';
-import {
-	cacheReadCredentialResponseSchema,
-	defaultReadUser,
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
 	type TenantQuota,
-	tenantReadCredentialResponseSchema,
 	tenantSummarySchema
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
 import { genericExitCode } from '@cupboard/shared/errors';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
-import {
-	OwnerLoginRequiredError,
-	TenantCreateIncompleteError
-} from '../errors.ts';
+import { TenantCreateIncompleteError } from '../errors.ts';
 
 import {
 	InvalidQuotaBytesError,
 	parseQuotaBytes,
-	readCredentialFromOptions,
-	ReadUserWithoutCredentialError,
 	registerTenantCommands,
-	runTenantClearCacheCredential,
-	runTenantClearCredential,
 	runTenantCreate,
 	runTenantList,
 	runTenantQuota,
 	runTenantRemove,
 	runTenantResume,
-	runTenantRotateCacheCredential,
-	runTenantRotateCredential,
 	runTenantSetQuota,
 	runTenantSuspend,
 	type TenantClient,
@@ -52,8 +35,6 @@ import {
 } from './tenant.ts';
 
 const acme = tenantIdSchema.parse('acme');
-const alice = readUserInputSchema.parse('alice');
-const password = 'A'.repeat(43);
 
 const quotaMocks = vi.hoisted(() => ({ client: vi.fn(), set: vi.fn() }));
 vi.mock('../client/orpc.ts', async (importOriginal) => ({
@@ -155,26 +136,6 @@ function summary(status: 'active' | 'suspended' = 'active') {
 	});
 }
 
-// The message and stack of `error` and of every error in its cause chain,
-// with each error's own properties.
-function errorChainText(error: unknown): string {
-	const parts: string[] = [];
-	const seen = new Set<unknown>();
-	let current = error;
-
-	while (current instanceof Error && !seen.has(current)) {
-		seen.add(current);
-		parts.push(
-			current.message,
-			current.stack ?? '',
-			JSON.stringify(Object.entries(current))
-		);
-		current = current.cause;
-	}
-
-	return parts.join('\n');
-}
-
 function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 	return {
 		list: () => Promise.resolve({ tenants: [] }),
@@ -184,26 +145,6 @@ function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 		getQuota: ({ id }) =>
 			Promise.resolve({ id, quota: { kind: 'unlimited' }, usedBytes: 0 }),
 		setQuota: ({ id, quota }) => Promise.resolve({ id, quota, usedBytes: 0 }),
-		rotateReadCredential: ({ id }) =>
-			Promise.resolve({ id, hasCredential: true }),
-		clearReadCredential: ({ id }) =>
-			Promise.resolve({ id, hasCredential: false }),
-		rotateDefaultCacheReadCredential: ({ id }) =>
-			Promise.resolve({ id, cache: { kind: 'default' }, hasCredential: true }),
-		rotateNamedCacheReadCredential: ({ id, cacheName }) =>
-			Promise.resolve({
-				id,
-				cache: { kind: 'named', name: cacheName },
-				hasCredential: true
-			}),
-		clearDefaultCacheReadCredential: ({ id }) =>
-			Promise.resolve({ id, cache: { kind: 'default' }, hasCredential: false }),
-		clearNamedCacheReadCredential: ({ id, cacheName }) =>
-			Promise.resolve({
-				id,
-				cache: { kind: 'named', name: cacheName },
-				hasCredential: false
-			}),
 		remove: ({ id }) => Promise.resolve({ id, status: 'offboarding' }),
 		...overrides
 	};
@@ -246,59 +187,21 @@ describe('tenant argument error statuses', () => {
 			});
 		}
 	);
-	it('classifies a username without a credential as a usage error', () => {
-		let failure: unknown;
-		try {
-			readCredentialFromOptions({ readUser: alice, readPassword: false });
-		} catch (error) {
-			failure = error;
+});
+
+// The options of a create that record each wait that the command requests.
+function createOptions(sleeps: number[]): TenantCreateOptions {
+	return {
+		sleep: (ms) => {
+			sleeps.push(ms);
+
+			return Promise.resolve();
 		}
-		expect({
-			name: failure instanceof Error ? failure.name : undefined,
-			status: cliExitCode(failure, 130)
-		}).toStrictEqual({ name: 'ReadUserWithoutCredentialError', status: 2 });
-	});
-});
-
-describe('readCredentialFromOptions', () => {
-	it('creates the default fallback credential', () => {
-		const selected = readCredentialFromOptions({});
-
-		expect(selected).toStrictEqual({
-			read: {
-				user: defaultReadUser,
-				password: selected.generatedPassword
-			},
-			generatedPassword: selected.generatedPassword
-		});
-		expect(selected.generatedPassword).toMatch(/^[A-Za-z0-9_-]{43}$/u);
-	});
-
-	it('uses a supplied fallback username', () => {
-		const selected = readCredentialFromOptions({ readUser: alice });
-
-		expect(selected.read?.user).toBe(alice);
-		expect(selected.read?.password).toBe(selected.generatedPassword);
-	});
-
-	it('omits the fallback credential when disabled', () => {
-		expect(readCredentialFromOptions({ readPassword: false })).toStrictEqual({
-			read: undefined,
-			generatedPassword: undefined
-		});
-	});
-
-	it('refuses a username when credential generation is disabled', () => {
-		expect(() =>
-			readCredentialFromOptions({ readUser: alice, readPassword: false })
-		).toThrow(ReadUserWithoutCredentialError);
-	});
-});
+	};
+}
 
 describe('runTenantCreate', () => {
-	// A private default cache with neither its own credential nor the tenant
-	// credential refuses every read, so the command says so.
-	it('warns when a private default cache is created without a read credential', async () => {
+	it('reports the created tenant', async () => {
 		const rows: ResultRow[][] = [];
 		const body = tenantCreateBodySchema.parse({
 			id: acme,
@@ -316,52 +219,17 @@ describe('runTenantCreate', () => {
 			[
 				{ label: 'Tenant', value: 'acme' },
 				{ label: 'Status', value: 'Active' },
-				{ label: 'Default cache access', value: 'private' },
-				{
-					label: 'Warning',
-					value:
-						'the private default cache has no read credential; it refuses every read until one is set'
-				}
+				{ label: 'Default cache access', value: 'private' }
 			]
 		]);
 	});
 
-	it('prints a generated fallback credential once', async () => {
-		const rows: ResultRow[][] = [];
-		const body = tenantCreateBodySchema.parse({
-			id: acme,
-			defaultCacheAccess: 'public',
-			ownerIssuer: 'https://issuer.example',
-			ownerSubject: 'owner',
-			ownerAudience: 'cupboard',
-			read: { user: alice, password }
-		});
-
-		await runTenantCreate(
-			body,
-			reporter(rows),
-			{ create: () => Promise.resolve(summary()) },
-			{ generatedReadPassword: password }
-		);
-
-		expect(rows).toStrictEqual([
-			[
-				{ label: 'Tenant', value: 'acme' },
-				{ label: 'Status', value: 'Active' },
-				{ label: 'Default cache access', value: 'public' },
-				{ label: 'Read user', raw: true, value: 'alice' },
-				{ label: 'Read password', raw: true, value: password }
-			]
-		]);
-	});
-
-	const bodyWithPassword = tenantCreateBodySchema.parse({
+	const tenantBody = tenantCreateBodySchema.parse({
 		id: acme,
 		defaultCacheAccess: 'public',
 		ownerIssuer: 'https://issuer.example',
 		ownerSubject: 'owner',
-		ownerAudience: 'cupboard',
-		read: { user: alice, password }
+		ownerAudience: 'cupboard'
 	});
 
 	function unpublished(retryAfterSeconds: number): ORPCError<string, unknown> {
@@ -372,22 +240,9 @@ describe('runTenantCreate', () => {
 		});
 	}
 
-	// The options of a create with the generated password, which record each
-	// wait that the command requests.
-	function createOptions(sleeps: number[]): TenantCreateOptions {
-		return {
-			generatedReadPassword: password,
-			sleep: (ms) => {
-				sleeps.push(ms);
-
-				return Promise.resolve();
-			}
-		};
-	}
-
 	// The deployment created the tenant but could not publish its membership.
-	// The command repeats the identical request, with the same password, after
-	// the delay that the deployment asked for.
+	// The command repeats the identical request after the delay that the
+	// deployment asked for.
 	it('repeats the identical create after the requested delay when the membership is unpublished', async () => {
 		const rows: ResultRow[][] = [];
 		const requests: unknown[] = [];
@@ -395,7 +250,7 @@ describe('runTenantCreate', () => {
 		let refusals = 1;
 
 		await runTenantCreate(
-			bodyWithPassword,
+			tenantBody,
 			reporter(rows),
 			{
 				create: (body) => {
@@ -411,35 +266,21 @@ describe('runTenantCreate', () => {
 		);
 
 		expect({ requests, sleeps, rows }).toStrictEqual({
-			requests: [bodyWithPassword, bodyWithPassword],
+			requests: [tenantBody, tenantBody],
 			sleeps: [5000],
 			rows: [
 				[
 					{ label: 'Tenant', value: 'acme' },
 					{ label: 'Status', value: 'Active' },
-					{ label: 'Default cache access', value: 'public' },
-					{ label: 'Read user', raw: true, value: 'alice' },
-					{ label: 'Read password', raw: true, value: password }
+					{ label: 'Default cache access', value: 'public' }
 				]
 			]
 		});
 	});
 
-	const noteMatcher: unknown = expect.any(String);
-
-	// The card that the command prints when the tenant may exist but the
-	// command did not confirm it.
-	const unconfirmedCredential: unknown[] = [
-		{ label: 'Tenant', value: 'acme' },
-		{ label: 'Read user', raw: true, value: 'alice' },
-		{ label: 'Read password', raw: true, value: password },
-		{ label: 'Note', value: noteMatcher }
-	];
-
 	// Every request gets the same answer. The command waits at most ten seconds
-	// between requests. It prints the generated credential through the reporter,
-	// and the error does not contain the password.
-	it('prints the credential and throws TenantCreateIncompleteError when every create leaves the membership unpublished', async () => {
+	// between requests.
+	it('throws TenantCreateIncompleteError when every create leaves the membership unpublished', async () => {
 		const rows: ResultRow[][] = [];
 		const requests: unknown[] = [];
 		const sleeps: number[] = [];
@@ -447,7 +288,7 @@ describe('runTenantCreate', () => {
 
 		try {
 			await runTenantCreate(
-				bodyWithPassword,
+				tenantBody,
 				reporter(rows),
 				{
 					create: (body) => {
@@ -469,9 +310,7 @@ describe('runTenantCreate', () => {
 							name: failure.name,
 							tenant: failure.tenant,
 							attempts: failure.attempts,
-							hasPrintedReadCredential: failure.hasPrintedReadCredential,
-							exitCode: cliExitCode(failure, 130),
-							containsPassword: errorChainText(failure).includes(password)
+							exitCode: cliExitCode(failure, 130)
 						}
 					: failure,
 			rows,
@@ -482,19 +321,16 @@ describe('runTenantCreate', () => {
 				name: 'TenantCreateIncompleteError',
 				tenant: acme,
 				attempts: 3,
-				hasPrintedReadCredential: true,
-				exitCode: genericExitCode,
-				containsPassword: false
+				exitCode: genericExitCode
 			},
-			rows: [unconfirmedCredential],
-			requests: [bodyWithPassword, bodyWithPassword, bodyWithPassword],
+			rows: [],
+			requests: [tenantBody, tenantBody, tenantBody],
 			sleeps: [10_000, 10_000]
 		});
 	});
 
 	// After an unpublished answer the tenant exists. A later failure becomes
-	// TenantCreateIncompleteError with that failure as its cause. The command
-	// prints the credential first, and it exits with the generic code.
+	// TenantCreateIncompleteError with that failure as its cause.
 	it.each([
 		{
 			failure: 'a lost connection',
@@ -505,17 +341,16 @@ describe('runTenantCreate', () => {
 			later: new DOMException('The operation was aborted.', 'AbortError')
 		}
 	])(
-		'prints the credential and throws TenantCreateIncompleteError for $failure after an unpublished answer',
+		'throws TenantCreateIncompleteError for $failure after an unpublished answer',
 		async ({ later }) => {
-			const rows: ResultRow[][] = [];
 			const sleeps: number[] = [];
 			const answers = [unpublished(5), later];
 			let failure: unknown;
 
 			try {
 				await runTenantCreate(
-					bodyWithPassword,
-					reporter(rows),
+					tenantBody,
+					reporter([]),
 					{
 						create: () =>
 							Promise.reject(
@@ -535,78 +370,32 @@ describe('runTenantCreate', () => {
 								name: failure.name,
 								tenant: failure.tenant,
 								attempts: failure.attempts,
-								hasPrintedReadCredential: failure.hasPrintedReadCredential,
 								cause: failure.cause,
 								exitCode: cliExitCode(failure, 130)
 							}
 						: failure,
-				rows,
 				sleeps
 			}).toStrictEqual({
 				failure: {
 					name: 'TenantCreateIncompleteError',
 					tenant: acme,
 					attempts: 2,
-					hasPrintedReadCredential: true,
 					cause: later,
 					exitCode: genericExitCode
 				},
-				rows: [unconfirmedCredential],
 				sleeps: [5000]
 			});
 		}
 	);
 
-	// A 503 on the first request leaves the outcome unknown, so the command
-	// prints the credential and throws the failure unchanged.
-	it('prints the credential before it throws a 503 on the first request', async () => {
-		const rows: ResultRow[][] = [];
-		const unavailable = new ORPCError('SERVICE_UNAVAILABLE', {
-			status: 503,
-			message: 'raw'
-		});
-
-		await expect(
-			runTenantCreate(
-				bodyWithPassword,
-				reporter(rows),
-				{ create: () => Promise.reject(unavailable) },
-				createOptions([])
-			)
-		).rejects.toBe(unavailable);
-		expect(rows).toStrictEqual([unconfirmedCredential]);
-	});
-
-	// Without a session, the client fails before it sends the request, so the
-	// tenant cannot exist and the command prints no credential.
-	it('prints no credential when the create fails before a request is sent', async () => {
-		const rows: ResultRow[][] = [];
-		const noSession = new OwnerLoginRequiredError();
-		const wasRequestSent = false;
-
-		await expect(
-			runTenantCreate(
-				bodyWithPassword,
-				reporter(rows),
-				{ create: () => Promise.reject(noSession) },
-				{ ...createOptions([]), wasRequestSent: () => wasRequestSent }
-			)
-		).rejects.toBe(noSession);
-		expect({ rows, wasRequestSent }).toStrictEqual({
-			rows: [],
-			wasRequestSent: false
-		});
-	});
-
-	it('neither repeats nor prints the credential for a create that the deployment refused for another reason', async () => {
+	it('does not repeat a create that the deployment refused for another reason', async () => {
 		const conflict = new ORPCError('CONFLICT', { status: 409, message: 'raw' });
-		const rows: ResultRow[][] = [];
 		const requests: unknown[] = [];
 
 		await expect(
 			runTenantCreate(
-				bodyWithPassword,
-				reporter(rows),
+				tenantBody,
+				reporter([]),
 				{
 					create: (body) => {
 						requests.push(body);
@@ -615,15 +404,11 @@ describe('runTenantCreate', () => {
 					}
 				},
 				{
-					generatedReadPassword: password,
 					sleep: () => Promise.reject(new Error('the command must not wait'))
 				}
 			)
 		).rejects.toBe(conflict);
-		expect({ requests, rows }).toStrictEqual({
-			requests: [bodyWithPassword],
-			rows: []
-		});
+		expect(requests).toStrictEqual([tenantBody]);
 	});
 });
 
@@ -877,162 +662,4 @@ describe('runTenantQuota', () => {
 			]
 		});
 	});
-});
-
-describe('tenant fallback credential', () => {
-	it('rotates the credential', async () => {
-		const rows: ResultRow[][] = [];
-		let call: Parameters<TenantClient['rotateReadCredential']>[0] | undefined;
-		const result = tenantReadCredentialResponseSchema.parse({
-			id: acme,
-			hasCredential: true
-		});
-
-		await runTenantRotateCredential(acme, { readUser: alice }, reporter(rows), {
-			rotateReadCredential: (input) => {
-				call = input;
-				return Promise.resolve(result);
-			}
-		});
-
-		expect(call).toStrictEqual({
-			id: acme,
-			read: { user: alice, password: call?.read.password }
-		});
-		expect(call?.read.password).toMatch(/^[A-Za-z0-9_-]{43}$/u);
-		expect(rows).toStrictEqual([
-			[
-				{ label: 'Tenant', value: 'acme' },
-				{ label: 'Read user', raw: true, value: 'alice' },
-				{ label: 'Read password', raw: true, value: call?.read.password }
-			]
-		]);
-	});
-
-	it('clears the credential', async () => {
-		const rows: ResultRow[][] = [];
-		const result = tenantReadCredentialResponseSchema.parse({
-			id: acme,
-			hasCredential: false
-		});
-
-		await runTenantClearCredential(acme, reporter(rows), {
-			clearReadCredential: () => Promise.resolve(result)
-		});
-
-		expect(rows).toStrictEqual([
-			[
-				{ label: 'Tenant', value: 'acme' },
-				{ label: 'Read credential', value: 'cleared' }
-			]
-		]);
-	});
-});
-
-describe('cache read credentials', () => {
-	const scopes: readonly { name: string; cache: CacheScope; label: string }[] =
-		[
-			{
-				name: 'the default cache',
-				cache: { kind: 'default' },
-				label: '(default)'
-			},
-			{
-				name: 'a named cache',
-				cache: { kind: 'named', name: cacheNameSchema.parse('release') },
-				label: 'release'
-			}
-		];
-
-	function credentialClient(
-		calls: unknown[],
-		hasCredential: boolean
-	): TenantClient {
-		const respond = (cache: CacheScope) => (input: object) => {
-			calls.push(input);
-
-			return Promise.resolve(
-				cacheReadCredentialResponseSchema.parse({
-					id: acme,
-					cache,
-					hasCredential
-				})
-			);
-		};
-		const named: CacheScope = {
-			kind: 'named',
-			name: cacheNameSchema.parse('release')
-		};
-
-		return tenantClient({
-			rotateDefaultCacheReadCredential: respond({ kind: 'default' }),
-			rotateNamedCacheReadCredential: respond(named),
-			clearDefaultCacheReadCredential: respond({ kind: 'default' }),
-			clearNamedCacheReadCredential: respond(named)
-		});
-	}
-
-	it.each(scopes)(
-		'generates a password for $name and reports the value it sent',
-		async ({ cache, label }) => {
-			const calls: { read: { password: string } }[] = [];
-			const rows: ResultRow[][] = [];
-
-			await runTenantRotateCacheCredential(
-				acme,
-				cache,
-				{ readUser: alice },
-				reporter(rows),
-				credentialClient(calls, true)
-			);
-
-			const sent = calls[0]?.read.password;
-
-			expect(calls).toStrictEqual([
-				{
-					id: acme,
-					...(cache.kind === 'named' && { cacheName: cache.name }),
-					read: { user: alice, password: sent }
-				}
-			]);
-			expect(sent).toMatch(/^[A-Za-z0-9_-]{43}$/u);
-			expect(rows).toStrictEqual([
-				[
-					{ label: 'Tenant', value: 'acme' },
-					{ label: 'Cache', value: label },
-					{ label: 'Read user', raw: true, value: 'alice' },
-					{ label: 'Read password', raw: true, value: sent }
-				]
-			]);
-		}
-	);
-
-	it.each(scopes)(
-		'clears the credential of $name and reports that the tenant credential applies',
-		async ({ cache, label }) => {
-			const calls: unknown[] = [];
-			const rows: ResultRow[][] = [];
-
-			await runTenantClearCacheCredential(
-				acme,
-				cache,
-				reporter(rows),
-				credentialClient(calls, false)
-			);
-
-			expect(calls).toStrictEqual([
-				{ id: acme, ...(cache.kind === 'named' && { cacheName: cache.name }) }
-			]);
-			expect(rows).toStrictEqual([
-				[
-					{ label: 'Tenant', value: 'acme' },
-					{ label: 'Cache', value: label },
-					{
-						label: 'Read credential',
-						value: 'cleared; readers now use the tenant credential'
-					}
-				]
-			]);
-		}
-	);
 });

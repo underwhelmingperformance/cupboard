@@ -10,11 +10,7 @@ import {
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
-import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
-import {
-	type TenantReadCredential,
-	tenantReadCredentialSchema
-} from '@cupboard/protocol/tenants';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -28,7 +24,6 @@ import {
 	closeAlarmFence,
 	openAlarmFence
 } from '../alarm-fence.test-support.ts';
-import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -53,9 +48,11 @@ import {
 	driveToCompletion,
 	fetchPath,
 	fileAttestationReference,
+	fixtureReaderAuthorization,
 	initialiseViaWorker,
 	namedCache,
 	narBytes,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	publishAttestationList,
 	pushPath,
@@ -93,8 +90,6 @@ const privateBuilds = namedCache(privateBuildsName);
 const otherCache = namedCache('other');
 const defaultCache: CacheScope = { kind: 'default' };
 const origin = requestOriginSchema.parse('https://cache.example');
-const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
-const tenantReader = { user: 'alice', password: 'secret' };
 const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
 // The narinfo version the first commit of a path takes.
@@ -119,13 +114,6 @@ function liveNarInfoGeneration(
 	);
 }
 
-// Generated read passwords are exactly 43 base64url characters, which is what
-// the control plane accepts.
-const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
-	user: 'reader',
-	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-});
-
 const parkedTeardowns = new Map<string, ReturnType<typeof currentServer>>();
 
 afterEach(async () => {
@@ -141,19 +129,12 @@ afterEach(async () => {
 	}
 });
 
-interface ReadCredential {
-	readonly user: string;
-	readonly password: string;
+function credentialHeaders(): Record<string, string> {
+	return { authorization: fixtureReaderAuthorization };
 }
 
-function credentialHeaders(credential: ReadCredential): Record<string, string> {
-	return {
-		authorization: `Basic ${btoa(`${credential.user}:${credential.password}`)}`
-	};
-}
-
-function basic(credential: ReadCredential): RequestInit {
-	return { headers: credentialHeaders(credential) };
+function basic(): RequestInit {
+	return { headers: credentialHeaders() };
 }
 
 // A store-path hash is 32 base32 characters, so index the fixtures through the
@@ -254,22 +235,6 @@ async function edgeScopeRows(): Promise<{
 		blobReferences: blobRows.map((row) => scopeOf(row)),
 		attestationReferences: attestationRows.map((row) => scopeOf(row))
 	};
-}
-
-async function cacheCredentialCaches(): Promise<
-	{ cache: CacheScope | undefined }[]
-> {
-	const rows = await database()
-		.select({
-			kind: d1Schema.tenantCacheReadCredential.cacheKind,
-			name: d1Schema.tenantCacheReadCredential.cacheName
-		})
-		.from(d1Schema.tenantCacheReadCredential)
-		.all();
-
-	return rows.map((row) => ({
-		cache: cacheScopeFromRow({ kind: row.kind, name: row.name ?? undefined })
-	}));
 }
 
 /**
@@ -663,9 +628,9 @@ async function attestedTeardownPassSubrequests(
 }
 
 /**
-Publishes a private cache holding one path, its own read credential, and the
-two objects a deletion leaves for its drain: the path's narinfo and its
-attestation list.
+Publishes a private cache holding one path, stores the fixture reader's
+access key, and publishes the two objects that a deletion leaves for its drain:
+the path's narinfo and its attestation list.
 */
 async function publishPrivatePath(
 	server: string,
@@ -684,14 +649,8 @@ async function publishPrivatePath(
 	const metadata = indexedMetadata(pathIndex, nar);
 
 	await pushPath(token, metadata, privateBuilds, nar);
-	await provisionFixtureTenant({ read: tenantReader });
-	await setCacheReadCredential(
-		database(),
-		fixtureTenant,
-		privateBuilds,
-		cacheReader,
-		now
-	);
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 	await publishAttestationList({
 		cache: privateBuilds,
 		storePathHash: metadata.storePathHash,
@@ -702,11 +661,10 @@ async function publishPrivatePath(
 }
 
 // Reads private-cache content through the Worker and the attestation list
-// directly from the object. Worker reads use the supplied credential.
+// directly from the object. Worker reads use the fixture reader key.
 async function readPrivateSurfaces(
 	metadata: UploadPathMetadata,
-	nar: VerifiableNar,
-	credential: ReadCredential
+	nar: VerifiableNar
 ): Promise<{
 	narinfo: number;
 	nar: number;
@@ -715,11 +673,11 @@ async function readPrivateSurfaces(
 }> {
 	const narinfo = await readFetch(
 		`/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`,
-		basic(credential)
+		basic()
 	);
 	const narRead = await readFetch(
 		await pushedNarPath(nar, `/cache/${privateBuildsName}`),
-		basic(credential)
+		basic()
 	);
 	const attestationList = await fetchPath(
 		`/cache/${privateBuildsName}/attestations/${metadata.storePathHash}`
@@ -729,7 +687,7 @@ async function readPrivateSurfaces(
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(credential),
+				...credentialHeaders(),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
@@ -755,17 +713,17 @@ async function readPrivateNarInfo(storePathHash: StorePathHash): Promise<{
 	missing: readonly string[];
 }> {
 	const path = `/cache/${privateBuildsName}/${storePathHash}.narinfo`;
-	const narinfo = await readFetch(path, basic(tenantReader));
+	const narinfo = await readFetch(path, basic());
 	const head = await readFetch(path, {
 		method: 'HEAD',
-		...basic(tenantReader)
+		...basic()
 	});
 	const availability = await readFetch(
 		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(tenantReader),
+				...credentialHeaders(),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [storePathHash] })
@@ -788,18 +746,13 @@ describe('deleted private cache', () => {
 	it('refuses published reads and reports every path missing before teardown drains the objects', async () => {
 		const { metadata, nar } = await publishPrivatePath('gen-deleted-surfaces');
 
-		const beforeDeletion = await readPrivateSurfaces(
-			metadata,
-			nar,
-			cacheReader
-		);
+		const beforeDeletion = await readPrivateSurfaces(metadata, nar);
 
 		await deleteAndParkTeardown(privateBuilds);
 
 		expect({
 			beforeDeletion,
-			afterDeletion: await readPrivateSurfaces(metadata, nar, tenantReader),
-			credentials: await cacheCredentialCaches(),
+			afterDeletion: await readPrivateSurfaces(metadata, nar),
 			narInfoObject:
 				(await env.BLOBS.head(
 					narInfoObjectKey(fixtureTenant, metadata.storePathHash, privateBuilds)
@@ -817,7 +770,6 @@ describe('deleted private cache', () => {
 				attestationList: StatusCodes.NOT_FOUND,
 				missing: [metadata.storePathHash]
 			},
-			credentials: [],
 			narInfoObject: true
 		});
 	});
@@ -889,21 +841,21 @@ describe('deleted private cache', () => {
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
 		const previousPath = `/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`;
-		const previous = await readFetch(previousPath, basic(tenantReader));
+		const previous = await readFetch(previousPath, basic());
 		const previousHead = await readFetch(previousPath, {
 			method: 'HEAD',
-			...basic(tenantReader)
+			...basic()
 		});
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic()
 		);
 		const availability = await readFetch(
 			`/cache/${privateBuildsName}/api/v1/missing-paths`,
 			{
 				method: 'POST',
 				headers: {
-					...credentialHeaders(tenantReader),
+					...credentialHeaders(),
 					'content-type': 'application/json'
 				},
 				body: JSON.stringify({
@@ -1052,7 +1004,7 @@ describe('deleted private cache', () => {
 
 		const whileDeleted = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic()
 		);
 
 		await putTestCache(token, privateBuilds, 'private');
@@ -1060,11 +1012,11 @@ describe('deleted private cache', () => {
 
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic()
 		);
 		const freshNarRead = await readFetch(
 			await pushedNarPath(freshNar, `/cache/${privateBuildsName}`),
-			basic(tenantReader)
+			basic()
 		);
 
 		expect({
@@ -1270,14 +1222,8 @@ describe('attestation list generation', () => {
 
 		await pushPath(token, publicPath, buildsCache, publicNar);
 		await pushPath(token, privatePath, privateBuilds, privateNar);
-		await provisionFixtureTenant({ read: tenantReader });
-		await setCacheReadCredential(
-			database(),
-			fixtureTenant,
-			privateBuilds,
-			cacheReader,
-			now
-		);
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 
 		// The list objects a server that recorded no generation left behind.
 		await publishAttestationList({
@@ -1321,19 +1267,12 @@ describe('cache generation gate', () => {
 			await pushPath(token, metadata, privateBuilds, nar);
 		}
 
-		await provisionFixtureTenant({ read: tenantReader });
-		await setCacheReadCredential(
-			database(),
-			fixtureTenant,
-			privateBuilds,
-			cacheReader,
-			now
-		);
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 
-		// The cache's own credential opens it, so this read is authorised by the
-		// cache's own reference edges rather than by a namespace.
+		// The cache's own reference edges authorise this read, not a namespace.
 		const narUrl = await pushedNarPath(nar, `/cache/${privateBuildsName}`);
-		const beforeDeletion = await readFetch(narUrl, basic(cacheReader));
+		const beforeDeletion = await readFetch(narUrl, basic());
 
 		// Count the surviving edges in the same Durable Object invocation as the
 		// deletion. Once the invocation ends, workerd can deliver the due alarm.
@@ -1347,7 +1286,7 @@ describe('cache generation gate', () => {
 				return blobReferenceRows();
 			}
 		);
-		const afterDeletion = await readFetch(narUrl, basic(tenantReader));
+		const afterDeletion = await readFetch(narUrl, basic());
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
@@ -1360,8 +1299,7 @@ describe('cache generation gate', () => {
 			afterDeletion: afterDeletion.status,
 			undrainedEdges: undrained.length,
 			edges: await blobReferenceRows(),
-			generations: await cacheGenerationRows(),
-			credentials: await cacheCredentialCaches()
+			generations: await cacheGenerationRows()
 		}).toStrictEqual({
 			beforeDeletion: StatusCodes.OK,
 			afterDeletion: StatusCodes.NOT_FOUND,
@@ -1370,8 +1308,7 @@ describe('cache generation gate', () => {
 			generations: [
 				{ cache: defaultCache, generation: 1 },
 				{ cache: privateBuilds, generation: 2 }
-			],
-			credentials: []
+			]
 		});
 	});
 
@@ -1683,7 +1620,7 @@ describe('cache generation gate', () => {
 		const small = await deletionStatements('gen-allowance-small', 1);
 		const large = await deletionStatements('gen-allowance-large', 120);
 
-		expect({ small, large }).toStrictEqual({ small: 5, large: 5 });
+		expect({ small, large }).toStrictEqual({ small: 4, large: 4 });
 	});
 
 	it('measures fixed and per-chunk teardown D1 statements', async () => {

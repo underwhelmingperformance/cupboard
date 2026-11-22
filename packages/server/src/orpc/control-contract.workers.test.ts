@@ -49,12 +49,7 @@ type ControlClient = JsonifiedClient<
 	ContractRouterClient<typeof controlContract>
 >;
 
-// The real derived client, exactly as the CLI builds it: the OpenAPI link
-// over the control contract at the worker's `/control` prefix, with
-// responses validated against the contract's output schemas.
-const readPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
-
-function cacheCredentialGrants(
+function tenantGrants(
 	tenant: string,
 	actions: readonly string[]
 ): AuthorizationDetails {
@@ -123,6 +118,9 @@ async function insertPatternRule(
 	return id;
 }
 
+// The real derived client, exactly as the CLI builds it: the OpenAPI link
+// over the control contract at the worker's `/control` prefix, with
+// responses validated against the contract's output schemas.
 function controlClient(token?: string): ControlClient {
 	const link = new OpenAPILink(controlContract, {
 		url: `${currentOrigin()}/control`,
@@ -958,19 +956,19 @@ describe('control contract round trip', () => {
 		const allowed = controlClient(
 			await issueControlAdminToken(
 				'operator',
-				cacheCredentialGrants('acme', ['tenant:read-quota'])
+				tenantGrants('acme', ['tenant:read-quota'])
 			)
 		);
 		const wrongTenant = controlClient(
 			await issueControlAdminToken(
 				'operator',
-				cacheCredentialGrants('beta', ['tenant:read-quota'])
+				tenantGrants('beta', ['tenant:read-quota'])
 			)
 		);
 		const mutationOnly = controlClient(
 			await issueControlAdminToken(
 				'operator',
-				cacheCredentialGrants('acme', ['tenant:set-quota'])
+				tenantGrants('acme', ['tenant:set-quota'])
 			)
 		);
 		const read = await allowed.tenants.getQuota({ id: 'acme' });
@@ -1028,19 +1026,19 @@ describe('control contract round trip', () => {
 		const otherTenant = controlClient(
 			await issueControlAdminToken(
 				'operator',
-				cacheCredentialGrants('beta', ['tenant:set-quota'])
+				tenantGrants('beta', ['tenant:set-quota'])
 			)
 		);
 		const otherOperation = controlClient(
 			await issueControlAdminToken(
 				'operator',
-				cacheCredentialGrants('acme', ['tenant:suspend'])
+				tenantGrants('acme', ['tenant:suspend'])
 			)
 		);
 		const scoped = controlClient(
 			await issueControlAdminToken(
 				'operator',
-				cacheCredentialGrants('acme', ['tenant:set-quota'])
+				tenantGrants('acme', ['tenant:set-quota'])
 			)
 		);
 
@@ -1189,7 +1187,7 @@ describe('control contract round trip', () => {
 		}).toStrictEqual({ legacy: { tenants: 2 }, paged: { tenants: 2 } });
 	});
 
-	it('updates tenant status and fallback read credentials through the derived client', async () => {
+	it('updates tenant status through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		await client.tenants.create({
@@ -1201,140 +1199,10 @@ describe('control contract round trip', () => {
 		});
 		const suspended = await client.tenants.suspend({ id: 'acme' });
 		const resumed = await client.tenants.resume({ id: 'acme' });
-		const rotated = await client.tenants.rotateReadCredential({
-			id: 'acme',
-			read: {
-				user: 'reader',
-				password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-			}
-		});
-		const cleared = await client.tenants.clearReadCredential({ id: 'acme' });
 
-		expect({ suspended, resumed, rotated, cleared }).toStrictEqual({
+		expect({ suspended, resumed }).toStrictEqual({
 			suspended: { id: 'acme', status: 'suspended' },
-			resumed: { id: 'acme', status: 'active' },
-			rotated: { id: 'acme', hasCredential: true },
-			cleared: { id: 'acme', hasCredential: false }
-		});
-	});
-
-	it('sets and clears a named cache read credential through the derived client', async () => {
-		const client = controlClient(await issueControlAdminToken());
-
-		await client.tenants.create({
-			id: 'acme',
-			defaultCacheAccess: 'public',
-			ownerIssuer: 'https://idp.test',
-			ownerSubject: 'owner',
-			ownerAudience: 'aud'
-		});
-		const rotated = await client.tenants.rotateNamedCacheReadCredential({
-			id: 'acme',
-			cacheName: 'builds',
-			read: { user: 'reader', password: readPassword }
-		});
-		const cleared = await client.tenants.clearNamedCacheReadCredential({
-			id: 'acme',
-			cacheName: 'builds'
-		});
-
-		expect({ rotated, cleared }).toStrictEqual({
-			rotated: {
-				id: 'acme',
-				cache: { kind: 'named', name: 'builds' },
-				hasCredential: true
-			},
-			cleared: {
-				id: 'acme',
-				cache: { kind: 'named', name: 'builds' },
-				hasCredential: false
-			}
-		});
-	});
-
-	// The two procedures declare their own operations and take the tenant slug as
-	// their resource, so authority over one tenant does not reach another, and
-	// authority over the tenant credential does not reach a cache credential.
-	it.each([
-		{
-			name: 'another tenant',
-			grants: cacheCredentialGrants('beta', [
-				'tenant:rotate-cache-read-credential'
-			])
-		},
-		{
-			name: 'the tenant credential only',
-			grants: cacheCredentialGrants('acme', ['tenant:rotate-read-credential'])
-		}
-	])('returns FORBIDDEN for a token scoped to $name', async ({ grants }) => {
-		const admin = controlClient(await issueControlAdminToken());
-		await admin.tenants.create({
-			id: 'acme',
-			defaultCacheAccess: 'public',
-			ownerIssuer: 'https://idp.test',
-			ownerSubject: 'owner',
-			ownerAudience: 'aud'
-		});
-		const client = controlClient(
-			await issueControlAdminToken('operator', grants)
-		);
-
-		const [error] = await safe(
-			client.tenants.rotateNamedCacheReadCredential({
-				id: 'acme',
-				cacheName: 'builds',
-				read: { user: 'reader', password: readPassword }
-			})
-		);
-
-		expect(error).toBeInstanceOf(ORPCError);
-		expect(error).toMatchObject({
-			defined: true,
-			code: 'FORBIDDEN',
-			status: StatusCodes.FORBIDDEN
-		});
-	});
-
-	it('accepts a token scoped to the tenant for both cache credential procedures', async () => {
-		const admin = controlClient(await issueControlAdminToken());
-		await admin.tenants.create({
-			id: 'acme',
-			defaultCacheAccess: 'public',
-			ownerIssuer: 'https://idp.test',
-			ownerSubject: 'owner',
-			ownerAudience: 'aud'
-		});
-		const client = controlClient(
-			await issueControlAdminToken(
-				'operator',
-				cacheCredentialGrants('acme', [
-					'tenant:rotate-cache-read-credential',
-					'tenant:clear-cache-read-credential'
-				])
-			)
-		);
-
-		const rotated = await client.tenants.rotateNamedCacheReadCredential({
-			id: 'acme',
-			cacheName: 'builds',
-			read: { user: 'reader', password: readPassword }
-		});
-		const cleared = await client.tenants.clearNamedCacheReadCredential({
-			id: 'acme',
-			cacheName: 'builds'
-		});
-
-		expect({ rotated, cleared }).toStrictEqual({
-			rotated: {
-				id: 'acme',
-				cache: { kind: 'named', name: 'builds' },
-				hasCredential: true
-			},
-			cleared: {
-				id: 'acme',
-				cache: { kind: 'named', name: 'builds' },
-				hasCredential: false
-			}
+			resumed: { id: 'acme', status: 'active' }
 		});
 	});
 

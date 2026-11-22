@@ -18,7 +18,6 @@ import type { R2CredentialCheck } from '@cupboard/protocol/reports';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
-	defaultReadUser,
 	type MembershipRebuildResponse,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
@@ -939,7 +938,6 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		buildVersion: 'v-new',
 		cacheAccess: 'public',
 		r2: { kind: 'fresh' },
-		readPassword: () => readPassword,
 		clientFactory: client.factory,
 		cacheSession: client.cacheSession,
 		sessionCredential: () => 'session-jwt',
@@ -995,9 +993,6 @@ async function closedLoopbackPort(): Promise<number> {
 
 	return address.port;
 }
-
-const readPassword = 'A'.repeat(43);
-const read = { user: defaultReadUser, password: readPassword };
 
 const keptR2 = {
 	kind: 'kept',
@@ -1143,7 +1138,7 @@ describe('onboardDeployment', () => {
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1',
-				created: { access: 'public', read }
+				created: { access: 'public' }
 			} satisfies OnboardOutcome,
 			// The secret is gone as soon as `/signup` has answered.
 			events: [
@@ -1186,8 +1181,7 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience,
-					read
+					ownerAudience: owner.audience
 				}
 			],
 			apiCalls: [
@@ -1328,7 +1322,6 @@ describe('onboardDeployment', () => {
 			buildVersion: 'v-new',
 			cacheAccess: 'public',
 			r2: { kind: 'fresh' },
-			readPassword: () => readPassword,
 			fetcher,
 			cacheSession: (session, target) => {
 				cachedSessions.push({ session, target });
@@ -1860,7 +1853,7 @@ describe('onboardDeployment', () => {
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1',
-				created: { access: 'public', read }
+				created: { access: 'public' }
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
 			events: ['getInstance:admin-jwt'],
@@ -1870,8 +1863,7 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience,
-					read
+					ownerAudience: owner.audience
 				}
 			],
 			cachedSessions: []
@@ -1966,7 +1958,7 @@ describe('onboardDeployment', () => {
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1',
-				created: { access: 'public', read }
+				created: { access: 'public' }
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
 			createdBodies: [
@@ -1975,8 +1967,7 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience,
-					read
+					ownerAudience: owner.audience
 				}
 			],
 			controlCheckTokens: ['admin-jwt']
@@ -2078,7 +2069,7 @@ describe('onboardDeployment', () => {
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1',
-				created: { access: 'public', read }
+				created: { access: 'public' }
 			} satisfies OnboardOutcome,
 			probed: ['a'.repeat(32), goodKey],
 			apiCalls: [
@@ -2128,10 +2119,9 @@ describe('onboardDeployment', () => {
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1',
-				created: { access: 'public', read }
+				created: { access: 'public' }
 			} satisfies OnboardOutcome,
 			infos: [
-				'Save this credential now, even if a later onboarding step fails. `cupboard tenant rotate-credential` replaces it.',
 				'Create an R2 API token (Object Read & Write on the cache bucket) at\n' +
 					terminalLink(
 						'https://dash.cloudflare.com/acc-1/r2/api-tokens',
@@ -2204,7 +2194,7 @@ describe('onboardDeployment', () => {
 				slug: 'builds-2',
 				cacheUrl: new URL('https://cache.example.com/t/builds-2'),
 				publicKey: 'pk-2',
-				created: { access: 'private', read }
+				created: { access: 'private' }
 			} satisfies OnboardOutcome,
 			menuMessages: ['Who may read from this cache?'],
 			createdBodies: ['builds', 'builds-2'].map((id) => ({
@@ -2212,8 +2202,7 @@ describe('onboardDeployment', () => {
 				defaultCacheAccess: 'private',
 				ownerIssuer: owner.issuer,
 				ownerSubject: owner.subject,
-				ownerAudience: owner.audience,
-				read
+				ownerAudience: owner.audience
 			})),
 			warnings: ['"builds" is already taken; choose another.']
 		});
@@ -2368,7 +2357,7 @@ describe('onboardDeployment', () => {
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1',
-				created: { access: 'public', read }
+				created: { access: 'public' }
 			} satisfies OnboardOutcome,
 			warnings: [
 				'The deploy could not list the control trust rules, so it did not check them for GitHub Actions rules without a repository pin. List them with `cupboard control-oidc-trust list https://cache.example.com`.'
@@ -2673,7 +2662,7 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('asks who may read the first cache, and creates it with a credential', async () => {
+	it('asks who may read the first cache, and creates it', async () => {
 		const { ui, menuMessages, menuEntries, uiCalls } = scriptedUi({
 			slugs: ['builds'],
 			menuChoices: ['private']
@@ -2703,7 +2692,7 @@ describe('onboardDeployment', () => {
 				[
 					{
 						value: 'private',
-						label: 'Only clients with a read credential',
+						label: 'Only clients with an access key or a token',
 						hint: 'private'
 					},
 					{
@@ -2720,8 +2709,7 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'private',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience,
-					read
+					ownerAudience: owner.audience
 				}
 			]
 		});
@@ -2752,8 +2740,7 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'private',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience,
-					read
+					ownerAudience: owner.audience
 				}
 			]
 		});
@@ -2906,29 +2893,8 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('retains the proposed credential when the create response is lost', async () => {
-		const { ui, notes } = scriptedUi({ slugs: ['builds'] });
-		const client = scriptedClient({
-			versions: ['v-new'],
-			lists: [[]],
-			creates: ['offline']
-		});
-		await expect(onboardDeployment(baseOptions(ui, client))).rejects.toThrow(
-			'fetch failed'
-		);
-		expect(notes).toStrictEqual([
-			{
-				title:
-					'Unconfirmed read credential for https://cache.example.com/t/builds',
-				rows: [
-					{ label: 'Read user', value: read.user, raw: true },
-					{ label: 'Read password', value: read.password, raw: true }
-				]
-			}
-		]);
-	});
 	it('gives up on the cache URL when the new tenant never responds', async () => {
-		const { ui, notes } = scriptedUi({ slugs: ['builds'] });
+		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
 			lists: [[]],
@@ -2948,13 +2914,6 @@ describe('onboardDeployment', () => {
 			kind: 'unreachable',
 			url: 'https://cache.example.com/t/builds',
 			lastProbe: 'HTTP 503: computer says no'
-		});
-		expect(notes).toContainEqual({
-			title: 'Read credential for https://cache.example.com/t/builds',
-			rows: [
-				{ label: 'Read user', value: read.user, raw: true },
-				{ label: 'Read password', value: read.password, raw: true }
-			]
 		});
 	});
 

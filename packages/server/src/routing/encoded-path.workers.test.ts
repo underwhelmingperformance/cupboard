@@ -10,29 +10,23 @@ import {
 	attestationNegotiateResponseSchema,
 	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import {
-	type TenantReadCredential,
-	tenantReadCredentialSchema
-} from '@cupboard/protocol/tenants';
 import { env } from 'cloudflare:workers';
-import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
-import * as d1Schema from '../db/d1-schema.ts';
 import { setView } from '../do/reuse-view-read.test-support.ts';
 import {
 	authorisedWorkerFetch,
+	fixtureReaderAuthorization,
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
 	namedCache,
 	narDigestHex,
 	narHash,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPathToTenant,
 	putWorkerTestCache,
@@ -50,26 +44,10 @@ const privateName = cacheNameSchema.parse('builds');
 const publicName = cacheNameSchema.parse('guides');
 const viewName = 'reuse';
 const privateViewName = 'private';
-const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
-// The tenant's own read credential, and the private cache's own credential.
-// Once a cache holds one, only that credential opens the cache.
-const tenantReader = { user: 'alice', password: 'secret' };
-const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
-	user: 'reader',
-	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-});
-
-function basic(credential: {
-	readonly user: string;
-	readonly password: string;
-}): RequestInit {
-	return {
-		headers: {
-			authorization: `Basic ${btoa(`${credential.user}:${credential.password}`)}`
-		}
-	};
-}
+const withReader: RequestInit = {
+	headers: { authorization: fixtureReaderAuthorization }
+};
 
 interface Published {
 	readonly storePathHash: string;
@@ -119,8 +97,8 @@ async function attachBundle(
 Publishes the same store path to the default cache, a named public cache and
 a private cache, and attaches one attestation bundle to the private cache.
 The public and private views select caches with the same access as the view.
-The tenant and private cache use separate read credentials. All three cache
-entries refer to the same NAR hash.
+The fixture reader key can read every cache. All three cache entries refer to
+the same NAR hash.
 */
 async function publish(): Promise<Published> {
 	const token = await initialiseViaWorker();
@@ -145,14 +123,8 @@ async function publish(): Promise<Published> {
 	const bundleDigest = await attachBundle(token, metadata.storePathHash);
 	await setView([{ kind: 'all' }], viewName);
 	await setView([{ kind: 'all' }], privateViewName, 'private');
-	await provisionFixtureTenant({ read: tenantReader });
-	await setCacheReadCredential(
-		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-		tenant,
-		namedCache(privateName),
-		cacheReader,
-		now
-	);
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 
 	const narinfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
 	expect(narinfo.status).toBe(StatusCodes.OK);
@@ -165,17 +137,17 @@ async function publish(): Promise<Published> {
 }
 
 interface CredentialStatuses {
-	readonly withTenant: number;
-	readonly withCache: number;
+	readonly anonymous: number;
+	readonly withKey: number;
 }
 
-// Reads one path twice: once with the tenant's read credential and once with
-// the private cache's own credential.
+// Reads one path twice: once without a credential and once with an access key
+// that can read every cache.
 async function statusesFor(path: string): Promise<CredentialStatuses> {
-	const withTenant = await readFetch(path, basic(tenantReader));
-	const withCache = await readFetch(path, basic(cacheReader));
+	const anonymous = await readFetch(path);
+	const withKey = await readFetch(path, withReader);
 
-	return { withTenant: withTenant.status, withCache: withCache.status };
+	return { anonymous: anonymous.status, withKey: withKey.status };
 }
 
 // Every read the private cache serves, relative to its stable cache prefix.
@@ -219,16 +191,16 @@ describe('percent-encoded tenant route segments', () => {
 				literal: await statusesFor(`/cache/${privateName}${suffixPath}`)
 			}).toStrictEqual({
 				encodedNamespace: {
-					withTenant: StatusCodes.NOT_FOUND,
-					withCache: StatusCodes.NOT_FOUND
+					anonymous: StatusCodes.NOT_FOUND,
+					withKey: StatusCodes.NOT_FOUND
 				},
 				encodedName: {
-					withTenant: StatusCodes.NOT_FOUND,
-					withCache: StatusCodes.NOT_FOUND
+					anonymous: StatusCodes.NOT_FOUND,
+					withKey: StatusCodes.NOT_FOUND
 				},
 				literal: {
-					withTenant: StatusCodes.UNAUTHORIZED,
-					withCache: StatusCodes.OK
+					anonymous: StatusCodes.UNAUTHORIZED,
+					withKey: StatusCodes.OK
 				}
 			});
 		}
@@ -364,7 +336,7 @@ describe('percent-encoded tenant route segments', () => {
 			name: 'a private reuse-view name',
 			encoded: () => `/reuse/%70rivate/nix-cache-info`,
 			literal: () => `/reuse/${privateViewName}/nix-cache-info`,
-			init: basic(tenantReader)
+			init: withReader
 		},
 		{
 			name: 'the public cache namespace',
@@ -384,7 +356,7 @@ describe('percent-encoded tenant route segments', () => {
 			name: 'the private reuse-view namespace',
 			encoded: () => `/reus%65/${privateViewName}/nix-cache-info`,
 			literal: () => `/reuse/${privateViewName}/nix-cache-info`,
-			init: basic(tenantReader)
+			init: withReader
 		}
 	])(
 		'refuses the encoded spelling of $name',

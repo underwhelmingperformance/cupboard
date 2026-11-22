@@ -8,7 +8,7 @@ import {
 	attestationInfoResponseSchema
 } from '@cupboard/protocol/attestations';
 import { env } from 'cloudflare:workers';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -19,10 +19,12 @@ import { attestationListObjectKey } from '../http/http.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 import {
 	defaultCache,
+	fixtureReaderAuthorization,
 	flakyD1,
 	initialiseViaWorker,
 	loggedAtWarning,
 	namedCache,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	putWorkerTestCache,
 	readFetch,
@@ -62,7 +64,7 @@ function probe(
 		method: 'POST',
 		headers: {
 			'content-type': 'application/json',
-			...(isAuthorised && { authorization: `Basic ${btoa('alice:secret')}` })
+			...(isAuthorised && { authorization: fixtureReaderAuthorization })
 		},
 		body: JSON.stringify({ storePathHashes: hashes, ...additional })
 	};
@@ -158,9 +160,8 @@ describe('attestation discovery', () => {
 		'checks generation metadata %s for %s lists',
 		async (generation, access, expected) => {
 			await initialiseViaWorker();
-			await provisionFixtureTenant({
-				read: { user: 'alice', password: 'secret' }
-			});
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const path = await committedPath('discovery-generation', defaultCache(), {
 				access
 			});
@@ -580,13 +581,12 @@ describe('attestation discovery', () => {
 		});
 	});
 
-	it('revalidates a private read credential after list reads', async () => {
+	it('refuses a list read whose tenant is suspended during it', async () => {
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const path = await committedPath(
-			'discovery-revoked-credential',
+			'discovery-suspended-tenant',
 			defaultCache(),
 			{ access: 'private' }
 		);
@@ -597,11 +597,7 @@ describe('attestation discovery', () => {
 						const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 						await database
 							.update(d1Schema.tenant)
-							.set({
-								readUser: sql`null`,
-								readPasswordHash: sql`null`,
-								readPasswordSalt: sql`null`
-							})
+							.set({ status: 'suspended' })
 							.where(eq(d1Schema.tenant.id, fixtureTenant));
 						return target.get(objectKey);
 					};
@@ -618,14 +614,16 @@ describe('attestation discovery', () => {
 		expect({
 			status: response.status,
 			cacheControl: response.headers.get('cache-control')
-		}).toStrictEqual({ status: 401, cacheControl: 'no-store' });
+		}).toStrictEqual({
+			status: StatusCodes.CONFLICT,
+			cacheControl: 'no-store'
+		});
 	});
 
 	it('refuses private reads and stale scope versions', async () => {
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const path = await committedPath('discovery-private', defaultCache(), {
 			access: 'private'
 		});

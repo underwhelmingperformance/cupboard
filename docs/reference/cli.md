@@ -67,10 +67,6 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard tenant quota`](#cupboard-tenant-quota)
   - [`cupboard tenant set-quota`](#cupboard-tenant-set-quota)
   - [`cupboard tenant clear-quota`](#cupboard-tenant-clear-quota)
-  - [`cupboard tenant rotate-credential`](#cupboard-tenant-rotate-credential)
-  - [`cupboard tenant clear-credential`](#cupboard-tenant-clear-credential)
-  - [`cupboard tenant rotate-cache-credential`](#cupboard-tenant-rotate-cache-credential)
-  - [`cupboard tenant clear-cache-credential`](#cupboard-tenant-clear-cache-credential)
   - [`cupboard tenant remove`](#cupboard-tenant-remove)
 - [`cupboard cache`](#cupboard-cache)
   - [`cupboard cache list`](#cupboard-cache-list)
@@ -160,7 +156,7 @@ Commands:
   session                                         List and revoke the tenant's sign-in sessions, which renew access tokens for up to 30 days.
   control-key                                     Manage and rotate the keys that sign operator access tokens (operator only).
   control-oidc-trust                              Manage the trust rules that let other operators and CI jobs manage the deployment (operator only).
-  tenant                                          Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).
+  tenant                                          Create, suspend and remove tenants, and manage their quotas (operator only).
   cache                                           Create, inspect, configure and remove a tenant's caches.
   policy                                          List and skip old retention policies awaiting an upgrade.
   reuse-view                                      Manage reuse views, which let Nix read from several of a tenant's caches through one URL.
@@ -1595,26 +1591,21 @@ Options:
 ```text
 Usage: cupboard tenant [options] [command]
 
-Create, suspend and remove tenants, and manage their quotas and read credentials
-(operator only).
+Create, suspend and remove tenants, and manage their quotas (operator only).
 
 Options:
-  -h, --help                                            display help for command
+  -h, --help                              display help for command
 
 Commands:
-  create [options] <url> <id>                           Create a tenant.
-  list <url>                                            List every tenant and its state, including removed tenants.
-  suspend [options] <url> <id>                          Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.
-  resume <url> <id>                                     Resume a suspended tenant.
-  quota <url> <id>                                      Show a tenant's storage quota and storage usage.
-  set-quota [options] <url> <id> [bytes]                Set a tenant's storage quota. It can't be less than the tenant already stores.
-  clear-quota <url> <id>                                Remove a tenant's storage quota, leaving it unlimited.
-  rotate-credential [options] <url> <id>                Replace the tenant read credential, and print the new password.
-  clear-credential <url> <id>                           Remove the tenant read credential.
-  rotate-cache-credential [options] <url> <id> [cache]  Create or replace the cache read credential for one cache, and print the password.
-  clear-cache-credential <url> <id> [cache]             Remove the cache read credential for one cache. The cache then accepts the tenant read credential again.
-  remove|delete [options] <url> <id>                    Remove a tenant. Reads and writes stop immediately, and its data is deleted over the following hours.
-  help [command]                                        display help for command
+  create [options] <url> <id>             Create a tenant.
+  list <url>                              List every tenant and its state, including removed tenants.
+  suspend [options] <url> <id>            Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.
+  resume <url> <id>                       Resume a suspended tenant.
+  quota <url> <id>                        Show a tenant's storage quota and storage usage.
+  set-quota [options] <url> <id> [bytes]  Set a tenant's storage quota. It can't be less than the tenant already stores.
+  clear-quota <url> <id>                  Remove a tenant's storage quota, leaving it unlimited.
+  remove|delete [options] <url> <id>      Remove a tenant. Reads and writes stop immediately, and its data is deleted over the following hours.
+  help [command]                          display help for command
 ```
 
 #### cupboard tenant create
@@ -1636,9 +1627,6 @@ Options:
                                identity
   --access <mode>              read access for the tenant's default cache:
                                public or private
-  --read-user <user>           user name for the tenant read credential
-                               (default: cupboard)
-  --no-read-password           do not create a tenant read credential
   --quota-bytes <bytes>        storage quota in bytes (unlimited by default);
                                tenant set-quota accepts the same option
   -h, --help                   display help for command
@@ -1733,72 +1721,6 @@ Remove a tenant's storage quota, leaving it unlimited.
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
   id          tenant slug
-
-Options:
-  -h, --help  display help for command
-```
-
-#### cupboard tenant rotate-credential
-
-```text
-Usage: cupboard tenant rotate-credential [options] <url> <id>
-
-Replace the tenant read credential, and print the new password.
-
-Arguments:
-  url                 deployment URL (e.g. https://cupboard.example.workers.dev)
-  id                  tenant slug
-
-Options:
-  --read-user <user>  user name for the new credential (default: cupboard)
-  -h, --help          display help for command
-```
-
-#### cupboard tenant clear-credential
-
-```text
-Usage: cupboard tenant clear-credential [options] <url> <id>
-
-Remove the tenant read credential.
-
-Arguments:
-  url         deployment URL (e.g. https://cupboard.example.workers.dev)
-  id          tenant slug
-
-Options:
-  -h, --help  display help for command
-```
-
-#### cupboard tenant rotate-cache-credential
-
-```text
-Usage: cupboard tenant rotate-cache-credential [options] <url> <id> [cache]
-
-Create or replace the cache read credential for one cache, and print the
-password.
-
-Arguments:
-  url                 deployment URL (e.g. https://cupboard.example.workers.dev)
-  id                  tenant slug
-  cache               named cache; omit it for the default cache
-
-Options:
-  --read-user <user>  user name for the new credential (default: cupboard)
-  -h, --help          display help for command
-```
-
-#### cupboard tenant clear-cache-credential
-
-```text
-Usage: cupboard tenant clear-cache-credential [options] <url> <id> [cache]
-
-Remove the cache read credential for one cache. The cache then accepts the
-tenant read credential again.
-
-Arguments:
-  url         deployment URL (e.g. https://cupboard.example.workers.dev)
-  id          tenant slug
-  cache       named cache; omit it for the default cache
 
 Options:
   -h, --help  display help for command

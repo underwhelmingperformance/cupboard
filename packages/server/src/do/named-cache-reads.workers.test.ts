@@ -9,9 +9,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	fixtureReaderAuthorization,
 	initialiseViaWorker,
 	namedCache,
 	narBytes,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPathToTenant,
 	putWorkerTestCache,
@@ -22,7 +24,7 @@ import {
 } from '../test-support.ts';
 
 function authorised(): RequestInit {
-	return { headers: { authorization: `Basic ${btoa('alice:secret')}` } };
+	return { headers: { authorization: fixtureReaderAuthorization } };
 }
 
 describe('named cache reads', () => {
@@ -146,9 +148,8 @@ describe('named cache reads', () => {
 
 	it('keeps a missing named cache indistinguishable from a private one', async () => {
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 
 		const unauthorised = await readFetch('/cache/missing/nix-cache-info');
 		const authorisedResponse = await readFetch(
@@ -179,9 +180,8 @@ describe('named cache reads', () => {
 			undefined,
 			namedCache('builds')
 		);
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const narinfoPath = `/cache/builds/${metadata.storePathHash}.narinfo`;
 
 		const unauthorised = await readFetch(narinfoPath, {});

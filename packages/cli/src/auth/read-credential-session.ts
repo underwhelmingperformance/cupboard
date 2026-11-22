@@ -66,7 +66,7 @@ export class ReadCredentialRenewalError extends CliError {
 export class ReadCredentialPublicationError extends CliError {
 	constructor() {
 		super(
-			'Could not update the temporary cache read credential file before the current credential expires. Check that the runtime directory is writable.'
+			'Could not update the temporary credential file before the current read token expires. Check that the runtime directory is writable.'
 		);
 		this.name = 'ReadCredentialPublicationError';
 	}
