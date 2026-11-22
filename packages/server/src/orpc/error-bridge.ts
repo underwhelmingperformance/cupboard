@@ -1,4 +1,8 @@
 import { type Logger } from '@cupboard/logger';
+import {
+	accessKeyLimitErrorCode,
+	accessKeyRefusedErrorCode
+} from '@cupboard/protocol/access-keys';
 import { buildInputsPageLimitErrorCode } from '@cupboard/protocol/build-inputs';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
 import { rootBatchLimitErrorCode } from '@cupboard/protocol/retention';
@@ -16,6 +20,8 @@ import {
 	isD1Overload
 } from '../db/transient.ts';
 import {
+	AccessKeyLimitError,
+	AccessKeyRefusedError,
 	BuildInputsCapabilityRequiredError,
 	BuildInputsPageLimitExceededError,
 	CacheAccessMigrationPendingError,
@@ -94,6 +100,24 @@ export function bridgedError(
 		for (const [name, value] of serverHttpErrorHeaders(error)) {
 			responseHeaders.set(name, value);
 		}
+	}
+
+	if (error instanceof AccessKeyLimitError) {
+		return new ORPCError(accessKeyLimitErrorCode, {
+			defined: true,
+			status: error.status,
+			message: error.message,
+			data: { limit: error.limit, maximum: error.maximum }
+		});
+	}
+
+	if (error instanceof AccessKeyRefusedError) {
+		return new ORPCError(accessKeyRefusedErrorCode, {
+			defined: true,
+			status: error.status,
+			message: error.message,
+			data: { problem: error.problem }
+		});
 	}
 
 	if (error instanceof OidcTrustRuleChangedError) {

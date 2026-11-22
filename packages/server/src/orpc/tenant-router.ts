@@ -17,6 +17,7 @@ import {
 import { implement } from '@orpc/server';
 
 import { type AccessClaims } from '../auth/auth.ts';
+import { openAccessKeyCreator } from '../do/access-key-store.ts';
 import { BuildInputsCapabilityRequiredError } from '../errors.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
@@ -54,7 +55,8 @@ const os = implement(tenantContract)
 			procedure['~orpc'].meta,
 			input,
 			context.cache,
-			context.services.pendingCache
+			context.services.pendingCache,
+			context.services.accessKeyGrants
 		);
 
 		return next({ context: { claims, maintenanceCache } });
@@ -216,6 +218,23 @@ export const tenantRouter = os.router({
 		),
 		revoke: os.sessions.revoke.handler(({ input, context }) =>
 			context.services.refreshSessions.revoke(input.id)
+		)
+	},
+	accessKeys: {
+		create: os.accessKeys.create.handler(async ({ input, context }) =>
+			context.services.accessKeys.create(
+				await openAccessKeyCreator(
+					context.claims,
+					context.services.accessIdentityKeys()
+				),
+				input
+			)
+		),
+		list: os.accessKeys.list.handler(({ input, context }) =>
+			context.services.accessKeys.list(context.claims.grants, input)
+		),
+		delete: os.accessKeys.delete.handler(({ input, context }) =>
+			context.services.accessKeys.delete(input.id)
 		)
 	},
 	reuseViews: {

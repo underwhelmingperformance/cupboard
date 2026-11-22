@@ -24,21 +24,58 @@ authoriser reads each root from `field` of every element of the array named
 export type RootLocation =
 	ResourceLocation | { readonly eachIn: string; readonly field: string };
 
+/**
+The stored access key that a procedure acts on.
+
+- `{ field }`: the input field contains the id of the key. The resources are
+  those that the key's grants select, and the token must authorise
+  `requires` for every one of them. When no key has the id, the token must
+  authorise `requires` for some resource, and the procedure reports the key
+  as absent.
+- `{ listed: true }`: the procedure lists keys. The token must authorise
+  `requires` for some resource, and the procedure returns only the keys that
+  the server's `isAccessKeyCovered` admits for that operation.
+*/
+export type AccessKeyLocation =
+	{ readonly field: string } | { readonly listed: true };
+
 export interface ResourceSpec {
 	readonly cache?: ResourceLocation;
 	readonly root?: RootLocation;
 	readonly tenant?: ResourceLocation;
+	readonly accessKey?: AccessKeyLocation;
 }
 
 /**
-Declares the required operation, resource locations, and maintenance effect
-for a procedure. The server authoriser reads this metadata directly from the
-contract. Although `requires` is optional in the type, every procedure must
-set it. The authoriser denies a procedure that omits the declaration.
+Declares a procedure that creates an access key from the caller's authority.
+`grantsIn` and `expiresAtIn` give the input fields that contain the
+requested grants and the requested expiry. The caller's grants must cover
+every requested grant. Unless `access-key:create` covers the resource of
+every requested grant, the expiry must be present and no later than the
+expiry of the caller's token.
 */
-export interface AuthzMeta {
+export interface DerivationSpec {
+	readonly grantsIn: string;
+	readonly expiresAtIn: string;
+}
+
+/**
+Declares the authority, resource locations, and maintenance effect for a
+procedure. The server authoriser reads this metadata directly from the
+contract. Every procedure declares either the operation that it `requires`
+or the credential that it `derives`, and the type refuses both. oRPC builds
+each procedure from an initial metadata value without either, so the type
+cannot require one. A contract test checks every procedure, and the
+authoriser denies a procedure that declares neither.
+*/
+export type AuthzMeta = AuthzMetaFields & AuthorityDeclaration;
+
+type AuthorityDeclaration =
+	| { readonly requires?: Operation; readonly derives?: never }
+	| { readonly derives: DerivationSpec; readonly requires?: never };
+
+interface AuthzMetaFields {
 	readonly acceptsControlDatabaseValidationSecret?: true;
-	readonly requires?: Operation;
 	readonly resource?: ResourceSpec;
 	readonly maintenance?: Maintenance;
 	readonly replaySafety?: ReplaySafety;
