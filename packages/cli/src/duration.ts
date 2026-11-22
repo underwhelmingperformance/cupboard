@@ -33,7 +33,7 @@ const unitSeconds = new Map<string, number>([
 	['w', 604_800]
 ]);
 
-function parseDurationSeconds(input: string): number {
+export function parseDurationSeconds(input: string): number {
 	const match = /^(\d+)([smhdw])$/.exec(input);
 	const amount = match?.[1];
 	const unit = match?.[2];

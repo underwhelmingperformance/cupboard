@@ -66,12 +66,16 @@ export const accessKeySummarySchema = z.strictObject({
 });
 export type AccessKeySummary = z.output<typeof accessKeySummarySchema>;
 
+/**
+The expiry of a new access key: an ISO 8601 date and time in UTC.
+*/
+export const accessKeyExpirySchema = z.iso
+	.datetime()
+	.transform((value) => isoTimestamp(new Date(value)));
+
 export const accessKeyCreateRequestSchema = z.strictObject({
 	grants: authorizationDetailsSchema.min(1).max(maxAccessKeyGrants),
-	expiresAt: z.iso
-		.datetime()
-		.transform((value) => isoTimestamp(new Date(value)))
-		.optional()
+	expiresAt: accessKeyExpirySchema.optional()
 });
 export type AccessKeyCreateRequest = z.output<
 	typeof accessKeyCreateRequestSchema

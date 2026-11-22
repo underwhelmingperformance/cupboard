@@ -50,6 +50,10 @@ under [docs/](../README.md) explain when to use each one.
 - [`cupboard session`](#cupboard-session)
   - [`cupboard session list`](#cupboard-session-list)
   - [`cupboard session revoke`](#cupboard-session-revoke)
+- [`cupboard access-key`](#cupboard-access-key)
+  - [`cupboard access-key create`](#cupboard-access-key-create)
+  - [`cupboard access-key list`](#cupboard-access-key-list)
+  - [`cupboard access-key delete`](#cupboard-access-key-delete)
 - [`cupboard control-key`](#cupboard-control-key)
   - [`cupboard control-key list`](#cupboard-control-key-list)
   - [`cupboard control-key rotate`](#cupboard-control-key-rotate)
@@ -154,6 +158,7 @@ Commands:
   key                                             Manage and rotate the keys that sign the tenant's Nix cache metadata.
   auth-key                                        Manage and rotate the keys that sign the tenant's access tokens.
   session                                         List and revoke the tenant's sign-in sessions, which renew access tokens for up to 30 days.
+  access-key                                      Create, list and delete access keys: long-lived secrets with a subset of your grants, for machines that cannot sign in.
   control-key                                     Manage and rotate the keys that sign operator access tokens (operator only).
   control-oidc-trust                              Manage the trust rules that let other operators and CI jobs manage the deployment (operator only).
   tenant                                          Create, suspend and remove tenants, and manage their quotas (operator only).
@@ -1411,6 +1416,96 @@ Options:
   -h, --help  display help for command
 ```
 
+### cupboard access-key
+
+```text
+Usage: cupboard access-key [options] [command]
+
+Create, list and delete access keys: long-lived secrets with a subset of your
+grants, for machines that cannot sign in.
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  create [options] <url>       Create an access key and print its secret once.
+                               Its grants must be a subset of yours.
+  list <url>                   List the access keys whose grants you can see,
+                               with their grants and expiry.
+  delete [options] <url> <id>  Delete an access key and every key created below
+                               it. The read routes can accept a deleted key for
+                               up to five minutes.
+  help [command]               display help for command
+```
+
+#### cupboard access-key create
+
+```text
+Usage: cupboard access-key create [options] <url>
+
+Create an access key and print its secret once. Its grants must be a subset of
+yours.
+
+Arguments:
+  url                      tenant URL (e.g.
+                           https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  --allow <action>         a grant to give (repeatable): read, push, attest,
+                           root, attach, create, close, reopen, remove or
+                           build-inputs (default: [])
+  --cache <name>           the cache that the grants apply to (default: the
+                           tenant's default cache)
+  --root <name>            the root that publication grants cover, or a root
+                           prefix ending in /
+  --view <name>            also permit content reads from a reuse view
+  --grants-file <path>     read the grants from a JSON file of authorization
+                           details, in place of --allow, --cache, --root and
+                           --view
+  --expires-in <duration>  expire the key after this long (e.g. 90d, 12h)
+  --expires-at <time>      expire the key at this ISO 8601 date and time
+  --no-expiry              create a key that does not expire; a credential that
+                           expires needs access-key:create for every resource in
+                           the grants
+  -h, --help               display help for command
+
+Example:
+  # A key that lets a build machine read the default cache for 90 days
+  cupboard access-key create https://cupboard.example.workers.dev/t/acme \
+    --allow read --expires-in 90d
+```
+
+#### cupboard access-key list
+
+```text
+Usage: cupboard access-key list [options] <url>
+
+List the access keys whose grants you can see, with their grants and expiry.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard access-key delete
+
+```text
+Usage: cupboard access-key delete [options] <url> <id>
+
+Delete an access key and every key created below it. The read routes can accept
+a deleted key for up to five minutes.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+  id          access key ID, as `cupboard access-key list` shows it
+
+Options:
+  -y, --yes   delete without the confirmation prompt
+  -h, --help  display help for command
+```
+
 ### cupboard control-key
 
 ```text
@@ -2043,6 +2138,10 @@ Options:
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
+
+Access keys select a cache by its name. Removing a cache leaves the keys
+whose grants select it, and those keys can use a new cache with the same
+name. Delete them first with `cupboard access-key delete`.
 ```
 
 #### cupboard cache inspect

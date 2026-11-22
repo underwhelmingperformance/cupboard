@@ -142,7 +142,7 @@ export class RootBindingRequiredError extends CliUsageError {
 	}
 }
 
-class ContentReadRootSelectionError extends CliUsageError {
+export class ContentReadRootSelectionError extends CliUsageError {
 	constructor() {
 		super(
 			'Content reads cannot be restricted to a root. Remove --root and --root-template from a read-only rule, or include publication permissions for the selected root.'
