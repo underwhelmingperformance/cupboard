@@ -262,7 +262,7 @@ describe('dispatch cost', () => {
 
 		expect(lines).toStrictEqual([
 			{
-				level: 'info',
+				level: 'trace',
 				category: ['cupboard'],
 				message: 'method finished',
 				properties: {

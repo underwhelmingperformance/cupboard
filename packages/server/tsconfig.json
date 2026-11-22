@@ -5,7 +5,7 @@
 		"types": [
 			"@cloudflare/workers-types",
 			"./worker-configuration",
-			"@cloudflare/vitest-pool-workers/types"
+			"@cloudflare/vitest-plugin/types"
 		]
 	},
 	"include": [

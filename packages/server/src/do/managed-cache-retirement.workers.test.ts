@@ -515,7 +515,7 @@ describe('managed cache retirement', () => {
 
 		expect(lines).toStrictEqual([
 			{
-				level: 'info',
+				level: 'trace',
 				category: ['cupboard'],
 				message: 'method finished',
 				properties: {

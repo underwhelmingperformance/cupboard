@@ -1769,14 +1769,14 @@ describe('narinfo deletion queue', () => {
 				written: result.meta.rows_written
 			}))
 		).toStrictEqual([
-			{ rows: [], read: 118, written: 0 },
 			{ rows: [], read: 117, written: 0 },
-			{ rows: [], read: 497, written: 72 },
-			{ rows: [], read: 493, written: 70 },
+			{ rows: [], read: 116, written: 0 },
+			{ rows: [], read: 492, written: 71 },
+			{ rows: [], read: 488, written: 69 },
 			{ rows: [], read: 1, written: 2 },
 			{ rows: [], read: 1, written: 2 },
-			{ rows: [], read: 118, written: 0 },
-			{ rows: [], read: 486, written: 65 },
+			{ rows: [], read: 117, written: 0 },
+			{ rows: [], read: 481, written: 64 },
 			{ rows: [], read: 1, written: 2 }
 		]);
 
@@ -2254,14 +2254,14 @@ describe('narinfo deletion queue', () => {
 			}
 		);
 		expect(details).toStrictEqual([
-			'SEARCH pending_upload USING INDEX pending_upload_inheritance_cutoff_idx (<expr>=? AND nar_hash=? AND accepted_sequence<?)',
+			'SEARCH pending_upload USING COVERING INDEX pending_upload_inheritance_cutoff_idx (<expr>=? AND nar_hash=? AND accepted_sequence<?)',
 			'SEARCH cache_identity USING INTEGER PRIMARY KEY (rowid=?)',
 			'SEARCH attestation_inheritance USING COVERING INDEX attestation_inheritance_cutoff_idx (store_path_hash=? AND nar_hash=? AND accepted_sequence<?)',
 			'SEARCH cache_identity USING INTEGER PRIMARY KEY (rowid=?)',
 			'SEARCH cache_identity USING INTEGER PRIMARY KEY (rowid=?)',
-			'SEARCH pending_upload USING INDEX pending_upload_inheritance_path_idx (<expr>=? AND nar_hash=?)',
+			'SEARCH pending_upload USING COVERING INDEX pending_upload_inheritance_path_idx (<expr>=? AND nar_hash=?)',
 			'SEARCH attestation_inheritance USING COVERING INDEX attestation_inheritance_path_nar_idx (store_path_hash=? AND nar_hash=?)',
-			'SEARCH pending_upload USING INDEX pending_upload_inheritance_path_idx (<expr>=? AND nar_hash=? AND cache_id=?)',
+			'SEARCH pending_upload USING COVERING INDEX pending_upload_inheritance_path_idx (<expr>=? AND nar_hash=? AND cache_id=?)',
 			'SEARCH attestation_inheritance USING COVERING INDEX attestation_inheritance_path_nar_idx (store_path_hash=? AND nar_hash=? AND cache_id=? AND generation>?)'
 		]);
 	});
