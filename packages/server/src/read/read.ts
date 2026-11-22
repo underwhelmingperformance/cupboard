@@ -110,14 +110,6 @@ export interface ViewReadAuthentication {
 }
 
 /**
-A key verifier for the read paths that do not verify access keys yet. It
-refuses every key.
-*/
-export function isKeyAuthorisedWithoutVerifier(): Promise<boolean> {
-	return Promise.resolve(false);
-}
-
-/**
 Authenticates a read, or returns the refusal to send instead.
 
 Admission reads every verifier from the authoritative D1 rows on each

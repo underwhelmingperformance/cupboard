@@ -88,6 +88,7 @@ import { type NarVerification } from '../blob/nar-verify.ts';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { pushIdExpiresAtSeconds } from '../blob/push-id.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
+import { sha256Hex } from '../crypto/crypto.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import * as schema from '../db/schema.ts';
@@ -177,6 +178,8 @@ import {
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
 import { directUploadPageSize } from '../policy/upload-pages.ts';
+import { type ReadableAccessKey } from '../read/access-key-read-cache.ts';
+import { cacheReadOperations } from '../read/cache-read-grants.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest
@@ -4848,9 +4851,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 		return this.isCredentialAuthorised(
 			{ kind: 'access-token', token },
-			isAbsent ? ['cache:content-read', 'cache:read'] : 'cache:content-read',
+			cacheReadOperations(isAbsent),
 			{ cache }
 		);
+	}
+
+	/**
+	Verifies an access key for the Worker's read routes and returns what the
+	Worker needs to decide reads with it, or undefined when the key is not
+	valid. The Worker caches the result.
+	*/
+	async verifyAccessKey(
+		secret: string
+	): Promise<ReadableAccessKey | undefined> {
+		await this.initialise();
+
+		try {
+			const key = await this.authenticator.verifyKey(rootLogger(), secret);
+
+			return {
+				secretHash: await sha256Hex(secret),
+				grants: key.grants,
+				...(key.expiresAt !== undefined && {
+					expiresAtMs: key.expiresAt.getTime()
+				})
+			};
+		} catch (error) {
+			if (error instanceof InvalidAccessTokenError) {
+				return undefined;
+			}
+
+			throw error;
+		}
 	}
 
 	// Only RPC callers can stage negotiate hints. The Worker puts the returned

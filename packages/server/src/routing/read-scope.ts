@@ -9,11 +9,9 @@ import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry, sharedFactsRefusal } from '../db/transient.ts';
 import { MetadataScopeChangedError, UnauthenticatedError } from '../errors.ts';
-import {
-	guardScopedRead,
-	isKeyAuthorisedWithoutVerifier
-} from '../read/read.ts';
+import { guardScopedRead } from '../read/read.ts';
 
+import { isAccessKeyReadAuthorised } from './access-key-reads.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 
@@ -97,7 +95,14 @@ export async function revalidateCacheReadAuthority(
 					cache,
 					admission.cache?.isDeleted ?? true
 				),
-			isKeyAuthorised: isKeyAuthorisedWithoutVerifier
+			isKeyAuthorised: (secret, cache) =>
+				isAccessKeyReadAuthorised(
+					context.env,
+					tenant,
+					secret,
+					cache,
+					admission.cache?.isDeleted ?? true
+				)
 		}
 	);
 	if (denied !== undefined) {

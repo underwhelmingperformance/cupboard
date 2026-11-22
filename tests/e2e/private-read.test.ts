@@ -9,6 +9,7 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import type { UnreachableSubstituter } from '../../packages/nix/src/nix-store.ts';
 import { substituterClientOver } from '../../packages/nix/src/store-client.ts';
 import {
@@ -99,6 +100,67 @@ describe('Nix substitution from a private-read cache', () => {
 						withCredential: 'private',
 						withoutCredential: 'refused'
 					});
+				} finally {
+					await server.stop();
+				}
+			},
+			{ makeWritableBeforeCleanup: true }
+		));
+
+	it('substitutes with an access key in the netrc password', () =>
+		withTemporaryDirectory(
+			'cupboard-e2e-private-key-',
+			async (directory) => {
+				const server = await CupboardTestServer.start(directory, {
+					provision: { defaultCacheAccess: 'private' }
+				});
+
+				try {
+					const client = new CupboardClient(server.tenantUrl, fetch, {
+						kind: 'default'
+					});
+					const token = await server.ownerAdminToken();
+					const publicKey = await client.publicKey();
+					const source = await NixStore.host(
+						path.join(directory, 'source-home')
+					);
+					const storePath = await source.build(privateDerivation);
+					await pushStorePaths(
+						{ client: server.pushClient(token), store: source },
+						[storePath]
+					);
+					const key = await tenantRpc(server.tenantUrl, {
+						credential: token
+					}).accessKeys.create({
+						grants: [
+							{
+								type: 'cupboard_cache',
+								cache: { kind: 'default' },
+								actions: ['cache:content-read']
+							}
+						]
+					});
+
+					const netrcFile = path.join(directory, 'netrc');
+					await writeFile(
+						netrcFile,
+						renderNetrc(server.url, 'nix', key.secret)
+					);
+
+					const target = await NixStore.chroot(
+						path.join(directory, 'target'),
+						path.join(directory, 'target-home')
+					);
+					await target.realise(storePath, {
+						substituter: server.tenantUrl.href,
+						trustedPublicKeys: [publicKey],
+						requireSigs: true,
+						netrcFile
+					});
+
+					expect(await readFile(target.physicalPath(storePath), 'utf8')).toBe(
+						'private'
+					);
 				} finally {
 					await server.stop();
 				}

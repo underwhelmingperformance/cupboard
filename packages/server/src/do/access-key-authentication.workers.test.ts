@@ -8,8 +8,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
-import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
-import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
@@ -25,6 +24,7 @@ import {
 	narBytes,
 	pushPath,
 	resetTestServer,
+	testAccessKeyRule,
 	testPushId,
 	testTokenIdentity,
 	uploadMetadata,
@@ -33,43 +33,15 @@ import {
 
 import { type ServerContext } from './context.ts';
 
-const rule = trustRuleIdSchema.parse('alice-rule');
-
-// Installs a rule that allows the identity `alice` every grant, and creates a
-// key with `grants` rooted in that identity and rule.
+// Creates a key with `grants` in the test tenant. Its root is the identity
+// `alice` and the rule that allows her every grant.
 async function aliceKey(
 	grants: AuthorizationDetails,
 	expiresAt?: Date
 ): Promise<AccessKeyCreateResponse> {
 	await bootstrap();
 
-	return runInDurableObject(currentServer(), async (instance) => {
-		instance.context.db
-			.insert(oidcTrust)
-			.values({
-				id: rule,
-				issuer: 'https://idp.test',
-				audience: 'cupboard-aud',
-				claimsJson: JSON.stringify({ sub: 'alice' }),
-				permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
-				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
-			})
-			.run();
-
-		return instance.context.accessKeys.create(
-			{
-				subject: oidcSubjectSchema.parse('alice'),
-				identity: testTokenIdentity('alice'),
-				ruleId: rule
-			},
-			{
-				grants,
-				...(expiresAt !== undefined && {
-					expiresAt: isoTimestamp(expiresAt)
-				})
-			}
-		);
-	});
+	return createTestAccessKey(currentServer(), grants, expiresAt);
 }
 
 const listGrants = authorizationDetailsSchema.parse([
@@ -162,7 +134,7 @@ describe('access-key authentication in the tenant object', () => {
 				context.db
 					.update(oidcTrust)
 					.set({ disabledAt: isoTimestamp(new Date()) })
-					.where(eq(oidcTrust.id, rule))
+					.where(eq(oidcTrust.id, testAccessKeyRule))
 					.run();
 			}
 		},
@@ -172,7 +144,7 @@ describe('access-key authentication in the tenant object', () => {
 				context.db
 					.update(oidcTrust)
 					.set({ claimsJson: JSON.stringify({ sub: 'bob' }) })
-					.where(eq(oidcTrust.id, rule))
+					.where(eq(oidcTrust.id, testAccessKeyRule))
 					.run();
 			}
 		}
@@ -280,7 +252,7 @@ describe('access keys acting on access keys', () => {
 				parentKind: 'access-key',
 				parentId: parent.id,
 				rootIdentityJson: JSON.stringify(testTokenIdentity('alice')),
-				rootRule: rule,
+				rootRule: testAccessKeyRule,
 				creatorSubject: 'alice'
 			}
 		});
