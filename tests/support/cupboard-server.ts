@@ -13,7 +13,8 @@ import type { Duplex } from 'node:stream';
 
 import {
 	type CacheAccessMode,
-	type CacheScope
+	type CacheScope,
+	type TenantId
 } from '@cupboard/nix-store/scalars';
 import {
 	schemaTransitions,
@@ -448,6 +449,36 @@ export class CupboardTestServer {
 		return payload.access_token;
 	}
 
+	private async createTenant(
+		adminToken: string,
+		id: TenantId,
+		spec: TenantProvisionSpec
+	): Promise<void> {
+		const body = {
+			id,
+			defaultCacheAccess: spec.defaultCacheAccess,
+			ownerIssuer: this.issuer.issuer,
+			ownerSubject,
+			ownerAudience,
+			...(spec.read !== undefined && { read: spec.read })
+		};
+		const response = await fetch(new URL('/control/tenants', this.url), {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Bearer ${adminToken}`
+			},
+			body: JSON.stringify(body)
+		});
+
+		if (!response.ok) {
+			throw new TenantProvisionFailedError(
+				response.status,
+				await response.text()
+			);
+		}
+	}
+
 	/**
 	What the commit sessions have done so far. A test that spans one run reads
 	this before and after it and compares, since the counts are the server's
@@ -468,7 +499,11 @@ export class CupboardTestServer {
 	{@link URL} is the deployment/control surface.
 	*/
 	get tenantUrl(): URL {
-		return new URL(`/t/${fixtureTenant}`, this.url);
+		return this.tenantUrlFor(fixtureTenant);
+	}
+
+	tenantUrlFor(tenant: TenantId): URL {
+		return new URL(`/t/${tenant}`, this.url);
 	}
 
 	tenantPath(path: string): URL {
@@ -535,29 +570,19 @@ export class CupboardTestServer {
 			);
 		}
 
-		const body = {
-			id: fixtureTenant,
-			defaultCacheAccess: spec.defaultCacheAccess,
-			ownerIssuer: this.issuer.issuer,
-			ownerSubject,
-			ownerAudience,
-			...(spec.read !== undefined && { read: spec.read })
-		};
-		const response = await fetch(new URL('/control/tenants', this.url), {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/json',
-				authorization: `Bearer ${adminToken}`
-			},
-			body: JSON.stringify(body)
-		});
+		await this.createTenant(adminToken, fixtureTenant, spec);
+	}
 
-		if (!response.ok) {
-			throw new TenantProvisionFailedError(
-				response.status,
-				await response.text()
-			);
-		}
+	/**
+	Provisions another tenant beside the fixture tenant, with the same owner.
+	The fixture tenant must already be provisioned, because that seeds the
+	control trust policy and initialises the instance.
+	*/
+	async provisionTenant(
+		id: TenantId,
+		spec: TenantProvisionSpec
+	): Promise<void> {
+		await this.createTenant(await this.exchangeControlAdminToken(), id, spec);
 	}
 
 	/**
@@ -598,14 +623,14 @@ export class CupboardTestServer {
 		});
 	}
 
-	async ownerAdminToken(): Promise<string> {
+	async ownerAdminToken(tenant: TenantId = fixtureTenant): Promise<string> {
 		const bound = await signBound(
 			this.issuer,
 			{ aud: ownerAudience, sub: ownerSubject },
-			this.tenantUrl
+			this.tenantUrlFor(tenant)
 		);
 
-		return this.exchangeIdToken(bound.token, undefined, bound.form);
+		return this.exchangeIdToken(bound.token, undefined, bound.form, tenant);
 	}
 
 	/**
@@ -618,7 +643,8 @@ export class CupboardTestServer {
 	async exchangeIdToken(
 		idToken: string,
 		authorizationDetails?: unknown,
-		binding: Readonly<Record<string, string>> = {}
+		binding: Readonly<Record<string, string>> = {},
+		tenant: TenantId = fixtureTenant
 	): Promise<string> {
 		const body = new URLSearchParams({
 			grant_type: tokenExchangeGrantType,
@@ -629,14 +655,11 @@ export class CupboardTestServer {
 			}),
 			...binding
 		});
-		const response = await fetch(
-			new URL(`/t/${fixtureTenant}/token`, this.url),
-			{
-				method: 'POST',
-				headers: { 'content-type': 'application/x-www-form-urlencoded' },
-				body: body.toString()
-			}
-		);
+		const response = await fetch(new URL(`/t/${tenant}/token`, this.url), {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: body.toString()
+		});
 
 		if (!response.ok) {
 			throw new TokenExchangeFailedError(

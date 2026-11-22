@@ -4,7 +4,8 @@ import path from 'node:path';
 import { renderNetrc } from '@cupboard/nix-store/nix-config';
 import {
 	storeDirectorySchema,
-	storePathSchema
+	storePathSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
@@ -145,6 +146,71 @@ describe('Nix substitution from a private-read cache', () => {
 					await writeFile(
 						netrcFile,
 						renderNetrc(server.url, 'nix', key.secret)
+					);
+
+					const target = await NixStore.chroot(
+						path.join(directory, 'target'),
+						path.join(directory, 'target-home')
+					);
+					await target.realise(storePath, {
+						substituter: server.tenantUrl.href,
+						trustedPublicKeys: [publicKey],
+						requireSigs: true,
+						netrcFile
+					});
+
+					expect(await readFile(target.physicalPath(storePath), 'utf8')).toBe(
+						'private'
+					);
+				} finally {
+					await server.stop();
+				}
+			},
+			{ makeWritableBeforeCleanup: true }
+		));
+
+	it("substitutes from a public cache with another tenant's access key in the netrc", () =>
+		withTemporaryDirectory(
+			'cupboard-e2e-public-foreign-key-',
+			async (directory) => {
+				const server = await CupboardTestServer.start(directory, {
+					provision: { defaultCacheAccess: 'public' }
+				});
+
+				try {
+					const other = tenantIdSchema.parse('other');
+					await server.provisionTenant(other, {
+						defaultCacheAccess: 'private'
+					});
+					const foreignKey = await tenantRpc(server.tenantUrlFor(other), {
+						credential: await server.ownerAdminToken(other)
+					}).accessKeys.create({
+						grants: [
+							{
+								type: 'cupboard_cache',
+								cache: { kind: 'default' },
+								actions: ['cache:content-read']
+							}
+						]
+					});
+					const client = new CupboardClient(server.tenantUrl, fetch, {
+						kind: 'default'
+					});
+					const token = await server.ownerAdminToken();
+					const publicKey = await client.publicKey();
+					const source = await NixStore.host(
+						path.join(directory, 'source-home')
+					);
+					const storePath = await source.build(privateDerivation);
+					await pushStorePaths(
+						{ client: server.pushClient(token), store: source },
+						[storePath]
+					);
+
+					const netrcFile = path.join(directory, 'netrc');
+					await writeFile(
+						netrcFile,
+						renderNetrc(server.url, 'nix', foreignKey.secret)
 					);
 
 					const target = await NixStore.chroot(
