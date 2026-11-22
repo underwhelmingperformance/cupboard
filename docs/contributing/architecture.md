@@ -1168,9 +1168,15 @@ steps:
    static HTTP Basic credentials, it uses the cache's own salted verifier if the
    cache has one, and the tenant's verifier otherwise. For an access token, it
    calls the tenant's Durable Object to verify the JWT and its
-   `cache:content-read` grant for the addressed cache. The control Worker then
+   `cache:content-read` grant for the addressed cache. For an access key, it
+   uses the key's grants from its isolate's key cache, or asks the object to
+   verify the key on a miss, and checks the same grant. The control Worker then
    serves the read itself, with `Cache-Control: no-store`.
-4. If the cache is public, the control Worker passes the read to
+4. If the cache is public, the control Worker does not verify a credential. The
+   cache's public grants allow every read, and a credential's grants only add to
+   them, so a credential cannot change the response. A credential that fails
+   verification gets the same response as an anonymous request. The control
+   Worker passes every public read, with or without a credential, to
    `CachedTenantReads` through the service binding. The request includes the
    cache generation and read revision that admission found. `CachedTenantReads`
    serves the read through the Workers Cache, and tags each narinfo so that
@@ -1459,25 +1465,40 @@ which can join the same stuck fill again, up to Nix's `download-attempts`.
 Public narinfo and NAR reads, and private reads authenticated by static
 credentials, do not wake the tenant's Durable Object. Token-authenticated
 private reads call the object once per HTTP request; the NAR stream stays on the
-control Worker. These reads also use the object: `nix-cache-info`, the public
-key, attestations, availability queries, and reuse views.
+control Worker. A private read with an access key calls the object only when the
+control Worker's isolate has not verified that key in the last five minutes.
+These reads also use the object: `nix-cache-info`, the public key, attestations,
+availability queries, and reuse views.
 
-A private reuse view accepts the tenant's static credential or an access token
-with `view:content-read` for that view. A view grant does not authorise direct
-reads from the view's source caches. Content-read grants cannot select a root,
-and publication grants do not imply content-read permission. The existing
-`cache:read` operation authorises cache metadata through the admin API.
+The key cache is in the isolate's memory, keyed by tenant and key id, and keeps
+at most 1,000 keys. Each entry has the hash of the key's secret, its grants and
+its expiry. An entry lasts five minutes, or until the key expires if that is
+sooner, so deleting a key or disabling its trust rule takes effect on the read
+routes within five minutes. Every hit compares the hash of the presented secret
+with the stored hash, so a cached key never admits a wrong secret. The cache
+stores only verified keys. Someone who knows a key's id but not its secret could
+otherwise store a refusal under that id and lock out the key's holder.
 
-Nix sends access tokens through HTTP Basic authentication, with user
-`cupboard-oidc` and password `cupboard-access+jwt:<token>`. Read endpoints also
-accept Bearer authentication. `cupboard run` exchanges a fresh GitHub OIDC token
-for narrowly scoped read access and renews it while its child command runs. It
-writes each replacement to a temporary netrc atomically, and selects that file
-through the child's `NIX_CONFIG`. Nix and Cupboard's direct HTTP readers reread
-the netrc for subsequent requests. When the command exits, the wrapper stops
-renewal and removes the file. Removing the file does not revoke issued JWTs;
-normal token expiry and key retirement still apply. This lifecycle adds no
-per-token revocation state.
+A private reuse view accepts the tenant's static credential, or an access token
+or access key with `view:content-read` for that view. A view grant does not
+authorise direct reads from the view's source caches. Content-read grants cannot
+select a root, and publication grants do not imply content-read permission. The
+existing `cache:read` operation authorises cache metadata through the admin API.
+
+Nix sends a credential through HTTP Basic authentication. A password that starts
+with `cupboard_ak_` is an access key, and a password of the form
+`cupboard-access+jwt:<token>` is an access token. For either, the control Worker
+ignores the user name. Any other password is checked with the user name as a
+static read credential. Read endpoints also accept either kind of credential
+through Bearer authentication, without the `cupboard-access+jwt:` prefix.
+`cupboard run` exchanges a fresh GitHub OIDC token for narrowly scoped read
+access and renews it while its child command runs. It writes each replacement to
+a temporary netrc atomically, and selects that file through the child's
+`NIX_CONFIG`. Nix and Cupboard's direct HTTP readers reread the netrc for
+subsequent requests. When the command exits, the wrapper stops renewal and
+removes the file. Removing the file does not revoke issued JWTs; normal token
+expiry and key retirement still apply. This lifecycle adds no per-token
+revocation state.
 
 ### Pushing store paths
 
@@ -2409,6 +2430,34 @@ leaves out retained families, so their cost does not grow with the number of
 retained sessions. Releases before migration `0090_access_keys` read families
 through `refresh_session_family_expires_at_idx`. The index can be dropped once
 no supported rollback target predates `0090_access_keys`.
+
+The tenant object verifies an access key on every admin, upload and commit
+request, and on every key verification that the control Worker asks of it. The
+key's record must exist and must not have expired. The SHA-256 hash of the
+presented secret must match the stored hash in a constant-time comparison. An
+enabled trust rule must still allow the key's root identity the key's grants, by
+the same selection that a refresh uses. A key that fails the rule check keeps
+its record and works again if a rule allows it later. Revoking a session or a
+key deletes every key below it, so an existing record has no revoked ancestor.
+
+The tenant limit compares `access_key_state.key_count` with the maximum.
+Triggers on `access_key` increment it on every insert and decrement it on every
+delete, so a creation reads one row however many keys the tenant has, and an
+expired key counts until collection deletes it.
+
+A release reads stored grants as it reads stored trust rules: it ignores
+operations that it does not know and drops a grant with no operation left. A
+key's grants are unreadable when no grant remains, or when a grant has a type or
+a binding that the release does not know, which can happen after a rollback.
+Such a key stays stored and inert: it fails verification, and only a wildcard
+holder sees it in a listing, under `unreadableAccessKeys`, or deletes it by id.
+It works again once a release that can read its grants is deployed.
+
+A request authenticated with an access key can create a key below it, with the
+same root identity and rule, and can delete itself and its descendants without
+`access-key:delete`. A replayed refresh token of the session above the key does
+not stop this: the key can still create keys until `session revoke` deletes it
+with every other key below the session.
 
 Interactive refresh credentials contain a versioned, tenant-bound identity and
 maximum grant set. Their complete opaque value is authenticated against the
