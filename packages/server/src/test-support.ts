@@ -49,6 +49,7 @@ import {
 	type TrustRuleId,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
+import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import type {
 	RootListResponseInput,
 	RootRemoveResponseInput,
@@ -63,6 +64,7 @@ import {
 	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { type RefreshSessionId } from '@cupboard/protocol/sessions';
 import {
 	acceptCapabilitiesHeader,
 	commitAcceptCapabilitiesHeader,
@@ -121,10 +123,16 @@ import {
 	runningAlarmHandlersOf,
 	stopAlarms
 } from './alarm-fence.test-support.ts';
-import { issueAccessJwt } from './auth/auth.ts';
+import {
+	type AccessIdentityKeyContext,
+	SealedAccessIdentity
+} from './auth/access-identity.ts';
+import { issueAccessJwt, issueTenantAccessJwt } from './auth/auth.ts';
+import { recordedOidcIdentity } from './auth/oidc-identity.ts';
 import { NarReadBufferPool } from './blob/nar-read-buffers.ts';
 import { type NarVerification } from './blob/nar-verify.ts';
 import { queueObjectDeletion } from './blob/object-incarnation.ts';
+import { pushIdSigningKey } from './blob/push-credential.ts';
 import {
 	issuePushId,
 	issueV2PushId,
@@ -1350,14 +1358,35 @@ the server issues with, so a token stays valid across a rotation.
 export function issueServerSignedToken(
 	grants: AuthorizationDetails,
 	subject = 'grant-test',
-	auditClaims?: Readonly<Record<string, unknown>>
+	lineage: TestTokenLineage = {}
 ): Promise<string> {
-	return issueServerSignedTokenFor(
-		harness.server,
-		grants,
-		subject,
-		auditClaims
-	);
+	return issueServerSignedTokenFor(harness.server, grants, subject, lineage);
+}
+
+/**
+The trust rule and refresh session that a test token records.
+*/
+export interface TestTokenLineage {
+	readonly ruleId?: TrustRuleId;
+	readonly sessionId?: RefreshSessionId;
+}
+
+/**
+The identity that a test token records for `subject`, with the issuer and
+audience that `installTrustedIdp` uses by default.
+*/
+export function testTokenIdentity(subject: string): VerifiedOidcClaims {
+	const identity = recordedOidcIdentity({
+		iss: 'https://idp.test',
+		sub: subject,
+		aud: 'cupboard-aud'
+	});
+
+	if (identity === undefined) {
+		throw new Error('The test identity is not a policy identity');
+	}
+
+	return identity;
 }
 
 export function issueWorkerSignedToken(
@@ -1369,7 +1398,7 @@ export function issueWorkerSignedToken(
 		fixtureWorkerServer(),
 		grants,
 		subject,
-		undefined,
+		{},
 		issuedAt
 	);
 }
@@ -1378,12 +1407,12 @@ async function issueServerSignedTokenFor(
 	stub: DurableObjectStub<CupboardServer>,
 	grants: AuthorizationDetails,
 	subject = 'grant-test',
-	auditClaims?: Readonly<Record<string, unknown>>,
+	lineage: TestTokenLineage = {},
 	issuedAt = new Date()
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
-	return issueAccessJwt(
+	return issueTenantAccessJwt(
 		key.privateJwk,
 		{
 			issuer: oidcIssuerSchema.parse(tenantTestIssuer),
@@ -1392,9 +1421,34 @@ async function issueServerSignedTokenFor(
 			grants,
 			kid: key.kid,
 			ttlSeconds: ttlSecondsSchema.parse(600),
-			auditClaims
+			identity: await sealedTestIdentity(stub, subject),
+			...lineage
 		},
 		issuedAt
+	);
+}
+
+/**
+Seals the test identity of `subject` with the key context of the object
+behind `stub`, as the object seals the identity in the tokens that it
+issues.
+*/
+export async function sealedTestIdentity(
+	stub: DurableObjectStub<CupboardServer>,
+	subject: string
+): Promise<SealedAccessIdentity> {
+	const keys = await runInDurableObject(
+		stub,
+		(instance): AccessIdentityKeyContext => ({
+			signingKey: pushIdSigningKey(instance.context.env),
+			tenant: instance.context.tenant() ?? fixtureTenant
+		})
+	);
+
+	return SealedAccessIdentity.seal(
+		testTokenIdentity(subject),
+		oidcSubjectSchema.parse(subject),
+		keys
 	);
 }
 
@@ -1411,7 +1465,7 @@ export async function issueTokenForTenant(
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
-	return issueAccessJwt(
+	return issueTenantAccessJwt(
 		key.privateJwk,
 		{
 			issuer,
@@ -1419,7 +1473,8 @@ export async function issueTokenForTenant(
 			subject: oidcSubjectSchema.parse(subject),
 			grants,
 			kid: key.kid,
-			ttlSeconds: ttlSecondsSchema.parse(600)
+			ttlSeconds: ttlSecondsSchema.parse(600),
+			identity: await sealedTestIdentity(stub, subject)
 		},
 		new Date()
 	);

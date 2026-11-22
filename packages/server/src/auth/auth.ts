@@ -11,17 +11,26 @@ import {
 	type OidcAudience,
 	type OidcIssuer,
 	type OidcSubject,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	type TrustRuleId,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type RefreshSessionId,
+	refreshSessionIdSchema
+} from '@cupboard/protocol/sessions';
 import { parseAuthenticationHeader } from '@cupboard/shared/http';
-import { importJWK, jwtVerify, SignJWT } from 'jose';
+import { importJWK, type JWTPayload, jwtVerify, SignJWT } from 'jose';
+import { type z } from 'zod';
 
 import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 
+import { SealedAccessIdentity } from './access-identity.ts';
+
 // Construct this value only after Cupboard verifies the token. The grants are
 // parsed from its RFC 9396 `authorization_details` claim.
-export interface AccessClaims {
+export interface AccessTokenClaims {
 	readonly subject: OidcSubject;
 	readonly grants: AuthorizationDetails;
 	// The instant in the JWT's `exp` claim. Verification tolerance does not
@@ -29,10 +38,29 @@ export interface AccessClaims {
 	readonly expiresAt: Date;
 }
 
+/**
+The claims of a verified tenant access token. `identity` is the sealed OIDC
+identity that the token was issued for. Verification checks only that it is
+well formed; code that must select trust rules for it again opens it. `ruleId` is the trust rule that issued the
+grants, and is absent when several rules together cover them. `sessionId` is
+the refresh family that the token came from, and is absent for a token issued
+without a refresh token.
+*/
+export interface AccessClaims extends AccessTokenClaims {
+	readonly identity: SealedAccessIdentity;
+	readonly ruleId?: TrustRuleId;
+	readonly sessionId?: RefreshSessionId;
+}
+
 // Keep Cupboard access tokens distinct from both OIDC ID tokens and the RFC
 // 9068 profile, whose required claims and algorithm contract differ.
 export const accessTokenType = 'cupboard-access+jwt';
 const authorizationDetailsClaim = 'authorization_details';
+const identityClaim = 'cb_identity';
+const ruleClaim = 'cb_rule';
+const sessionClaim = 'cb_session';
+type TenantAccessClaimName =
+	typeof identityClaim | typeof ruleClaim | typeof sessionClaim;
 
 export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);
 export const writeJwtTtlSeconds = ttlSecondsSchema.parse(15 * 60);
@@ -78,6 +106,15 @@ export interface IssueAccessJwtOptions {
 	readonly auditClaims?: Readonly<Record<string, unknown>>;
 }
 
+export interface IssueTenantAccessJwtOptions extends Omit<
+	IssueAccessJwtOptions,
+	'auditClaims'
+> {
+	readonly identity: SealedAccessIdentity;
+	readonly ruleId?: TrustRuleId;
+	readonly sessionId?: RefreshSessionId;
+}
+
 export interface VerifyAccessJwtOptions {
 	readonly issuer: OidcIssuer;
 	readonly audience: OidcAudience;
@@ -118,6 +155,20 @@ export class MissingSubjectError extends AccessTokenError {
 	}
 }
 
+export class MissingIdentityError extends AccessTokenError {
+	constructor() {
+		super(`Access token has no ${identityClaim} claim`);
+		this.name = 'MissingIdentityError';
+	}
+}
+
+export class InvalidAccessClaimError extends AccessTokenError {
+	constructor(readonly claim: TenantAccessClaimName) {
+		super(`Access token ${claim} claim is malformed`);
+		this.name = 'InvalidAccessClaimError';
+	}
+}
+
 export const authJwtAlgorithm = 'EdDSA';
 const jwtAlgorithm = authJwtAlgorithm;
 const clockToleranceSeconds = accessJwtClockToleranceSeconds;
@@ -154,18 +205,53 @@ export async function generateAuthKeyPair(): Promise<{
 	};
 }
 
-export async function issueAccessJwt(
+/**
+Issues a tenant access token. The token contains the sealed identity, and
+the rule and session that it came from when they are given. Seal the
+identity for the token's subject.
+*/
+export function issueTenantAccessJwt(
+	privateJwk: JsonWebKey,
+	options: IssueTenantAccessJwtOptions,
+	now: Date
+): Promise<string> {
+	const { identity, ruleId, sessionId, ...signing } = options;
+
+	return signAccessJwt(
+		privateJwk,
+		signing,
+		{
+			[identityClaim]: identity.value,
+			...(ruleId !== undefined && { [ruleClaim]: ruleId }),
+			...(sessionId !== undefined && { [sessionClaim]: sessionId })
+		},
+		now
+	);
+}
+
+export function issueAccessJwt(
 	privateJwk: JsonWebKey,
 	options: IssueAccessJwtOptions,
+	now: Date
+): Promise<string> {
+	const { auditClaims, ...signing } = options;
+
+	return signAccessJwt(privateJwk, signing, auditClaims ?? {}, now);
+}
+
+async function signAccessJwt(
+	privateJwk: JsonWebKey,
+	options: Omit<IssueAccessJwtOptions, 'auditClaims'>,
+	claims: Readonly<Record<string, unknown>>,
 	now: Date
 ): Promise<string> {
 	const key = await importJWK(privateJwk, jwtAlgorithm);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
-	// Spread caller-supplied audit claims first. The authoritative grants and
-	// registered claims must overwrite conflicting names.
+	// Spread the other claims first. The authoritative grants and registered
+	// claims must overwrite conflicting names.
 	const jwt = new SignJWT({
-		...options.auditClaims,
+		...claims,
 		[authorizationDetailsClaim]: options.grants
 	});
 	return jwt
@@ -189,7 +275,85 @@ export async function verifyAccessJwt(
 	token: string,
 	options: VerifyAccessJwtOptions,
 	now: Date
+): Promise<AccessTokenClaims> {
+	const { claims } = await verifySignedAccessJwt(keys, token, options, now);
+
+	return claims;
+}
+
+/**
+Verifies a tenant access token and reads the sealed identity, the rule and
+the session that it was issued for. A token without a well-formed sealed
+identity is refused. The identity stays sealed.
+*/
+export async function verifyTenantAccessJwt(
+	keys: readonly AuthPublicKey[],
+	token: string,
+	options: VerifyAccessJwtOptions,
+	now: Date
 ): Promise<AccessClaims> {
+	const { claims, payload } = await verifySignedAccessJwt(
+		keys,
+		token,
+		options,
+		now
+	);
+	const recorded = payload[identityClaim];
+
+	if (recorded === undefined) {
+		throw new MissingIdentityError();
+	}
+
+	const identity = SealedAccessIdentity.parse(recorded, claims.subject);
+
+	if (identity === undefined) {
+		throw new InvalidAccessClaimError(identityClaim);
+	}
+
+	const ruleId = optionalClaim(payload, ruleClaim, trustRuleIdSchema);
+	const sessionId = optionalClaim(
+		payload,
+		sessionClaim,
+		refreshSessionIdSchema
+	);
+
+	return {
+		...claims,
+		identity,
+		...(ruleId !== undefined && { ruleId }),
+		...(sessionId !== undefined && { sessionId })
+	};
+}
+
+function optionalClaim<Schema extends z.ZodType>(
+	payload: JWTPayload,
+	claim: typeof ruleClaim | typeof sessionClaim,
+	schema: Schema
+): z.output<Schema> | undefined {
+	const value = payload[claim];
+
+	if (value === undefined) {
+		return undefined;
+	}
+
+	const parsed = schema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidAccessClaimError(claim);
+	}
+
+	return parsed.data;
+}
+
+async function verifySignedAccessJwt(
+	keys: readonly AuthPublicKey[],
+	token: string,
+	options: VerifyAccessJwtOptions,
+	now: Date
+): Promise<{
+	readonly claims: AccessTokenClaims;
+	readonly payload: JWTPayload;
+}> {
 	let verified: Awaited<ReturnType<typeof jwtVerify>>;
 	try {
 		verified = await jwtVerify(
@@ -227,9 +391,12 @@ export async function verifyAccessJwt(
 	const expiresAt = new Date((verified.payload.exp ?? 0) * 1000);
 
 	return {
-		subject: oidcSubjectSchema.parse(subject),
-		grants: parseGrants(verified.payload[authorizationDetailsClaim]),
-		expiresAt
+		claims: {
+			subject: oidcSubjectSchema.parse(subject),
+			grants: parseGrants(verified.payload[authorizationDetailsClaim]),
+			expiresAt
+		},
+		payload: verified.payload
 	};
 }
 
