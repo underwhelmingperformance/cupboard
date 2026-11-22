@@ -11,7 +11,10 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { accessKeyIdSchema } from '@cupboard/protocol/access-keys';
+import {
+	accessKeyIdSchema,
+	accessKeyListResponseSchema
+} from '@cupboard/protocol/access-keys';
 import {
 	type PermittedGrant,
 	storedPermittedGrantsSchema
@@ -4861,6 +4864,27 @@ async function createSessionKey(
 	return created.id;
 }
 
+// Lists the keys with `secret` as the credential, and returns the response
+// status with the listed ids.
+async function listedKeyIds(
+	secret: string
+): Promise<{ readonly status: number; readonly ids: readonly string[] }> {
+	const response = await authorisedFetch('/access-keys', secret);
+
+	if (!response.ok) {
+		await response.body?.cancel();
+
+		return { status: response.status, ids: [] };
+	}
+
+	const listed = accessKeyListResponseSchema.parse(await response.json());
+
+	return {
+		status: response.status,
+		ids: listed.accessKeys.map((key) => key.id)
+	};
+}
+
 // The tenant's sessions as `session list` reports them, without the times.
 async function listedSessions(): Promise<
 	{
@@ -4979,6 +5003,7 @@ describe('access keys below a session', () => {
 			.map((entry) => ({ level: entry.level, properties: entry.properties }));
 		const afterReplay = {
 			newest: await staleRefreshOutcome(second.refresh_token ?? ''),
+			listed: await listedKeyIds(key.secret),
 			keys: await accessKeyIds(),
 			sessions: await listedSessions(),
 			members: await refreshTokenMemberRows()
@@ -4987,6 +5012,7 @@ describe('access keys below a session', () => {
 			new RefreshSessionsService(instance.context).revoke(session)
 		);
 		const afterRevocation = {
+			listed: await listedKeyIds(key.secret),
 			keys: await accessKeyIds(),
 			sessions: await listedSessions()
 		};
@@ -5021,12 +5047,14 @@ describe('access keys below a session', () => {
 					error: 'invalid_grant',
 					problem: 'stale-refresh-token'
 				},
+				listed: { status: StatusCodes.OK, ids: [key.id] },
 				keys: [key.id],
 				sessions: [{ id: session, accessKeysBelow: 1, isReplayed: true }],
 				members: []
 			},
 			revocation: { id: session, revoked: true, deletedAccessKeys: 1 },
 			afterRevocation: {
+				listed: { status: StatusCodes.UNAUTHORIZED, ids: [] },
 				keys: [],
 				sessions: []
 			}

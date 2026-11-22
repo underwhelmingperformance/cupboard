@@ -30,6 +30,7 @@ import {
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
+import { type AccessKeyCreateResponse } from '@cupboard/protocol/access-keys';
 import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
 	type TransitionId,
@@ -168,6 +169,7 @@ import {
 	generationSeq,
 	narInfoDeletions,
 	narInfos,
+	oidcTrust,
 	pendingAttestations,
 	pendingUploads,
 	signingKeys
@@ -1387,6 +1389,51 @@ export function testTokenIdentity(subject: string): VerifiedOidcClaims {
 	}
 
 	return identity;
+}
+
+/**
+The trust rule that {@link createTestAccessKey} installs. It allows the
+identity `alice` from the test issuer every grant.
+*/
+export const testAccessKeyRule = trustRuleIdSchema.parse('alice-rule');
+
+/**
+Installs {@link testAccessKeyRule} in `server` and creates an access key with
+`grants` whose root is that rule and the identity `alice`.
+*/
+export function createTestAccessKey(
+	server: DurableObjectStub<CupboardServer>,
+	grants: AuthorizationDetails,
+	expiresAt?: Date
+): Promise<AccessKeyCreateResponse> {
+	return runInDurableObject(server, async (instance) => {
+		instance.context.db
+			.insert(oidcTrust)
+			.values({
+				id: testAccessKeyRule,
+				issuer: 'https://idp.test',
+				audience: 'cupboard-aud',
+				claimsJson: JSON.stringify({ sub: 'alice' }),
+				permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+				createdAt: isoTimestamp(testBase)
+			})
+			.onConflictDoNothing()
+			.run();
+
+		return instance.context.accessKeys.create(
+			{
+				subject: oidcSubjectSchema.parse('alice'),
+				identity: testTokenIdentity('alice'),
+				ruleId: testAccessKeyRule
+			},
+			{
+				grants,
+				...(expiresAt !== undefined && {
+					expiresAt: isoTimestamp(expiresAt)
+				})
+			}
+		);
+	});
 }
 
 export function issueWorkerSignedToken(

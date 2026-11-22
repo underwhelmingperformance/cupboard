@@ -623,6 +623,46 @@ describe('access-key listing and deletion', () => {
 		expect(result).toStrictEqual({ keys: [], retained: false });
 	});
 
+	it('drops removed operations from stored grants when it lists and verifies keys', async () => {
+		const result = await withStore(async (store, context) => {
+			const partly = await store.create(admin, { grants: [readBuilds] });
+			const wholly = await store.create(admin, { grants: [readBuilds] });
+			const storeGrants = (id: AccessKeyId, actions: readonly string[]) => {
+				context.db
+					.update(accessKeys)
+					.set({
+						grantsJson: JSON.stringify([
+							{
+								type: 'cupboard_cache',
+								cache: { kind: 'named', name: 'builds' },
+								actions
+							}
+						])
+					})
+					.where(eq(accessKeys.id, id))
+					.run();
+			};
+			storeGrants(partly.id, ['cache:content-read', 'policy:add']);
+			storeGrants(wholly.id, ['policy:add']);
+
+			return {
+				listed: store
+					.list([cacheGrant('builds', ['access-key:list'])])
+					.accessKeys.map((key) => ({ id: key.id, grants: key.grants })),
+				verified: [partly.id, wholly.id].map(
+					(id) => store.verifiable(id, now)?.key.grants
+				),
+				partly: partly.id
+			};
+		});
+
+		expect(result).toStrictEqual({
+			listed: [{ id: result.partly, grants: [readBuilds] }],
+			verified: [[readBuilds], undefined],
+			partly: result.partly
+		});
+	});
+
 	it('deletes a key and every key below it, and keeps the others', async () => {
 		const result = await withStore(async (store, context) => {
 			const top = await store.create(admin, { grants: [readBuilds] });

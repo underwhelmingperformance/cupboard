@@ -2096,6 +2096,30 @@
 			"uniqueConstraints": {},
 			"checkConstraints": {}
 		},
+		"oidc_trust_revision": {
+			"name": "oidc_trust_revision",
+			"columns": {
+				"id": {
+					"name": "id",
+					"type": "integer",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"revision": {
+					"name": "revision",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		},
 		"pending_attestation_subject": {
 			"name": "pending_attestation_subject",
 			"columns": {

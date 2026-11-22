@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import { isDeepEqual } from '@cupboard/protocol/deep-equal';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	isUnpinnedGithubRule,
 	type OidcAudience,
@@ -22,6 +23,10 @@ import {
 	type OidcTrustVerificationTarget,
 	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
+import {
+	type OidcTrustSelection,
+	selectOidcTrust
+} from '@cupboard/protocol/oidc-trust-selection';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 
@@ -102,6 +107,9 @@ export class EnabledOidcTrustRules {
 export class OidcTrustService {
 	private readonly grantSpelling: StoredGrantSpelling;
 	private readonly verifier: InboundTokenVerifier;
+	private enabled:
+		| { readonly revision: number; readonly rules: EnabledOidcTrustRules }
+		| undefined;
 
 	constructor(
 		private readonly context: ServerContext,
@@ -159,6 +167,47 @@ export class OidcTrustService {
 			subject,
 			audience
 		};
+	}
+
+	private loadEnabledOidcTrustRules(logger: Logger): EnabledOidcTrustRules {
+		const snapshots: OidcTrustRuleSnapshot[] = [];
+		const unreadable: UnreadableOidcTrustRow[] = [];
+		const rows = this.context.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(isNull(schema.oidcTrust.disabledAt))
+			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
+			.all();
+
+		for (const row of rows) {
+			try {
+				snapshots.push({
+					rule: oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env)),
+					row
+				});
+			} catch (error: unknown) {
+				const fault =
+					error instanceof StoredOidcTrustInvalidError
+						? error
+						: new StoredOidcTrustInvalidError(
+								row.id,
+								error instanceof Error ? error : new Error(String(error))
+							);
+
+				logger.error('stored OIDC trust rule skipped', {
+					rule: row.id,
+					reason: fault.message,
+					cause: fault.cause
+				});
+				unreadable.push({
+					issuer: row.issuer,
+					audience: row.audience,
+					error: fault
+				});
+			}
+		}
+
+		return new EnabledOidcTrustRules(snapshots, unreadable);
 	}
 
 	listRules(): OidcTrustListResponse {
@@ -333,6 +382,23 @@ export class OidcTrustService {
 	}
 
 	/**
+	Selects the trust rules that currently allow `identity` the grants, from
+	the enabled rules. A refresh and the verification of an access key both
+	recheck stored authority this way.
+	*/
+	currentSelection(
+		logger: Logger,
+		identity: VerifiedOidcClaims,
+		grants: AuthorizationDetails
+	): OidcTrustSelection {
+		return selectOidcTrust(
+			this.enabledOidcTrustRulesFor(logger, identity),
+			identity,
+			grants
+		);
+	}
+
+	/**
 	The enabled rules to evaluate for `claims`, which are a verified token's
 	claims or a refresh family's stored identity. Throws
 	`StoredOidcTrustInvalidError` when an enabled row that the server cannot
@@ -350,47 +416,25 @@ export class OidcTrustService {
 
 	/**
 	Returns readable enabled rules and the stored issuer and audience of
-	unreadable enabled rows. Logs each unreadable row.
+	unreadable enabled rows. The service keeps the parsed rules while the
+	revision in `oidc_trust_revision` stays the same. Loading them logs each
+	unreadable row.
 	*/
 	enabledOidcTrustRuleSnapshots(logger: Logger): EnabledOidcTrustRules {
-		const snapshots: OidcTrustRuleSnapshot[] = [];
-		const unreadable: UnreadableOidcTrustRow[] = [];
-		const rows = this.context.db
-			.select()
-			.from(schema.oidcTrust)
-			.where(isNull(schema.oidcTrust.disabledAt))
-			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
-			.all();
+		const revision =
+			this.context.db
+				.select({ revision: schema.oidcTrustRevision.revision })
+				.from(schema.oidcTrustRevision)
+				.get()?.revision ?? 0;
 
-		for (const row of rows) {
-			try {
-				snapshots.push({
-					rule: oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env)),
-					row
-				});
-			} catch (error: unknown) {
-				const fault =
-					error instanceof StoredOidcTrustInvalidError
-						? error
-						: new StoredOidcTrustInvalidError(
-								row.id,
-								error instanceof Error ? error : new Error(String(error))
-							);
-
-				logger.error('stored OIDC trust rule skipped', {
-					rule: row.id,
-					reason: fault.message,
-					cause: fault.cause
-				});
-				unreadable.push({
-					issuer: row.issuer,
-					audience: row.audience,
-					error: fault
-				});
-			}
+		if (this.enabled?.revision === revision) {
+			return this.enabled.rules;
 		}
 
-		return new EnabledOidcTrustRules(snapshots, unreadable);
+		const rules = this.loadEnabledOidcTrustRules(logger);
+		this.enabled = { revision, rules };
+
+		return rules;
 	}
 
 	isEnabledSnapshotCurrent(
