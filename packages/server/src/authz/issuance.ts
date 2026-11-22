@@ -19,7 +19,9 @@ import {
 
 import {
 	type AccessClaims,
+	type AccessTokenClaims,
 	issueAccessJwt,
+	issueTenantAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
 import {
@@ -122,12 +124,21 @@ export function attenuatedGrants(
 	return requested;
 }
 
+/**
+A verified access token presented for attenuation, with the plane that
+issued it. A tenant token passes its sealed identity, rule and session to
+the narrower token.
+*/
+export type PresentedAccessToken =
+	| { readonly plane: 'tenant'; readonly claims: AccessClaims }
+	| { readonly plane: 'control'; readonly claims: AccessTokenClaims };
+
 interface AttenuatedAccessTokenOptions {
 	readonly privateJwk: JsonWebKey;
 	readonly kid: AuthKeyId;
 	readonly issuer: OidcIssuer;
 	readonly audience: OidcAudience;
-	readonly presented: AccessClaims;
+	readonly presented: PresentedAccessToken;
 	readonly requested: AuthorizationDetails | undefined;
 }
 
@@ -140,10 +151,11 @@ export async function issueAttenuatedAccessToken(
 	options: AttenuatedAccessTokenOptions,
 	now: Date
 ): Promise<TokenResponseInput> {
-	const granted = attenuatedGrants(options.presented.grants, options.requested);
+	const { presented } = options;
+	const granted = attenuatedGrants(presented.claims.grants, options.requested);
 	const issuedAtSeconds = Math.floor(now.getTime() / 1000);
 	const presentedExpirySeconds = Math.floor(
-		options.presented.expiresAt.getTime() / 1000
+		presented.claims.expiresAt.getTime() / 1000
 	);
 	const ttlResult = ttlSecondsSchema.safeParse(
 		Math.min(writeJwtTtlSeconds, presentedExpirySeconds - issuedAtSeconds)
@@ -153,18 +165,31 @@ export async function issueAttenuatedAccessToken(
 		throw new SubjectTokenVerificationFailedError();
 	}
 
-	const accessToken = await issueAccessJwt(
-		options.privateJwk,
-		{
-			issuer: options.issuer,
-			audience: options.audience,
-			subject: options.presented.subject,
-			grants: granted,
-			kid: options.kid,
-			ttlSeconds: ttlResult.data
-		},
-		now
-	);
+	const signing = {
+		issuer: options.issuer,
+		audience: options.audience,
+		subject: presented.claims.subject,
+		grants: granted,
+		kid: options.kid,
+		ttlSeconds: ttlResult.data
+	};
+	const accessToken =
+		presented.plane === 'tenant'
+			? await issueTenantAccessJwt(
+					options.privateJwk,
+					{
+						...signing,
+						identity: presented.claims.identity,
+						...(presented.claims.ruleId !== undefined && {
+							ruleId: presented.claims.ruleId
+						}),
+						...(presented.claims.sessionId !== undefined && {
+							sessionId: presented.claims.sessionId
+						})
+					},
+					now
+				)
+			: await issueAccessJwt(options.privateJwk, signing, now);
 
 	return {
 		access_token: accessToken,

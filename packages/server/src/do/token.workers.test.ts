@@ -51,16 +51,17 @@ import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { type AccessIdentityKeyContext } from '../auth/access-identity.ts';
 import {
 	consumedSubjectNonceRetentionSeconds,
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds
 } from '../auth/auth.ts';
+import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
 import {
 	RefreshCredential,
 	refreshCredentialMaxBytes,
-	type RefreshKeyContext,
-	refreshPolicyIdentity
+	type RefreshKeyContext
 } from '../auth/refresh-credential.ts';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
@@ -1709,7 +1710,9 @@ describe('server-resolved read acquisition', () => {
 			const token = await issueServerSignedToken(
 				[{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }],
 				'legacy-session',
-				auditRule === undefined ? undefined : { cb_rule: auditRule }
+				auditRule === undefined
+					? {}
+					: { ruleId: trustRuleIdSchema.parse(auditRule) }
 			);
 			const claims = decodeJwt(token);
 			const isAuthorised = await currentServer().authoriseCacheContentRead(
@@ -2515,7 +2518,7 @@ describe('refresh grant', () => {
 				const json = JSON.stringify({
 					...authority,
 					version: 1,
-					identity: refreshPolicyIdentity(authority.identity)
+					identity: oidcPolicyIdentity(authority.identity)
 				});
 				const readable = bytesToBase64Url(new TextEncoder().encode(json));
 				const value = `${member.id}.${'a'.repeat(64)}.${readable}`;
@@ -2572,7 +2575,7 @@ describe('refresh grant', () => {
 					{
 						...authority,
 						identity: {
-							...refreshPolicyIdentity(authority.identity),
+							...oidcPolicyIdentity(authority.identity),
 							extraClaim: 'x'.repeat(48_000)
 						}
 					},
@@ -3531,7 +3534,7 @@ describe('refresh grant', () => {
 			const updated = await RefreshCredential.issue(
 				{
 					...authority,
-					identity: refreshPolicyIdentity(authority.identity),
+					identity: oidcPolicyIdentity(authority.identity),
 					generation: maxRefreshTokenFamilyMembers - 2
 				},
 				refreshKeys(instance.context)
@@ -5313,6 +5316,106 @@ async function ownerToken(): Promise<string> {
 
 	return exchanged.access_token;
 }
+
+// The claims of a tenant access token with its identity opened. The expiry
+// is left out because it depends on the wall clock.
+function accessClaimsOf(token: string): Promise<unknown> {
+	return runInDurableObject(currentServer(), async (instance) => {
+		const {
+			expiresAt: _expiresAt,
+			identity,
+			...claims
+		} = await new AuthKeysService(
+			instance.context,
+			new TenantIdentityService(instance.context)
+		).authenticateToken(token);
+
+		return {
+			...claims,
+			identity: await identity.open(identityKeys(instance.context))
+		};
+	});
+}
+
+function identityKeys(context: ServerContext): AccessIdentityKeyContext {
+	return {
+		signingKey: pushIdSigningKey(context.env),
+		tenant: context.requireTenant()
+	};
+}
+
+function policyIdentityOf(subjectToken: string): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(decodeJwt(subjectToken)).filter(
+			([key, value]) => typeof value === 'string' || key === 'aud'
+		)
+	);
+}
+
+describe('access-token identity and session', () => {
+	beforeEach(resetTestServer);
+
+	it('records the identity, rule and new session of an interactive exchange', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const claims = await accessClaimsOf(exchanged.access_token);
+		const families = await refreshTokenRows();
+
+		expect(claims).toStrictEqual({
+			subject: 'alice',
+			grants: [{ type: 'cupboard_wildcard' }],
+			identity: policyIdentityOf(subjectToken),
+			ruleId: 'admin-rule',
+			sessionId: families[0]?.id
+		});
+	});
+
+	it('records no session for an exchange without a refresh token', async () => {
+		const subjectToken = await installTrustedIdp('write', {
+			audience: tenantTestIssuer
+		});
+		const exchanged = await exchange(subjectToken, ciRequest);
+
+		expect(await accessClaimsOf(exchanged.access_token)).toStrictEqual({
+			subject: 'alice',
+			grants: ciRequest,
+			identity: policyIdentityOf(subjectToken),
+			ruleId: 'write-rule'
+		});
+	});
+
+	it('keeps the identity and session of the family in a refreshed token', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const response = await refresh(exchanged.refresh_token ?? '');
+		const refreshed = tokenResponseSchema.parse(await response.json());
+		const families = await refreshTokenRows();
+
+		expect(await accessClaimsOf(refreshed.access_token)).toStrictEqual({
+			subject: 'alice',
+			grants: [{ type: 'cupboard_wildcard' }],
+			identity: policyIdentityOf(subjectToken),
+			ruleId: 'admin-rule',
+			sessionId: families[0]?.id
+		});
+	});
+
+	it('keeps the identity, rule and session through attenuation', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const response = await attenuate(exchanged.access_token, ciRequest);
+		const attenuated = tokenResponseSchema.parse(await response.json());
+		const families = await refreshTokenRows();
+
+		expect(await accessClaimsOf(attenuated.access_token)).toStrictEqual({
+			subject: 'alice',
+			grants: ciRequest,
+			identity: policyIdentityOf(subjectToken),
+			ruleId: 'admin-rule',
+			sessionId: families[0]?.id
+		});
+	});
+});
 
 describe('attenuation', () => {
 	beforeEach(resetTestServer);

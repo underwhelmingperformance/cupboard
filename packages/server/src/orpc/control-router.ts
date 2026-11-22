@@ -3,7 +3,7 @@ import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 import { z } from 'zod';
 
-import { type AccessClaims } from '../auth/auth.ts';
+import { type AccessTokenClaims } from '../auth/auth.ts';
 import {
 	controlCheck,
 	controlInstance,
@@ -50,7 +50,7 @@ import { bridgedError } from './error-bridge.ts';
 export interface ControlOrpcContext {
 	readonly request: Request;
 	// Verifies the request's bearer token. Every call returns the same result.
-	readonly authenticate: () => Promise<AccessClaims>;
+	readonly authenticate: () => Promise<AccessTokenClaims>;
 	readonly env: Env;
 	readonly logger: Logger;
 	readonly resHeaders?: Headers;

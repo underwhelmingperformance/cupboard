@@ -70,7 +70,7 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import {
-	type AccessClaims,
+	type AccessTokenClaims,
 	adminJwtTtlSeconds,
 	bearerToken,
 	issueAccessJwt,
@@ -274,7 +274,7 @@ export async function controlTokenExchange(
 				kid: active.kid,
 				issuer: controlIssuer(request),
 				audience,
-				presented,
+				presented: { plane: 'control', claims: presented },
 				requested: parseRequestedGrants(exchange.authorization_details)
 			},
 			now
@@ -543,7 +543,7 @@ async function verifyControlSelfIssued(
 	request: Request,
 	env: Env,
 	token: string
-): Promise<AccessClaims | undefined> {
+): Promise<AccessTokenClaims | undefined> {
 	const keys = await controlVerificationKeys(await controlDatabase(env));
 
 	try {
@@ -612,7 +612,7 @@ export function controlAsMetadata(
 export async function controlAuthenticate(
 	request: Request,
 	env: Env
-): Promise<AccessClaims> {
+): Promise<AccessTokenClaims> {
 	const token = bearerToken(request);
 
 	if (token === undefined) {

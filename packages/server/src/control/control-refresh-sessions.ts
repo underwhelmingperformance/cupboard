@@ -40,12 +40,12 @@ import {
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds
 } from '../auth/auth.ts';
+import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
 import {
 	type AuthenticatedRefreshAuthority,
 	openRefreshSuccessor,
 	RefreshCredential,
 	type RefreshKeyContext,
-	refreshPolicyIdentity,
 	sealRefreshSuccessor
 } from '../auth/refresh-credential.ts';
 import {
@@ -262,7 +262,7 @@ export class ControlRefreshSessions {
 			isoTimestamp(
 				new Date(now.getTime() + refreshTokenFamilyTtlSeconds * 1000)
 			);
-		const policyIdentity = refreshPolicyIdentity(identity);
+		const policyIdentity = oidcPolicyIdentity(identity);
 		const credential = await RefreshCredential.issue(
 			{
 				familyId,

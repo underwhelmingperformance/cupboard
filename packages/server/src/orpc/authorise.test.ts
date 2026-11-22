@@ -3,7 +3,7 @@ import { type AuthzMeta } from '@cupboard/protocol/contract';
 import { oidcSubjectSchema } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
-import { type AccessClaims } from '../auth/auth.ts';
+import { type AccessTokenClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
 
 import {
@@ -13,7 +13,7 @@ import {
 } from './authorise.ts';
 
 describe('authoriseRequest', () => {
-	const wildcardClaims: AccessClaims = {
+	const wildcardClaims: AccessTokenClaims = {
 		subject: oidcSubjectSchema.parse('ci'),
 		grants: [{ type: 'cupboard_wildcard' }],
 		expiresAt: new Date('2030-01-01T00:00:00Z')
@@ -38,7 +38,7 @@ describe('authoriseRequest', () => {
 			root: { eachIn: 'roots', field: 'name' }
 		}
 	};
-	const rootGrants: AccessClaims['grants'] = [
+	const rootGrants: AccessTokenClaims['grants'] = [
 		{
 			type: 'cupboard_cache',
 			actions: ['root:set'],
@@ -46,7 +46,7 @@ describe('authoriseRequest', () => {
 			root: rootNameSchema.parse('main/')
 		}
 	];
-	const cacheGrants: AccessClaims['grants'] = [
+	const cacheGrants: AccessTokenClaims['grants'] = [
 		{
 			type: 'cupboard_cache',
 			actions: ['root:set'],
@@ -94,7 +94,7 @@ describe('authoriseRequest', () => {
 	])(
 		'authorises each root of an input array: $name',
 		async ({ grants, roots, outcome }) => {
-			const claims: AccessClaims = { ...wildcardClaims, grants };
+			const claims: AccessTokenClaims = { ...wildcardClaims, grants };
 			let result: unknown = 'authorised';
 
 			try {

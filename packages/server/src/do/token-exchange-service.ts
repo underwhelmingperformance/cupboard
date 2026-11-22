@@ -53,24 +53,32 @@ import {
 	selectReadTrust
 } from '@cupboard/protocol/read-access';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type RefreshSessionId,
+	refreshSessionIdSchema
+} from '@cupboard/protocol/sessions';
 import { and, eq, sql } from 'drizzle-orm';
 
 import {
+	type AccessIdentityKeyContext,
+	SealedAccessIdentity
+} from '../auth/access-identity.ts';
+import {
 	type AccessClaims,
 	adminJwtTtlSeconds,
-	issueAccessJwt,
+	issueTenantAccessJwt,
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds,
-	verifyAccessJwt,
+	verifyTenantAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
+import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
 import { planArchiveBinding } from '../auth/plan-archive.ts';
 import {
 	type AuthenticatedRefreshAuthority,
 	openRefreshSuccessor,
 	RefreshCredential,
 	type RefreshKeyContext,
-	refreshPolicyIdentity,
 	sealRefreshSuccessor
 } from '../auth/refresh-credential.ts';
 import {
@@ -152,6 +160,12 @@ type IssuanceAuthority =
 			readonly identity: VerifiedOidcClaims;
 			readonly grants: AuthorizationDetails;
 	  };
+
+interface TokenHolder {
+	readonly identity: VerifiedOidcClaims;
+	readonly subject: OidcSubject;
+	readonly sessionId?: RefreshSessionId;
+}
 
 type RefreshTokenFamily = typeof schema.refreshTokenFamilies.$inferSelect;
 type RefreshTokenMember = typeof schema.refreshTokenMembers.$inferSelect;
@@ -493,7 +507,7 @@ export class TokenExchangeService {
 
 		const token = await this.issueRuleToken(
 			selection.rule,
-			oidcSubjectSchema.parse(verified.sub),
+			{ identity: verified, subject: oidcSubjectSchema.parse(verified.sub) },
 			selection.grants,
 			writeJwtTtlSeconds
 		);
@@ -635,7 +649,7 @@ export class TokenExchangeService {
 		const keys = await this.authKeys.authVerificationKeys();
 
 		try {
-			return await verifyAccessJwt(
+			return await verifyTenantAccessJwt(
 				keys,
 				token,
 				{
@@ -662,7 +676,7 @@ export class TokenExchangeService {
 				kid: key.kid,
 				issuer: this.authKeys.authIssuer(),
 				audience: this.authKeys.authAudience(),
-				presented,
+				presented: { plane: 'tenant', claims: presented },
 				requested
 			},
 			new Date()
@@ -852,7 +866,11 @@ export class TokenExchangeService {
 		}
 		const accessToken = await this.issueRuleToken(
 			selection.rule,
-			oidcSubjectSchema.parse(authority.identity.sub),
+			{
+				identity: authority.identity,
+				subject: oidcSubjectSchema.parse(authority.identity.sub),
+				sessionId: refreshSessionIdSchema.parse(family.id)
+			},
 			authority.grants,
 			adminJwtTtlSeconds
 		);
@@ -977,26 +995,29 @@ export class TokenExchangeService {
 			(!isAudienceBound(authority.identity, this.authKeys.authIssuer()) &&
 				!isContentReadOnly);
 		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
-		const accessToken = await this.issueRuleToken(
-			rule,
-			subject,
-			granted,
-			ttlSeconds
-		);
-
 		// A CI job's token has the tenant URL as its audience, and the job exchanges
 		// a fresh token for each run. A refresh token would turn one federated CI
 		// exchange into a persistent session, so an audience-bound exchange gets
 		// none.
-		const refreshToken = isInteractive
-			? await this.prepareRefreshToken(
-					authority.identity,
-					subject,
-					rule,
-					granted,
-					family
-				)
+		const sessionId = isInteractive
+			? refreshSessionIdSchema.parse(family?.id ?? crypto.randomUUID())
 			: undefined;
+		const accessToken = await this.issueRuleToken(
+			rule,
+			{ identity: authority.identity, subject, sessionId },
+			granted,
+			ttlSeconds
+		);
+		const refreshToken =
+			sessionId === undefined
+				? undefined
+				: await this.prepareRefreshToken(
+						authority.identity,
+						subject,
+						rule,
+						granted,
+						{ id: sessionId, current: family }
+					);
 
 		return {
 			body: {
@@ -1018,9 +1039,13 @@ export class TokenExchangeService {
 		subject: OidcSubject,
 		rule: OidcTrustRule | undefined,
 		grants: AuthorizationDetails,
-		current?: RefreshTokenFamily
+		session: {
+			readonly id: RefreshSessionId;
+			readonly current: RefreshTokenFamily | undefined;
+		}
 	): Promise<PreparedRefreshToken> {
-		const familyId = current?.id ?? crypto.randomUUID();
+		const { current } = session;
+		const familyId = session.id;
 		const generation = current === undefined ? 0 : current.generation + 1;
 		const id = crypto.randomUUID();
 		const now = new Date();
@@ -1031,7 +1056,7 @@ export class TokenExchangeService {
 				new Date(now.getTime() + refreshTokenFamilyTtlSeconds * 1000)
 			);
 
-		const policyIdentity = refreshPolicyIdentity(identity);
+		const policyIdentity = oidcPolicyIdentity(identity);
 		const credential = await RefreshCredential.issue(
 			{
 				familyId,
@@ -1176,25 +1201,38 @@ export class TokenExchangeService {
 
 	private async issueRuleToken(
 		rule: OidcTrustRule | undefined,
-		subject: OidcSubject,
+		holder: TokenHolder,
 		grants: AuthorizationDetails,
 		ttlSeconds: TtlSeconds
 	): Promise<string> {
 		const key = await this.authKeys.activeAuthKey();
 
-		return issueAccessJwt(
+		return issueTenantAccessJwt(
 			key.privateJwk,
 			{
 				issuer: this.authKeys.authIssuer(),
 				audience: this.authKeys.authAudience(),
-				subject,
+				subject: holder.subject,
 				grants,
 				kid: key.kid,
 				ttlSeconds,
-				auditClaims: rule === undefined ? {} : { cb_rule: rule.id }
+				identity: await SealedAccessIdentity.seal(
+					holder.identity,
+					holder.subject,
+					this.accessIdentityKeys()
+				),
+				...(rule !== undefined && { ruleId: rule.id }),
+				...(holder.sessionId !== undefined && { sessionId: holder.sessionId })
 			},
 			new Date()
 		);
+	}
+
+	private accessIdentityKeys(): AccessIdentityKeyContext {
+		return {
+			signingKey: pushIdSigningKey(this.context.env),
+			tenant: this.context.requireTenant()
+		};
 	}
 
 	private refreshKeyContext(): RefreshKeyContext {

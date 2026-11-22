@@ -14,7 +14,7 @@ import {
 } from '@cupboard/protocol/grants';
 import { z } from 'zod';
 
-import { type AccessClaims } from '../auth/auth.ts';
+import { type AccessTokenClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
 
 /**
@@ -191,7 +191,7 @@ async function resolveResource(
 // When a benign read outlives its pending row, allow polling only if the token
 // authorises that operation for some resource.
 function hasOperation(
-	grants: AccessClaims['grants'],
+	grants: AccessTokenClaims['grants'],
 	operation: Operation
 ): boolean {
 	return grants.some(
@@ -202,7 +202,7 @@ function hasOperation(
 }
 
 // Only a wildcard grant can cover a request whose resource failed validation.
-function hasWildcard(grants: AccessClaims['grants']): boolean {
+function hasWildcard(grants: AccessTokenClaims['grants']): boolean {
 	return grants.some((grant) => grant.type === 'cupboard_wildcard');
 }
 
@@ -211,7 +211,7 @@ Requires the token to authorise the procedure's operation for its resolved
 resource. A procedure without a `requires` declaration is denied.
 */
 export async function authoriseRequest(
-	claims: AccessClaims,
+	claims: AccessTokenClaims,
 	meta: AuthzMeta,
 	input: unknown,
 	pathCache: CacheScope | undefined,
@@ -266,7 +266,7 @@ negotiation. The commit session inherits this binding, so later frames do
 not repeat the root name.
 */
 export function authoriseAttachRoot(
-	claims: AccessClaims,
+	claims: AccessTokenClaims,
 	cache: CacheScope,
 	root: RootName
 ): void {
@@ -281,7 +281,7 @@ publication over the commit session does. Confirming a planned skip retains
 the path for the push, so it needs the same authority as publishing it.
 */
 export function authorisePublication(
-	claims: AccessClaims,
+	claims: AccessTokenClaims,
 	cache: CacheScope
 ): void {
 	if (!isCoveredByToken(claims.grants, 'upload:negotiate', { cache })) {

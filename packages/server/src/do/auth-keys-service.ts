@@ -23,7 +23,7 @@ import {
 	bearerToken,
 	generateAuthKeyPair,
 	scheduledAccessKeyRetireAt,
-	verifyAccessJwt
+	verifyTenantAccessJwt
 } from '../auth/auth.ts';
 import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
@@ -376,7 +376,7 @@ export class AuthKeysService {
 		const keys = await this.authVerificationKeys();
 
 		try {
-			return await verifyAccessJwt(
+			return await verifyTenantAccessJwt(
 				keys,
 				token,
 				{ issuer: this.authIssuer(), audience: this.authAudience() },

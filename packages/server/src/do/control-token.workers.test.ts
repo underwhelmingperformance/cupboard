@@ -28,10 +28,10 @@ import {
 	consumedSubjectNonceRetentionSeconds,
 	maxRefreshTokenFamilyMembers
 } from '../auth/auth.ts';
+import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
 import {
 	RefreshCredential,
-	type RefreshKeyContext,
-	refreshPolicyIdentity
+	type RefreshKeyContext
 } from '../auth/refresh-credential.ts';
 import { pushIdSigningKeySchema } from '../blob/push-id.ts';
 import {
@@ -1476,7 +1476,7 @@ describe('control plane refresh sessions', () => {
 		const nearBound = await RefreshCredential.issue(
 			{
 				...authority,
-				identity: refreshPolicyIdentity(authority.identity),
+				identity: oidcPolicyIdentity(authority.identity),
 				generation: activeGeneration
 			},
 			controlRefreshKeys

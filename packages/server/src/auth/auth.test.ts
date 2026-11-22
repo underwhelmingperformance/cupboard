@@ -1,4 +1,8 @@
-import { authKeyIdSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import {
+	authKeyIdSchema,
+	tenantIdSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -6,23 +10,41 @@ import {
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	type TrustRuleId,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
-import { decodeProtectedHeader, SignJWT } from 'jose';
+import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
+import {
+	type RefreshSessionId,
+	refreshSessionIdSchema
+} from '@cupboard/protocol/sessions';
+import { decodeJwt, decodeProtectedHeader, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pushIdSigningKeySchema } from '../blob/push-id.ts';
+
+import {
+	type AccessIdentityKeyContext,
+	SealedAccessIdentity
+} from './access-identity.ts';
 import {
 	accessTokenType,
 	AccessTokenVerificationError,
 	type AuthPublicKey,
 	bearerToken,
 	generateAuthKeyPair,
+	InvalidAccessClaimError,
 	InvalidGrantsError,
 	issueAccessJwt,
+	issueTenantAccessJwt,
 	MissingGrantsError,
+	MissingIdentityError,
 	MissingSubjectError,
-	verifyAccessJwt
+	verifyAccessJwt,
+	verifyTenantAccessJwt
 } from './auth.ts';
+import { recordedOidcIdentity } from './oidc-identity.ts';
 
 const issuer = oidcIssuerSchema.parse('cupboard');
 const audience = oidcAudienceSchema.parse('cupboard');
@@ -85,7 +107,8 @@ function accessErrorShape(
 	if (
 		error instanceof MissingGrantsError ||
 		error instanceof InvalidGrantsError ||
-		error instanceof MissingSubjectError
+		error instanceof MissingSubjectError ||
+		error instanceof MissingIdentityError
 	) {
 		return { name: error.name };
 	}
@@ -516,6 +539,190 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			name: 'AccessTokenVerificationError',
 			hasCause: true
 		});
+	});
+});
+
+describe('issueTenantAccessJwt and verifyTenantAccessJwt', () => {
+	const identity = recordedOidcIdentity({
+		iss: 'https://token.actions.githubusercontent.com',
+		sub: 'repo:acme/app:ref:refs/heads/main',
+		aud: ['https://cupboard.example.workers.dev/t/acme'],
+		repository: 'acme/app'
+	});
+	const keys: AccessIdentityKeyContext = {
+		signingKey: pushIdSigningKeySchema.parse('identity-signing-key'),
+		tenant: tenantIdSchema.parse('acme')
+	};
+	const ruleId = trustRuleIdSchema.parse('acme-ci');
+	const sessionId = refreshSessionIdSchema.parse(
+		'00000000-0000-4000-8000-000000000001'
+	);
+	const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+
+	function requireIdentity(): VerifiedOidcClaims {
+		if (identity === undefined) {
+			throw new Error('The fixture identity is not a recorded identity');
+		}
+
+		return identity;
+	}
+
+	async function issue(
+		lineage: { ruleId?: TrustRuleId; sessionId?: RefreshSessionId } = {}
+	): Promise<{ token: string; publicJwk: JsonWebKey }> {
+		const keyPair = await generateAuthKeyPair();
+		const token = await issueTenantAccessJwt(
+			keyPair.privateJwk,
+			{
+				issuer,
+				audience,
+				subject,
+				grants: wildcardGrants,
+				kid,
+				ttlSeconds,
+				identity: await SealedAccessIdentity.seal(
+					requireIdentity(),
+					subject,
+					keys
+				),
+				...lineage
+			},
+			now
+		);
+
+		return { token, publicJwk: keyPair.publicJwk };
+	}
+
+	it('keeps the identity unreadable to a holder of the token', async () => {
+		const { token } = await issue();
+		const payload = decodeJwt(token);
+
+		expect({
+			claimType: typeof payload.cb_identity,
+			revealsIdentity: JSON.stringify(payload).includes('acme/app')
+		}).toStrictEqual({ claimType: 'string', revealsIdentity: false });
+	});
+
+	it.each([
+		{
+			name: 'a rule and a session',
+			lineage: { ruleId, sessionId },
+			expected: { ruleId, sessionId }
+		},
+		{ name: 'neither a rule nor a session', lineage: {}, expected: {} }
+	])(
+		'returns the sealed identity of a token with $name',
+		async ({ lineage, expected }) => {
+			const { token, publicJwk } = await issue(lineage);
+
+			const { identity: sealed, ...claims } = await verifyTenantAccessJwt(
+				keySet(publicJwk),
+				token,
+				{ issuer, audience },
+				now
+			);
+
+			expect({ ...claims, identity: await sealed.open(keys) }).toStrictEqual({
+				subject,
+				grants: wildcardGrants,
+				expiresAt,
+				identity: requireIdentity(),
+				...expected
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'another signing key',
+			context: {
+				...keys,
+				signingKey: pushIdSigningKeySchema.parse('rotated-signing-key')
+			},
+			subject
+		},
+		{
+			name: 'another tenant',
+			context: { ...keys, tenant: tenantIdSchema.parse('other') },
+			subject
+		},
+		{
+			name: 'another subject',
+			context: keys,
+			subject: oidcSubjectSchema.parse('someone-else')
+		}
+	])(
+		'does not open a sealed identity with $name',
+		async ({ context, subject: presentedSubject }) => {
+			const sealed = await SealedAccessIdentity.seal(
+				requireIdentity(),
+				subject,
+				keys
+			);
+			const moved = SealedAccessIdentity.parse(sealed.value, presentedSubject);
+
+			expect(await moved?.open(context)).toBeUndefined();
+		}
+	);
+
+	it.each([
+		{
+			name: 'no identity claim',
+			claims: {},
+			expected: { name: 'MissingIdentityError' }
+		},
+		{
+			name: 'a readable identity claim',
+			claims: { cb_identity: { iss: 'https://idp.example', sub: 'ci' } },
+			expected: { name: 'InvalidAccessClaimError', claim: 'cb_identity' }
+		},
+		{
+			name: 'a malformed session claim',
+			claims: { cb_identity: 'sealed', cb_session: 'not-a-uuid' },
+			expected: { name: 'InvalidAccessClaimError', claim: 'cb_session' }
+		}
+	])('rejects a token with $name', async ({ claims, expected }) => {
+		const keyPair = await generateAuthKeyPair();
+		const sealed = await SealedAccessIdentity.seal(
+			requireIdentity(),
+			subject,
+			keys
+		);
+		const token = await issueAccessJwt(
+			keyPair.privateJwk,
+			{
+				issuer,
+				audience,
+				subject,
+				grants: wildcardGrants,
+				kid,
+				ttlSeconds,
+				auditClaims:
+					claims.cb_identity === 'sealed'
+						? { ...claims, cb_identity: sealed.value }
+						: claims
+			},
+			now
+		);
+
+		let rejected: unknown;
+		try {
+			rejected = {
+				value: await verifyTenantAccessJwt(
+					keySet(keyPair.publicJwk),
+					token,
+					{ issuer, audience },
+					now
+				)
+			};
+		} catch (error: unknown) {
+			rejected =
+				error instanceof InvalidAccessClaimError
+					? { name: error.name, claim: error.claim }
+					: accessErrorShape(error);
+		}
+
+		expect(rejected).toStrictEqual(expected);
 	});
 });
 

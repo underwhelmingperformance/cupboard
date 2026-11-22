@@ -1,5 +1,4 @@
 import {
-	base64ToBytes,
 	bytesToBase64Url,
 	bytesToHex,
 	hexToBytes
@@ -14,36 +13,24 @@ import { type PushIdSigningKey } from '../blob/push-id.ts';
 import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
 import { RefreshCredentialSizeLimitError } from '../errors.ts';
 
+import {
+	oidcPolicyIdentitySchema,
+	verifiedPolicyIdentity
+} from './oidc-identity.ts';
+import {
+	base64UrlToBytes,
+	decryptOrUndefined,
+	deriveSealingKey
+} from './sealing.ts';
+
 export const refreshCredentialMaxBytes = 64 * 1024;
-
-const audienceValueSchema = z.string().min(1);
-const audienceSchema = z.union([
-	audienceValueSchema,
-	z.array(audienceValueSchema).min(1)
-]);
-
-const identityClaimSchema = z.union([z.string(), z.array(z.string())]);
-
-const identitySchema = z
-	.looseObject({
-		iss: z.string().min(1),
-		sub: z.string().min(1),
-		aud: audienceSchema
-	})
-	.catchall(identityClaimSchema)
-	.refine((identity) => {
-		const entries = Object.entries(identity);
-		return entries.every(
-			([key, value]) => key === 'aud' || typeof value === 'string'
-		);
-	});
 
 const authorityClaimsShape = {
 	familyId: z.uuid(),
 	memberId: z.uuid(),
 	generation: z.number().int().nonnegative(),
 	expiresAt: z.iso.datetime().pipe(isoTimestampSchema),
-	identity: identitySchema,
+	identity: oidcPolicyIdentitySchema,
 	grants: authorizationDetailsSchema.min(1)
 };
 
@@ -215,7 +202,7 @@ export class RefreshCredential {
 
 		return {
 			...parsed,
-			identity: parsed.identity as unknown as VerifiedOidcClaims
+			identity: verifiedPolicyIdentity(parsed.identity)
 		};
 	}
 }
@@ -262,53 +249,15 @@ function parseBoundAuthority(
 	return parsed.data?.tenant === context.tenant ? parsed.data : undefined;
 }
 
-export function refreshPolicyIdentity(
-	claims: VerifiedOidcClaims
-): RefreshAuthorityClaims['identity'] {
-	return identitySchema.parse(
-		Object.fromEntries(
-			Object.entries(claims).filter(
-				([key, value]) => typeof value === 'string' || key === 'aud'
-			)
-		)
-	);
-}
-
-function base64UrlToBytes(value: string): Uint8Array | undefined {
-	try {
-		return base64ToBytes(value.replaceAll('-', '+').replaceAll('_', '/'));
-	} catch {
-		return undefined;
-	}
-}
-
-async function deriveRefreshKey(
+function deriveRefreshKey(
 	context: RefreshKeyContext,
 	salt: string,
 	info: readonly string[]
 ): Promise<CryptoKey> {
-	const encoder = new TextEncoder();
-	const material = await crypto.subtle.importKey(
-		'raw',
-		encoder.encode(
-			context.kind === 'tenant' ? context.signingKey : context.wrappingSecret
-		),
-		'HKDF',
-		false,
-		['deriveKey']
-	);
-
-	return crypto.subtle.deriveKey(
-		{
-			name: 'HKDF',
-			hash: 'SHA-256',
-			salt: encoder.encode(salt),
-			info: encoder.encode(JSON.stringify(info))
-		},
-		material,
-		{ name: 'AES-GCM', length: 256 },
-		false,
-		['encrypt', 'decrypt']
+	return deriveSealingKey(
+		context.kind === 'tenant' ? context.signingKey : context.wrappingSecret,
+		salt,
+		info
 	);
 }
 
@@ -343,24 +292,6 @@ function refreshEnvelopeKey(
 				]
 			: ['cupboard/control-refresh-envelope/v1', presented.id, successorId]
 	);
-}
-
-async function decryptOrUndefined(
-	key: CryptoKey,
-	iv: Uint8Array,
-	ciphertext: Uint8Array
-): Promise<Uint8Array | undefined> {
-	try {
-		return new Uint8Array(
-			await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext)
-		);
-	} catch (error) {
-		if (error instanceof DOMException && error.name === 'OperationError') {
-			return undefined;
-		}
-
-		throw error;
-	}
 }
 
 /**
