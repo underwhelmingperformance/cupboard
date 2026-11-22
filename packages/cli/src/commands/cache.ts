@@ -589,6 +589,15 @@ export function registerCacheCommands(
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Access keys select a cache by its name. Removing a cache leaves the keys',
+				'whose grants select it, and those keys can use a new cache with the same',
+				'name. Delete them first with `cupboard access-key delete`.'
+			].join('\n')
+		)
 		.action(
 			async (
 				url: URL,

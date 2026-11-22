@@ -1,8 +1,14 @@
+import {
+	accessKeyLimitSchema,
+	accessKeyRefusalProblemSchema
+} from '@cupboard/protocol/access-keys';
 import { transientExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import {
+	AccessKeyLimitExceededError,
+	AccessKeyRefusedError,
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
 	CacheRemovedError,
@@ -246,3 +252,38 @@ describe('translateRpcError', () => {
 function causeOf(error: unknown): unknown {
 	return error instanceof Error ? error.cause : undefined;
 }
+
+describe('translateRpcError for access keys', () => {
+	it.each(accessKeyLimitSchema.options)(
+		'translates the %s limit with its maximum',
+		(limit) => {
+			const translated = translateRpcError(
+				new ORPCError('ACCESS_KEY_LIMIT', {
+					status: 409,
+					data: { limit, maximum: 256 }
+				})
+			);
+
+			expect(
+				translated instanceof AccessKeyLimitExceededError
+					? { limit: translated.limit, maximum: translated.maximum }
+					: translated
+			).toStrictEqual({ limit, maximum: 256 });
+		}
+	);
+
+	it.each(accessKeyRefusalProblemSchema.options)(
+		'translates the refusal %s',
+		(problem) => {
+			const translated = translateRpcError(
+				new ORPCError('ACCESS_KEY_REFUSED', { status: 403, data: { problem } })
+			);
+
+			expect(
+				translated instanceof AccessKeyRefusedError
+					? translated.problem
+					: translated
+			).toBe(problem);
+		}
+	);
+});

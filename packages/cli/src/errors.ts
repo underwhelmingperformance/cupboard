@@ -14,6 +14,10 @@ export {
 } from '@cupboard/nix/build-observation';
 
 import type { TenantId } from '@cupboard/nix-store/scalars';
+import type {
+	AccessKeyLimit,
+	AccessKeyRefusalProblem
+} from '@cupboard/protocol/access-keys';
 import {
 	localStepStallWindowMs,
 	type LocalStepStatus
@@ -115,6 +119,66 @@ export class UploadRequestLimitExceededError extends CliUsageError {
 			options
 		);
 		this.name = 'UploadRequestLimitExceededError';
+	}
+}
+
+/**
+The server refused a new access key because it would exceed a limit. The
+message says what to do for each limit.
+*/
+export class AccessKeyLimitExceededError extends CliError {
+	constructor(
+		readonly limit: AccessKeyLimit,
+		readonly maximum: number,
+		options?: ErrorOptions
+	) {
+		super(accessKeyLimitAdvice(limit, maximum), options);
+		this.name = 'AccessKeyLimitExceededError';
+	}
+}
+
+function accessKeyLimitAdvice(limit: AccessKeyLimit, maximum: number): string {
+	switch (limit) {
+		case 'depth': {
+			return `A chain of access keys can be at most ${String(maximum)} keys long. Create the key with a key higher in the chain, or with your cupboard login session.`;
+		}
+		case 'origin': {
+			return `Your sign-in session, or your keys without a session, already have ${String(maximum)} unexpired access keys. Delete keys that are no longer needed, or run cupboard login to start a new session.`;
+		}
+		case 'tenant': {
+			return `The tenant already has ${String(maximum)} access keys. Delete keys that are no longer needed. Expired keys count until collection deletes them.`;
+		}
+	}
+}
+
+/**
+The server refused to create or act on an access key. The message says why
+and what to do.
+*/
+export class AccessKeyRefusedError extends CliError {
+	constructor(
+		readonly problem: AccessKeyRefusalProblem,
+		options?: ErrorOptions
+	) {
+		super(accessKeyRefusalAdvice(problem), options);
+		this.name = 'AccessKeyRefusedError';
+	}
+}
+
+function accessKeyRefusalAdvice(problem: AccessKeyRefusalProblem): string {
+	switch (problem) {
+		case 'grants-not-covered': {
+			return 'The new access key can have only grants that your credential has. Ask a tenant administrator for the missing grants.';
+		}
+		case 'expiry-required': {
+			return "The new access key needs an expiry no later than your credential's expiry, because your grants do not include access-key:create for every resource in its grants. Use --expires-in or --expires-at, or ask a tenant administrator for access-key:create.";
+		}
+		case 'expiry-beyond-creator': {
+			return 'The new access key would expire after your credential does. Without access-key:create for every resource in its grants, a key can expire no later than your credential; a cupboard login token lasts 10 minutes. Choose a shorter expiry, or ask a tenant administrator for access-key:create.';
+		}
+		case 'parent-ended': {
+			return 'The session or access key that is creating the key has ended or been revoked. Run cupboard login again, or use another access key.';
+		}
 	}
 }
 

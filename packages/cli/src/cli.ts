@@ -26,6 +26,7 @@ import { z } from 'zod';
 
 import { isAbortError } from './abort.ts';
 import { translateRpcError } from './client/rpc-errors.ts';
+import { registerAccessKeyCommands } from './commands/access-key.ts';
 import { registerAttestCommands } from './commands/attest.ts';
 import { registerAuthKeyCommands } from './commands/auth-key.ts';
 import { registerBuildInputsCommands } from './commands/build-inputs.ts';
@@ -223,6 +224,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerKeyCommands(program, options);
 	registerAuthKeyCommands(program, options);
 	registerSessionCommands(program, options);
+	registerAccessKeyCommands(program, options);
 	registerControlKeyCommands(program, options);
 	registerControlOidcTrustCommands(program, options);
 	registerTenantCommands(program, options);

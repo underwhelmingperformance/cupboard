@@ -1,4 +1,10 @@
 import {
+	accessKeyLimitErrorCode,
+	accessKeyLimitErrorDataSchema,
+	accessKeyRefusedErrorCode,
+	accessKeyRefusedErrorDataSchema
+} from '@cupboard/protocol/access-keys';
+import {
 	tenantMembershipUnpublishedErrorDataSchema,
 	tenantOffboardingErrorDataSchema,
 	tenantQuotaBelowUsageErrorDataSchema
@@ -13,6 +19,8 @@ import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
 import {
+	AccessKeyLimitExceededError,
+	AccessKeyRefusedError,
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
 	CacheRemovedError,
@@ -164,7 +172,8 @@ export interface TranslateRpcErrorOptions {
 }
 
 /**
-Converts authentication and scope failures, `CACHE_REMOVED`,
+Converts authentication and scope failures, `ACCESS_KEY_LIMIT`,
+`ACCESS_KEY_REFUSED`, `CACHE_REMOVED`,
 `TENANT_OFFBOARDING`, `TENANT_MEMBERSHIP_UNPUBLISHED`,
 `TENANT_QUOTA_BELOW_USAGE`, `UPLOAD_REQUEST_LIMIT_EXCEEDED`, and any oRPC
 error with status 408, 429, 503 or 507, into CLI errors. Every other oRPC
@@ -185,6 +194,24 @@ export function translateRpcError(
 	switch (error.code) {
 		case cacheRemovedErrorCode: {
 			return cacheRemovedErrorOf(error) ?? error;
+		}
+
+		case accessKeyLimitErrorCode: {
+			const data = accessKeyLimitErrorDataSchema.safeParse(error.data);
+
+			return data.success
+				? new AccessKeyLimitExceededError(data.data.limit, data.data.maximum, {
+						cause: error
+					})
+				: error;
+		}
+
+		case accessKeyRefusedErrorCode: {
+			const data = accessKeyRefusedErrorDataSchema.safeParse(error.data);
+
+			return data.success
+				? new AccessKeyRefusedError(data.data.problem, { cause: error })
+				: error;
 		}
 
 		case uploadRequestLimitErrorCode: {
