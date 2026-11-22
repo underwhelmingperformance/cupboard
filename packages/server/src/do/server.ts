@@ -78,6 +78,11 @@ import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
+import {
+	type Principal,
+	principalAuthorityHorizon,
+	principalGrants
+} from '../auth/principal.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { pushIdExpiresAtSeconds } from '../blob/push-id.ts';
@@ -1037,7 +1042,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.commitSession(
 					context.req.raw,
 					context.get('cache'),
-					context.get('claims')
+					context.get('principal')
 				)
 		);
 		this.app.on(
@@ -1318,7 +1323,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async commitSession(
 		request: Request,
 		cache: CacheScope,
-		claims: AccessClaims
+		principal: Principal
 	): Promise<Response> {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
@@ -1363,10 +1368,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const server = pair[1];
 		const sessionId = sessionIdSchema.parse(crypto.randomUUID());
 
+		const authenticatedUntil = principalAuthorityHorizon(
+			principal,
+			new Date()
+		).getTime();
+
 		await new CommitReuseGrantsService(this.ctx.storage).save(
 			sessionId,
-			claims.expiresAt.getTime(),
-			claims.grants,
+			authenticatedUntil,
+			principalGrants(principal),
 			hasPublication
 		);
 		this.ctx.acceptWebSocket(server, [sessionId]);
@@ -1375,7 +1385,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			{
 				cache,
 				sessionId,
-				authenticatedUntil: claims.expiresAt.getTime(),
+				authenticatedUntil,
 				correlation: requestCorrelation(request),
 				reuseGrantsStored: true,
 				...(hasPublication && { publication: true as const }),
@@ -2736,17 +2746,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// row is checked against the same cache before it can commit.
 	private commitSessionGuard() {
 		return createMiddleware<TenantHonoEnv>(async (context, next) => {
-			const claims = await this.authKeys.authenticate(context.req.raw);
+			const principal = await this.authKeys.authenticate(context.req.raw);
 			const cache = context.get('cache');
 
 			await authoriseRequest(
-				claims,
+				principal,
 				{ requires: 'upload:commit', resource: { cache: { fromPath: true } } },
 				{},
 				cache,
 				noPendingCache
 			);
-			context.set('claims', claims);
+			context.set('principal', principal);
 
 			await next();
 		});
@@ -4790,10 +4800,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		try {
-			const claims = await this.authKeys.authenticate(request);
+			const principal = await this.authKeys.authenticate(request);
 
 			await authoriseRequest(
-				claims,
+				principal,
 				tenantContract.uploads.negotiate.inDefaultCache['~orpc'].meta,
 				{},
 				cache,

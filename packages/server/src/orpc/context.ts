@@ -3,7 +3,7 @@ import type { CacheScope } from '@cupboard/nix-store/scalars';
 import type { VerifyReportInput } from '@cupboard/protocol/reports';
 
 import type { AccessIdentityKeyContext } from '../auth/access-identity.ts';
-import type { AccessClaims } from '../auth/auth.ts';
+import type { Principal } from '../auth/principal.ts';
 import type { AccessKeyStore } from '../do/access-key-store.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
@@ -94,7 +94,7 @@ export interface TenantRpcServices {
 export interface TenantOrpcContext {
 	readonly request: Request;
 	// Verifies the request's bearer token. Every call returns the same result.
-	readonly authenticate: () => Promise<AccessClaims>;
+	readonly authenticate: () => Promise<Principal>;
 	readonly services: TenantRpcServices;
 	// The cache the request path selected: the default cache for a bare path,
 	// and the named one for a path under `/cache/<name>`.
