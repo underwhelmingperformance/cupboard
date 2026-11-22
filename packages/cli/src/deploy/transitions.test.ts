@@ -538,14 +538,16 @@ describe('v0.0.35 path authority rollout', () => {
 							['control-refresh-sessions', 'complete'],
 							['control-subject-nonces', 'complete'],
 							['attestation-digest-index', 'expanded'],
-							['backfill-purge-pace', 'complete']
+							['backfill-purge-pace', 'complete'],
+							['static-read-credential-retirement', 'expanded']
 						],
 						applied: actualMigrations
 							.filter(
 								(migration) =>
 									!migration.name.startsWith('0032') &&
 									!migration.name.startsWith('0036') &&
-									!migration.name.startsWith('0043')
+									!migration.name.startsWith('0043') &&
+									!migration.name.startsWith('0045')
 							)
 							.map((migration) => migration.name),
 						servingChecks: 0
@@ -562,7 +564,8 @@ describe('v0.0.35 path authority rollout', () => {
 						'control-refresh-sessions': 'complete',
 						'control-subject-nonces': 'complete',
 						'attestation-digest-index': 'complete',
-						'backfill-purge-pace': 'complete'
+						'backfill-purge-pace': 'complete',
+						'static-read-credential-retirement': 'complete'
 					},
 					applied: actualMigrations.map((migration) => migration.name),
 					journal: [
@@ -571,12 +574,14 @@ describe('v0.0.35 path authority rollout', () => {
 								(migration) =>
 									!migration.name.startsWith('0032') &&
 									!migration.name.startsWith('0036') &&
-									!migration.name.startsWith('0043')
+									!migration.name.startsWith('0043') &&
+									!migration.name.startsWith('0045')
 							)
 							.map((migration) => ({ name: migration.name })),
 						{ name: '0032_attestation_ref_path_index.sql' },
 						{ name: '0036_path_read_authority_contract.sql' },
-						{ name: '0043_attestation_ref_digest_index.sql' }
+						{ name: '0043_attestation_ref_digest_index.sql' },
+						{ name: '0045_static_read_credential_retirement.sql' }
 					],
 					phase: 'contracted@5',
 					servingChecks: 1,

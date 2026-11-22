@@ -2721,7 +2721,7 @@ migrations can go in one of two places:
   never blocks a deploy, but runs only after the upload.
   `attestation-path-index` and `attestation-digest-index` use this form.
 
-Five transitions of `CUPBOARD_DB` have contract migrations. On an existing
+Six transitions of `CUPBOARD_DB` have contract migrations. On an existing
 deployment, the deploy applies their contract migrations in this order. (On a
 fresh deployment, it applies `0043` before the upload and `0042` after it.)
 
@@ -2756,6 +2756,12 @@ fresh deployment, it applies `0043` before the upload and `0042` after it.)
    has that name only after `0036`, and an independent transition's expand
    migrations can run before `0036`. The migration is therefore a contract
    migration, and its place in the list puts it after `0036`.
+6. `static-read-credential-retirement`: contract migration `0045` clears the
+   static read credentials: the verifier columns of `tenant` and every row of
+   `tenant_cache_read_credential`. The preceding build still accepts these
+   credentials, so the migration runs only once the new build serves all
+   traffic. It keeps the columns and the table, because a restored preceding
+   Worker still selects them, and a later release drops them.
 
 [the-tenant-worker]: #the-tenant-worker
 

@@ -69,7 +69,8 @@ export const transitionIdSchema = z.enum([
 	'control-database-split',
 	'control-database-initial',
 	'attestation-digest-index',
-	'backfill-purge-pace'
+	'backfill-purge-pace',
+	'static-read-credential-retirement'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -378,6 +379,16 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		id: 'backfill-purge-pace',
 		expand: ['0044_backfill_purge_pace.sql'],
 		contract: [],
+		independent: true
+	},
+	{
+		// The preceding build verifies static read credentials, so the migration
+		// that clears them is a contract migration and runs once only this build
+		// serves. It keeps the columns because a restored preceding Worker still
+		// selects them.
+		id: 'static-read-credential-retirement',
+		expand: [],
+		contract: ['0045_static_read_credential_retirement.sql'],
 		independent: true
 	}
 ];
