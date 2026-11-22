@@ -16,9 +16,16 @@ import {
 } from '@cupboard/protocol/upload';
 import { implement } from '@orpc/server';
 
-import { type AccessClaims } from '../auth/auth.ts';
+import {
+	type Principal,
+	principalAuthorityHorizon,
+	principalGrants
+} from '../auth/principal.ts';
 import { openAccessKeyCreator } from '../do/access-key-store.ts';
-import { BuildInputsCapabilityRequiredError } from '../errors.ts';
+import {
+	BuildInputsCapabilityRequiredError,
+	InsufficientScopeError
+} from '../errors.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
 	internalOrigin,
@@ -48,10 +55,10 @@ const os = implement(tenantContract)
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {
-		const claims = await context.authenticate();
+		const principal = await context.authenticate();
 
 		const maintenanceCache = await authoriseRequest(
-			claims,
+			principal,
 			procedure['~orpc'].meta,
 			input,
 			context.cache,
@@ -59,7 +66,7 @@ const os = implement(tenantContract)
 			context.services.accessKeyGrants
 		);
 
-		return next({ context: { claims, maintenanceCache } });
+		return next({ context: { principal, maintenanceCache } });
 	})
 	.use(({ context, procedure, next }) => {
 		const { maintenance } = procedure['~orpc'].meta;
@@ -221,17 +228,24 @@ export const tenantRouter = os.router({
 		)
 	},
 	accessKeys: {
-		create: os.accessKeys.create.handler(async ({ input, context }) =>
-			context.services.accessKeys.create(
+		create: os.accessKeys.create.handler(async ({ input, context }) => {
+			if (context.principal.kind !== 'access-token') {
+				throw new InsufficientScopeError();
+			}
+
+			return context.services.accessKeys.create(
 				await openAccessKeyCreator(
-					context.claims,
+					context.principal.claims,
 					context.services.accessIdentityKeys()
 				),
 				input
-			)
-		),
+			);
+		}),
 		list: os.accessKeys.list.handler(({ input, context }) =>
-			context.services.accessKeys.list(context.claims.grants, input)
+			context.services.accessKeys.list(
+				principalGrants(context.principal),
+				input
+			)
 		),
 		delete: os.accessKeys.delete.handler(({ input, context }) =>
 			context.services.accessKeys.delete(input.id)
@@ -473,7 +487,7 @@ export const tenantRouter = os.router({
 			inDefaultCache: os.uploads.credential.inDefaultCache.handler(
 				({ input, context }) =>
 					context.services.uploads.issuePushCredential(
-						context.claims.expiresAt,
+						principalAuthorityHorizon(context.principal, new Date()),
 						input.pushId,
 						hasAcceptedCapability(context.request, publicationCapability)
 					)
@@ -481,7 +495,7 @@ export const tenantRouter = os.router({
 			inNamedCache: os.uploads.credential.inNamedCache.handler(
 				({ input, context }) =>
 					context.services.uploads.issuePushCredential(
-						context.claims.expiresAt,
+						principalAuthorityHorizon(context.principal, new Date()),
 						input.pushId,
 						hasAcceptedCapability(context.request, publicationCapability)
 					)
@@ -533,7 +547,7 @@ export const tenantRouter = os.router({
 					context.services.dependencyStatus.status(
 						context.cache,
 						input.storePathHashes,
-						context.claims.grants
+						principalGrants(context.principal)
 					)
 			),
 			inNamedCache: os.uploads.dependencyStatus.inNamedCache.handler(
@@ -541,7 +555,7 @@ export const tenantRouter = os.router({
 					context.services.dependencyStatus.status(
 						context.cache,
 						input.storePathHashes,
-						context.claims.grants
+						principalGrants(context.principal)
 					)
 			)
 		},
@@ -669,27 +683,35 @@ function refuseUnacceptedBuildInputs(
 }
 
 function planUpload(
-	context: TenantOrpcContext & { readonly claims: AccessClaims },
+	context: TenantOrpcContext & { readonly principal: Principal },
 	input: UploadNegotiateRequest
 ) {
 	refuseUnacceptedBuildInputs(context.request, input.paths);
 	if (input.attachRoot !== undefined) {
-		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+		authoriseAttachRoot(
+			context.principal,
+			context.cache,
+			input.attachRoot.name
+		);
 	}
 	return context.services.uploads.plan(
 		context.cache,
 		input,
-		context.claims.grants
+		principalGrants(context.principal)
 	);
 }
 
 function negotiateUpload(
-	context: TenantOrpcContext & { readonly claims: AccessClaims },
+	context: TenantOrpcContext & { readonly principal: Principal },
 	input: UploadNegotiateRequest
 ) {
 	refuseUnacceptedBuildInputs(context.request, input.paths);
 	if (input.attachRoot !== undefined) {
-		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+		authoriseAttachRoot(
+			context.principal,
+			context.cache,
+			input.attachRoot.name
+		);
 	}
 
 	const origin = requestOriginSchema.parse(new URL(context.request.url).origin);
@@ -704,20 +726,24 @@ function negotiateUpload(
 		origin,
 		context.services.takeNegotiateHints(context.request),
 		hasAcceptedCapability(context.request, uploadGraceFactsCapability),
-		context.claims.grants
+		principalGrants(context.principal)
 	);
 }
 
 function confirmPresent(
 	context: TenantOrpcContext & {
-		readonly claims: AccessClaims;
+		readonly principal: Principal;
 		readonly maintenanceChange: MaintenanceChange;
 	},
 	input: UploadConfirmPresentRequest
 ) {
-	authorisePublication(context.claims, context.cache);
+	authorisePublication(context.principal, context.cache);
 	if (input.attachRoot !== undefined) {
-		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+		authoriseAttachRoot(
+			context.principal,
+			context.cache,
+			input.attachRoot.name
+		);
 	}
 
 	return context.services.confirmation.confirmPresent(
@@ -730,7 +756,7 @@ function confirmPresent(
 }
 
 function previewUpload(
-	context: TenantOrpcContext & { readonly claims: AccessClaims },
+	context: TenantOrpcContext & { readonly principal: Principal },
 	paths: UploadPreviewRequest['paths']
 ) {
 	refuseUnacceptedBuildInputs(context.request, paths);
@@ -739,7 +765,7 @@ function previewUpload(
 		{ paths },
 		context.services.takeNegotiateHints(context.request),
 		hasAcceptedCapability(context.request, uploadGraceFactsCapability),
-		context.claims.grants
+		principalGrants(context.principal)
 	);
 }
 

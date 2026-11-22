@@ -4,6 +4,7 @@ import { implement } from '@orpc/server';
 import { z } from 'zod';
 
 import { type AccessTokenClaims } from '../auth/auth.ts';
+import { tokenPrincipal } from '../auth/principal.ts';
 import {
 	controlCheck,
 	controlInstance,
@@ -87,7 +88,7 @@ const os = implement(controlContract)
 		const claims = await context.authenticate();
 
 		await authoriseRequest(
-			claims,
+			tokenPrincipal(claims),
 			procedure['~orpc'].meta,
 			input,
 			undefined,

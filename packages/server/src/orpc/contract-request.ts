@@ -12,7 +12,6 @@ import {
 	RemoteBodyTooLargeError
 } from '@cupboard/shared/response-body';
 
-import { type AccessTokenClaims } from '../auth/auth.ts';
 import { RequestBodyTooLargeError } from '../errors.ts';
 import { uploadPageSize } from '../policy/upload-pages.ts';
 
@@ -45,12 +44,12 @@ Returns a function that calls `authenticate` once and returns the same
 promise on every call, so the body guard and the procedure middleware of
 one request share one verification.
 */
-export function authenticateOnce<Claims extends AccessTokenClaims>(
-	authenticate: () => Promise<Claims>
-): () => Promise<Claims> {
-	let claims: Promise<Claims> | undefined;
+export function authenticateOnce<Authenticated>(
+	authenticate: () => Promise<Authenticated>
+): () => Promise<Authenticated> {
+	let authenticated: Promise<Authenticated> | undefined;
 
-	return () => (claims ??= authenticate());
+	return () => (authenticated ??= authenticate());
 }
 
 /**

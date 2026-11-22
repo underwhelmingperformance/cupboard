@@ -24,6 +24,11 @@ import {
 import { z } from 'zod';
 
 import { type AccessTokenClaims } from '../auth/auth.ts';
+import {
+	type Principal,
+	principalExpiresAt,
+	principalGrants
+} from '../auth/principal.ts';
 import { AccessKeyRefusedError, InsufficientScopeError } from '../errors.ts';
 
 /**
@@ -241,16 +246,17 @@ function inputValue(input: unknown, name: string): unknown {
 }
 
 /**
-Requires the caller to hold every requested grant and, unless
-`access-key:create` covers every requested grant, to request an expiry no
-later than its own. A field that fails validation can be covered only by a
+Requires the caller to hold every requested grant. A caller with an expiry
+must also request an expiry no later than its own, unless `access-key:create`
+covers every requested grant. A field that fails validation can be covered only by a
 wildcard grant; route validation still refuses the input.
 */
 function authoriseDerivation(
-	claims: AccessTokenClaims,
+	principal: Principal<AccessTokenClaims>,
 	spec: DerivationSpec,
 	input: unknown
 ): void {
+	const grants = principalGrants(principal);
 	const requested = authorizationDetailsSchema.safeParse(
 		inputValue(input, spec.grantsIn)
 	);
@@ -259,7 +265,7 @@ function authoriseDerivation(
 		rawExpiry === undefined ? undefined : z.iso.datetime().safeParse(rawExpiry);
 
 	if (!requested.success || expiry?.success === false) {
-		if (!hasWildcard(claims.grants)) {
+		if (!hasWildcard(grants)) {
 			throw new InsufficientScopeError();
 		}
 
@@ -268,13 +274,19 @@ function authoriseDerivation(
 
 	if (
 		requested.data.some(
-			(detail) => !isAuthorizationDetailCovered(claims.grants, detail)
+			(detail) => !isAuthorizationDetailCovered(grants, detail)
 		)
 	) {
 		throw new AccessKeyRefusedError('grants-not-covered');
 	}
 
-	if (isAccessKeyCovered(claims.grants, 'access-key:create', requested.data)) {
+	if (isAccessKeyCovered(grants, 'access-key:create', requested.data)) {
+		return;
+	}
+
+	const expiresAt = principalExpiresAt(principal);
+
+	if (expiresAt === undefined) {
 		return;
 	}
 
@@ -282,20 +294,22 @@ function authoriseDerivation(
 		throw new AccessKeyRefusedError('expiry-required');
 	}
 
-	if (Date.parse(expiry.data) > claims.expiresAt.getTime()) {
+	if (Date.parse(expiry.data) > expiresAt.getTime()) {
 		throw new AccessKeyRefusedError('expiry-beyond-creator');
 	}
 }
 
 async function authoriseAccessKey(
-	claims: AccessTokenClaims,
+	principal: Principal<AccessTokenClaims>,
 	operation: Operation,
 	location: AccessKeyLocation,
 	input: unknown,
 	accessKeyGrants: AccessKeyGrantsResolver | undefined
 ): Promise<void> {
+	const grants = principalGrants(principal);
+
 	if ('listed' in location) {
-		if (!hasOperation(claims.grants, operation)) {
+		if (!hasOperation(grants, operation)) {
 			throw new InsufficientScopeError();
 		}
 
@@ -310,14 +324,14 @@ async function authoriseAccessKey(
 	const keyGrants = id === undefined ? undefined : await accessKeyGrants(id);
 
 	if (keyGrants === undefined) {
-		if (!hasOperation(claims.grants, operation)) {
+		if (!hasOperation(grants, operation)) {
 			throw new InsufficientScopeError();
 		}
 
 		return;
 	}
 
-	if (!isAccessKeyCovered(claims.grants, operation, keyGrants)) {
+	if (!isAccessKeyCovered(grants, operation, keyGrants)) {
 		throw new InsufficientScopeError();
 	}
 }
@@ -328,15 +342,17 @@ resource, or the credential that the procedure derives. A procedure that
 declares neither `requires` nor `derives` is denied.
 */
 export async function authoriseRequest(
-	claims: AccessTokenClaims,
+	principal: Principal<AccessTokenClaims>,
 	meta: AuthzMeta,
 	input: unknown,
 	pathCache: CacheScope | undefined,
 	pendingCache: PendingCacheResolver,
 	accessKeyGrants?: AccessKeyGrantsResolver
 ): Promise<CacheScope | undefined> {
+	const grants = principalGrants(principal);
+
 	if (meta.derives !== undefined) {
-		authoriseDerivation(claims, meta.derives, input);
+		authoriseDerivation(principal, meta.derives, input);
 
 		return undefined;
 	}
@@ -347,7 +363,7 @@ export async function authoriseRequest(
 
 	if (meta.resource?.accessKey !== undefined) {
 		await authoriseAccessKey(
-			claims,
+			principal,
 			meta.requires,
 			meta.resource.accessKey,
 			input,
@@ -365,10 +381,7 @@ export async function authoriseRequest(
 	);
 
 	if (pendingMissing !== false) {
-		if (
-			pendingMissing.missingDenies ||
-			!hasOperation(claims.grants, meta.requires)
-		) {
+		if (pendingMissing.missingDenies || !hasOperation(grants, meta.requires)) {
 			throw new InsufficientScopeError();
 		}
 
@@ -376,7 +389,7 @@ export async function authoriseRequest(
 	}
 
 	if (unresolved) {
-		if (!hasWildcard(claims.grants)) {
+		if (!hasWildcard(grants)) {
 			throw new InsufficientScopeError();
 		}
 
@@ -386,9 +399,7 @@ export async function authoriseRequest(
 	const operation = meta.requires;
 
 	if (
-		resources.some(
-			(resource) => !isCoveredByToken(claims.grants, operation, resource)
-		)
+		resources.some((resource) => !isCoveredByToken(grants, operation, resource))
 	) {
 		throw new InsufficientScopeError();
 	}
@@ -402,11 +413,13 @@ negotiation. The commit session inherits this binding, so later frames do
 not repeat the root name.
 */
 export function authoriseAttachRoot(
-	claims: AccessTokenClaims,
+	principal: Principal<AccessTokenClaims>,
 	cache: CacheScope,
 	root: RootName
 ): void {
-	if (!isCoveredByToken(claims.grants, 'root:attach', { cache, root })) {
+	const grants = principalGrants(principal);
+
+	if (!isCoveredByToken(grants, 'root:attach', { cache, root })) {
 		throw new InsufficientScopeError();
 	}
 }
@@ -417,10 +430,12 @@ publication over the commit session does. Confirming a planned skip retains
 the path for the push, so it needs the same authority as publishing it.
 */
 export function authorisePublication(
-	claims: AccessTokenClaims,
+	principal: Principal<AccessTokenClaims>,
 	cache: CacheScope
 ): void {
-	if (!isCoveredByToken(claims.grants, 'upload:negotiate', { cache })) {
+	const grants = principalGrants(principal);
+
+	if (!isCoveredByToken(grants, 'upload:negotiate', { cache })) {
 		throw new InsufficientScopeError();
 	}
 }

@@ -1,12 +1,12 @@
 import type { Logger } from '@cupboard/logger';
 import type { CacheScope } from '@cupboard/nix-store/scalars';
 
-import type { AccessClaims } from '../auth/auth.ts';
+import type { Principal } from '../auth/principal.ts';
 
 import type { RuntimeEnv } from './context.ts';
 
 /**
-Middleware installs `logger` before any route runs and installs `claims` on
+Middleware installs `logger` before any route runs and installs `principal` on
 authenticated routes.
 
 The path names the cache but not its access. A route that needs the access
@@ -16,7 +16,7 @@ export interface TenantHonoEnv {
 	Bindings: RuntimeEnv;
 	Variables: {
 		logger: Logger;
-		claims: AccessClaims;
+		principal: Principal;
 		cache: CacheScope;
 	};
 }

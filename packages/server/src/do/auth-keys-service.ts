@@ -25,6 +25,7 @@ import {
 	scheduledAccessKeyRetireAt,
 	verifyTenantAccessJwt
 } from '../auth/auth.ts';
+import { type Principal, tokenPrincipal } from '../auth/principal.ts';
 import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -360,16 +361,17 @@ export class AuthKeysService {
 		}));
 	}
 
-	// Authentication verifies the token and returns its subject and grants. The
-	// router separately checks those grants against procedure metadata.
-	async authenticate(request: Request): Promise<AccessClaims> {
+	// Authentication verifies the token and returns the principal that it
+	// presents. The router separately checks its grants against procedure
+	// metadata.
+	async authenticate(request: Request): Promise<Principal> {
 		const token = bearerToken(request);
 
 		if (token === undefined) {
 			throw new UnauthenticatedError();
 		}
 
-		return this.authenticateToken(token);
+		return tokenPrincipal(await this.authenticateToken(token));
 	}
 
 	async authenticateToken(token: string): Promise<AccessClaims> {
