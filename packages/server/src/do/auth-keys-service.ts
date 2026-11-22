@@ -20,11 +20,11 @@ import {
 	type AccessClaims,
 	authJwtAlgorithm,
 	type AuthPublicKey,
-	bearerToken,
 	generateAuthKeyPair,
 	scheduledAccessKeyRetireAt,
 	verifyTenantAccessJwt
 } from '../auth/auth.ts';
+import { bearerCredential } from '../auth/credential.ts';
 import { type Principal, tokenPrincipal } from '../auth/principal.ts';
 import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
@@ -365,13 +365,17 @@ export class AuthKeysService {
 	// presents. The router separately checks its grants against procedure
 	// metadata.
 	async authenticate(request: Request): Promise<Principal> {
-		const token = bearerToken(request);
+		const credential = bearerCredential(request);
 
-		if (token === undefined) {
+		if (credential === undefined) {
 			throw new UnauthenticatedError();
 		}
 
-		return tokenPrincipal(await this.authenticateToken(token));
+		if (credential.kind === 'access-key') {
+			throw new InvalidAccessTokenError();
+		}
+
+		return tokenPrincipal(await this.authenticateToken(credential.token));
 	}
 
 	async authenticateToken(token: string): Promise<AccessClaims> {

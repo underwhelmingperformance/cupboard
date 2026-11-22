@@ -97,7 +97,11 @@ async function guard(row: Row): Promise<'served' | 'refused'> {
 		request(credentials[row.offered]),
 		entry,
 		row.scope,
-		{ cacheVerifier, isTokenAuthorised: () => Promise.resolve(false) }
+		{
+			cacheVerifier,
+			isTokenAuthorised: () => Promise.resolve(false),
+			isKeyAuthorised: () => Promise.resolve(false)
+		}
 	);
 
 	return denied === undefined ? 'served' : 'refused';
@@ -183,7 +187,10 @@ describe('guardScopedRead', () => {
 			request(),
 			{ status: 'active' },
 			privateScope,
-			{ isTokenAuthorised: () => Promise.resolve(false) }
+			{
+				isTokenAuthorised: () => Promise.resolve(false),
+				isKeyAuthorised: () => Promise.resolve(false)
+			}
 		);
 
 		expect({
@@ -204,7 +211,8 @@ describe('guardScopedRead', () => {
 			isTokenAuthorised: (token: string, cache: CacheScope) => {
 				calls.push({ token, cache });
 				return Promise.resolve(token === 'signed-token');
-			}
+			},
+			isKeyAuthorised: () => Promise.resolve(false)
 		};
 
 		const staticRead = await guardScopedRead(
@@ -249,6 +257,47 @@ describe('guardScopedRead', () => {
 				{ token: 'signed-token', cache: namedCache },
 				{ token: 'signed-token', cache: namedCache },
 				{ token: 'wrong', cache: namedCache }
+			]
+		});
+	});
+
+	it('reads a token or an access key from a Basic password with any username', async () => {
+		const keySecret = `cupboard_ak_00000000-0000-4000-8000-000000000001_${'a'.repeat(64)}`;
+		const calls: { kind: string; credential: string; cache: CacheScope }[] = [];
+		const authentication = {
+			isTokenAuthorised: (token: string, cache: CacheScope) => {
+				calls.push({ kind: 'token', credential: token, cache });
+				return Promise.resolve(true);
+			},
+			isKeyAuthorised: (secret: string, cache: CacheScope) => {
+				calls.push({ kind: 'key', credential: secret, cache });
+				return Promise.resolve(true);
+			}
+		};
+
+		const tokenRead = await guardScopedRead(
+			request(['anyone', `${readTokenPasswordPrefix}signed-token`]),
+			{ status: 'active' },
+			privateScope,
+			authentication
+		);
+		const keyRead = await guardScopedRead(
+			request(['machine-7', keySecret]),
+			{ status: 'active' },
+			privateScope,
+			authentication
+		);
+
+		expect({
+			tokenRead: tokenRead?.status ?? 'served',
+			keyRead: keyRead?.status ?? 'served',
+			calls
+		}).toStrictEqual({
+			tokenRead: 'served',
+			keyRead: 'served',
+			calls: [
+				{ kind: 'token', credential: 'signed-token', cache: namedCache },
+				{ kind: 'key', credential: keySecret, cache: namedCache }
 			]
 		});
 	});
