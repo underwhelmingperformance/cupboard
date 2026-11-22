@@ -6,8 +6,17 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import { type AuthzMeta, type ResourceSpec } from '@cupboard/protocol/contract';
 import {
+	type AccessKeyLocation,
+	type AuthzMeta,
+	type DerivationSpec,
+	type ResourceSpec
+} from '@cupboard/protocol/contract';
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema,
+	isAccessKeyCovered,
+	isAuthorizationDetailCovered,
 	isCoveredByToken,
 	type Operation,
 	type ResourceRequest
@@ -15,7 +24,7 @@ import {
 import { z } from 'zod';
 
 import { type AccessTokenClaims } from '../auth/auth.ts';
-import { InsufficientScopeError } from '../errors.ts';
+import { AccessKeyRefusedError, InsufficientScopeError } from '../errors.ts';
 
 /**
 Returns the cache recorded by a pending upload or attestation, or `undefined`
@@ -207,18 +216,145 @@ function hasWildcard(grants: AccessTokenClaims['grants']): boolean {
 }
 
 /**
+Returns the grants of a stored access key, or `undefined` when no key has
+the id.
+*/
+export type AccessKeyGrantsResolver = (
+	id: string
+) => Promise<AuthorizationDetails | undefined>;
+
+/**
+Thrown when a procedure declares an access-key resource on a router that
+supplies no resolver for access keys.
+*/
+export class MissingAccessKeyResolverError extends Error {
+	constructor() {
+		super(
+			'The procedure acts on an access key and the router supplied no resolver'
+		);
+		this.name = 'MissingAccessKeyResolverError';
+	}
+}
+
+function inputValue(input: unknown, name: string): unknown {
+	return z.record(z.string(), z.unknown()).safeParse(input).data?.[name];
+}
+
+/**
+Requires the caller to hold every requested grant and, unless
+`access-key:create` covers every requested grant, to request an expiry no
+later than its own. A field that fails validation can be covered only by a
+wildcard grant; route validation still refuses the input.
+*/
+function authoriseDerivation(
+	claims: AccessTokenClaims,
+	spec: DerivationSpec,
+	input: unknown
+): void {
+	const requested = authorizationDetailsSchema.safeParse(
+		inputValue(input, spec.grantsIn)
+	);
+	const rawExpiry = inputValue(input, spec.expiresAtIn);
+	const expiry =
+		rawExpiry === undefined ? undefined : z.iso.datetime().safeParse(rawExpiry);
+
+	if (!requested.success || expiry?.success === false) {
+		if (!hasWildcard(claims.grants)) {
+			throw new InsufficientScopeError();
+		}
+
+		return;
+	}
+
+	if (
+		requested.data.some(
+			(detail) => !isAuthorizationDetailCovered(claims.grants, detail)
+		)
+	) {
+		throw new AccessKeyRefusedError('grants-not-covered');
+	}
+
+	if (isAccessKeyCovered(claims.grants, 'access-key:create', requested.data)) {
+		return;
+	}
+
+	if (expiry?.data === undefined) {
+		throw new AccessKeyRefusedError('expiry-required');
+	}
+
+	if (Date.parse(expiry.data) > claims.expiresAt.getTime()) {
+		throw new AccessKeyRefusedError('expiry-beyond-creator');
+	}
+}
+
+async function authoriseAccessKey(
+	claims: AccessTokenClaims,
+	operation: Operation,
+	location: AccessKeyLocation,
+	input: unknown,
+	accessKeyGrants: AccessKeyGrantsResolver | undefined
+): Promise<void> {
+	if ('listed' in location) {
+		if (!hasOperation(claims.grants, operation)) {
+			throw new InsufficientScopeError();
+		}
+
+		return;
+	}
+
+	if (accessKeyGrants === undefined) {
+		throw new MissingAccessKeyResolverError();
+	}
+
+	const id = inputField(input, location.field);
+	const keyGrants = id === undefined ? undefined : await accessKeyGrants(id);
+
+	if (keyGrants === undefined) {
+		if (!hasOperation(claims.grants, operation)) {
+			throw new InsufficientScopeError();
+		}
+
+		return;
+	}
+
+	if (!isAccessKeyCovered(claims.grants, operation, keyGrants)) {
+		throw new InsufficientScopeError();
+	}
+}
+
+/**
 Requires the token to authorise the procedure's operation for its resolved
-resource. A procedure without a `requires` declaration is denied.
+resource, or the credential that the procedure derives. A procedure that
+declares neither `requires` nor `derives` is denied.
 */
 export async function authoriseRequest(
 	claims: AccessTokenClaims,
 	meta: AuthzMeta,
 	input: unknown,
 	pathCache: CacheScope | undefined,
-	pendingCache: PendingCacheResolver
+	pendingCache: PendingCacheResolver,
+	accessKeyGrants?: AccessKeyGrantsResolver
 ): Promise<CacheScope | undefined> {
+	if (meta.derives !== undefined) {
+		authoriseDerivation(claims, meta.derives, input);
+
+		return undefined;
+	}
+
 	if (meta.requires === undefined) {
 		throw new InsufficientScopeError();
+	}
+
+	if (meta.resource?.accessKey !== undefined) {
+		await authoriseAccessKey(
+			claims,
+			meta.requires,
+			meta.resource.accessKey,
+			input,
+			accessKeyGrants
+		);
+
+		return undefined;
 	}
 
 	const { resources, unresolved, pendingMissing } = await resolveResource(

@@ -2,7 +2,9 @@ import type { Logger } from '@cupboard/logger';
 import type { CacheScope } from '@cupboard/nix-store/scalars';
 import type { VerifyReportInput } from '@cupboard/protocol/reports';
 
+import type { AccessIdentityKeyContext } from '../auth/access-identity.ts';
 import type { AccessClaims } from '../auth/auth.ts';
+import type { AccessKeyStore } from '../do/access-key-store.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { BuildInputsService } from '../do/build-inputs-service.ts';
@@ -25,7 +27,10 @@ import type { StatsService } from '../do/stats-service.ts';
 import type { UploadsService } from '../do/uploads-service.ts';
 import type { RequestOrigin } from '../http/http.ts';
 
-import type { PendingCacheResolver } from './authorise.ts';
+import type {
+	AccessKeyGrantsResolver,
+	PendingCacheResolver
+} from './authorise.ts';
 
 /**
 The capabilities the contract's procedures need from the Durable Object:
@@ -50,6 +55,11 @@ export interface TenantRpcServices {
 	readonly signingKeys: SigningKeysService;
 	readonly authKeys: AuthKeysService;
 	readonly refreshSessions: RefreshSessionsService;
+	readonly accessKeys: AccessKeyStore;
+	// The grants of a stored access key, for procedures that act on one.
+	readonly accessKeyGrants: AccessKeyGrantsResolver;
+	// The key context that opens the sealed identity of the caller's token.
+	accessIdentityKeys(): AccessIdentityKeyContext;
 	readonly retention: RetentionService;
 	readonly legacyRetention: LegacyRetentionService;
 	readonly reuseViews: ReuseViewAdminService;

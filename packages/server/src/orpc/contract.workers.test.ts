@@ -1967,6 +1967,116 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('creates, lists and deletes access keys through the derived client', async () => {
+		await useTestServer('contract-access-keys');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const grants = authorizationDetailsSchema.parse([
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'builds' },
+				actions: ['cache:content-read']
+			}
+		]);
+
+		const created = await client.accessKeys.create({ grants });
+		const listed = await client.accessKeys.list();
+		const deleted = await client.accessKeys.delete({ id: created.id });
+		const repeated = await client.accessKeys.delete({ id: created.id });
+		const remaining = await client.accessKeys.list();
+		const { secret: _secret, ...summary } = created;
+
+		expect({ summary, listed, deleted, repeated, remaining }).toStrictEqual({
+			summary: {
+				id: created.id,
+				grants,
+				subject: 'grant-test',
+				createdAt: created.createdAt
+			},
+			listed: { accessKeys: [summary], unreadableAccessKeys: [] },
+			deleted: { id: created.id, deleted: true },
+			repeated: { id: created.id, deleted: false },
+			remaining: { accessKeys: [], unreadableAccessKeys: [] }
+		});
+	});
+
+	it('lets only a wildcard holder delete a key whose grants the server cannot read', async () => {
+		await useTestServer('contract-access-key-unreadable');
+		const init = await bootstrap();
+		const wildcardClient = tenantClient(init.token);
+		const cacheClient = tenantClient(
+			await issueServerSignedToken(
+				authorizationDetailsSchema.parse([
+					{
+						type: 'cupboard_cache',
+						cache: { kind: 'named', name: 'builds' },
+						actions: ['access-key:list', 'access-key:delete']
+					}
+				])
+			)
+		);
+		const created = await wildcardClient.accessKeys.create({
+			grants: authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'builds' },
+					actions: ['cache:content-read']
+				}
+			])
+		});
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.accessKeys)
+				.set({
+					grantsJson: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							cache: { kind: 'named', name: 'builds' },
+							actions: ['cache:future-operation']
+						}
+					])
+				})
+				.where(eq(schema.accessKeys.id, created.id))
+				.run();
+		});
+
+		const [cacheError] = await safe(
+			cacheClient.accessKeys.delete({ id: created.id })
+		);
+		const listedToCache = await cacheClient.accessKeys.list();
+		const deleted = await wildcardClient.accessKeys.delete({ id: created.id });
+
+		expect({
+			cacheRefused: cacheError instanceof ORPCError && cacheError.status,
+			listedToCache,
+			deleted
+		}).toStrictEqual({
+			cacheRefused: StatusCodes.FORBIDDEN,
+			listedToCache: { accessKeys: [], unreadableAccessKeys: [] },
+			deleted: { id: created.id, deleted: true }
+		});
+	});
+
+	it('refuses a key without an expiry to a token without access-key:create', async () => {
+		await useTestServer('contract-access-key-refused');
+		await bootstrap();
+		const grants = authorizationDetailsSchema.parse([
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'builds' },
+				actions: ['cache:content-read']
+			}
+		]);
+		const client = tenantClient(await issueServerSignedToken(grants));
+
+		await expect(client.accessKeys.create({ grants })).rejects.toMatchObject({
+			defined: true,
+			code: 'ACCESS_KEY_REFUSED',
+			status: StatusCodes.FORBIDDEN,
+			data: { problem: 'expiry-required' }
+		});
+	});
+
 	it('lists sessions with only session:list', async () => {
 		await useTestServer('contract-session-list-scope');
 		await bootstrap();

@@ -1,3 +1,4 @@
+import { accessKeysContract } from './access-keys.ts';
 import { attestationsContract } from './attestations.ts';
 import { buildInputsContract } from './build-inputs.ts';
 import { cachesContract } from './caches.ts';
@@ -24,6 +25,7 @@ export const tenantContract = {
 	caches: cachesContract,
 	keys: keysContract,
 	sessions: sessionsContract,
+	accessKeys: accessKeysContract,
 	reuseViews: reuseViewsContract,
 	oidcTrust: oidcTrustContract,
 	stats: statsContract,

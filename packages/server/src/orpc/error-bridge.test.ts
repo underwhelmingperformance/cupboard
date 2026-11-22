@@ -16,6 +16,9 @@ import {
 	d1QueueOverloadMessage
 } from '../db/transient.test-support.ts';
 import {
+	AccessKeyExpiryPastError,
+	AccessKeyLimitError,
+	AccessKeyRefusedError,
 	CacheAlreadyExistsError,
 	CacheClosedError,
 	CacheNotEmptyError,
@@ -49,6 +52,46 @@ describe('bridgedError', () => {
 			status: StatusCodes.CONFLICT,
 			message: error.message,
 			data: { cache: { kind: 'named', name: 'pr-1' } }
+		});
+	});
+
+	it.each([
+		{
+			name: 'a refusal to the declared forbidden error',
+			error: new AccessKeyRefusedError('expiry-required'),
+			expected: {
+				code: 'ACCESS_KEY_REFUSED',
+				status: StatusCodes.FORBIDDEN,
+				data: { problem: 'expiry-required' }
+			}
+		},
+		{
+			name: 'a limit to the declared conflict',
+			error: new AccessKeyLimitError('tenant', 1000),
+			expected: {
+				code: 'ACCESS_KEY_LIMIT',
+				status: StatusCodes.CONFLICT,
+				data: { limit: 'tenant', maximum: 1000 }
+			}
+		},
+		{
+			name: 'an expiry that has passed to a bad request',
+			error: new AccessKeyExpiryPastError(),
+			expected: {
+				code: 'BAD_REQUEST',
+				status: StatusCodes.BAD_REQUEST,
+				data: undefined
+			}
+		}
+	])('maps an access-key $name', ({ error, expected }) => {
+		const bridged = bridgedError(rootLogger(), error);
+		if (!(bridged instanceof ORPCError)) {
+			throw new TypeError('Expected an oRPC error');
+		}
+		expect(bridged.toJSON()).toStrictEqual({
+			defined: expected.code !== 'BAD_REQUEST',
+			message: error.message,
+			...expected
 		});
 	});
 

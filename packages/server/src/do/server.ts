@@ -9,6 +9,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
+import { accessKeyIdSchema } from '@cupboard/protocol/access-keys';
 import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
 	cacheAvailabilityMaxRequestBytes,
@@ -78,6 +79,7 @@ import { z } from 'zod';
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
+import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { pushIdExpiresAtSeconds } from '../blob/push-id.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
@@ -2696,6 +2698,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
 			refreshSessions: this.refreshSessions,
+			accessKeys: this.context.accessKeys,
+			accessKeyGrants: (id) => {
+				const parsed = accessKeyIdSchema.safeParse(id);
+
+				return Promise.resolve(
+					parsed.success
+						? this.context.accessKeys.grantsOf(parsed.data)
+						: undefined
+				);
+			},
+			accessIdentityKeys: () => ({
+				signingKey: pushIdSigningKey(this.context.env),
+				tenant: this.context.requireTenant()
+			}),
 			retention: this.retention,
 			legacyRetention: this.legacyRetention,
 			reuseViews: this.reuseViews,

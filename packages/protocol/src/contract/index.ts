@@ -1,5 +1,7 @@
 export {
+	type AccessKeyLocation,
 	type AuthzMeta,
+	type DerivationSpec,
 	type ResourceLocation,
 	type ResourceSpec,
 	type WorkBound,
