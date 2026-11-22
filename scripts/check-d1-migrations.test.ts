@@ -119,7 +119,8 @@ describe('checkD1Migrations', () => {
 				'control-subject-nonces',
 				'control-database-split',
 				'attestation-digest-index',
-				'backfill-purge-pace'
+				'backfill-purge-pace',
+				'static-read-credential-retirement'
 			]
 		});
 	});
@@ -143,7 +144,8 @@ describe('checkD1Migrations', () => {
 				'0032_attestation_ref_path_index.sql',
 				'0036_path_read_authority_contract.sql',
 				'0042_control_database_contract.sql',
-				'0043_attestation_ref_digest_index.sql'
+				'0043_attestation_ref_digest_index.sql',
+				'0045_static_read_credential_retirement.sql'
 			],
 			ahead: [
 				'local-step-attempts',
@@ -155,7 +157,8 @@ describe('checkD1Migrations', () => {
 				'control-subject-nonces',
 				'control-database-split',
 				'attestation-digest-index',
-				'backfill-purge-pace'
+				'backfill-purge-pace',
+				'static-read-credential-retirement'
 			]
 		});
 	});

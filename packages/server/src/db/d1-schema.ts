@@ -472,10 +472,10 @@ export const tenant = sqliteTable(
 		// it reached for this tenant. Nothing in this build reads or writes it.
 		cacheCatalogueVersion: integer('cache_catalogue_version'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// These columns hold the tenant's fallback read verifier: the Basic-auth
-		// user, salt, and password verifier. A cache-specific verifier takes
-		// precedence over them. An incomplete verifier rejects every read; the
-		// plaintext password is never stored.
+		// The retired static read verifier. No runtime service reads or writes
+		// these columns, and migration 0045 clears them. They remain so a
+		// restored preceding Worker can still select them; a later release drops
+		// them.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
@@ -505,12 +505,9 @@ export const tenant = sqliteTable(
 	]
 );
 
-// One cache's own read verifier, keyed by the cache's identity. Private reads
-// use this verifier before the tenant's fallback credential. Deleting
-// a cache deletes its row, so a cache created later under the same name has no
-// verifier of its own, and its readers authenticate with the tenant credential
-// until an operator sets one. Finalising an offboarded tenant deletes all of its
-// cache-verifier rows.
+// The retired static read verifiers of individual caches. No runtime service
+// reads or writes this table, and migration 0045 empties it. It remains so a
+// restored preceding Worker can still query it; a later release drops it.
 export const tenantCacheReadCredential = sqliteTable(
 	'tenant_cache_read_credential',
 	{

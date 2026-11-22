@@ -836,3 +836,74 @@ describe('cache credential lifecycle', () => {
 		]);
 	});
 });
+
+describe('static read credential retirement', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		// Migration 0042 refuses to run until the control tables have been copied
+		// to CONTROL_DB. The later migrations do not touch the tables that 0045
+		// clears.
+		applyMigrations(database, '0041_control_database_split.sql');
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	function insertTenantWithCredential(id: string): void {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant (
+						id, status, owner_issuer, owner_subject, owner_audience,
+						config_version, created_at, read_user, read_password_hash,
+						read_password_salt
+					) VALUES (
+						?, 'active', 'issuer', 'subject', 'audience', 1,
+						'2026-01-01T00:00:00.000Z', 'reader', 'hash', 'salt'
+					)
+				`
+			)
+			.run(id);
+		database
+			.prepare(
+				`
+					INSERT INTO tenant_cache_read_credential (
+						tenant, cache_kind, cache_name, read_user, read_password_hash,
+						read_password_salt, created_at
+					) VALUES (
+						?, 'named', 'builds', 'reader', 'hash', 'salt',
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(id);
+	}
+
+	it('clears every static read credential and keeps the tenants', () => {
+		insertTenantWithCredential('alice');
+		insertTenantWithCredential('bob');
+
+		applyMigration(database, '0045_static_read_credential_retirement.sql');
+
+		expect({
+			tenants: database
+				.prepare(
+					'SELECT id, status, read_user IS NULL AND read_password_hash IS NULL AND read_password_salt IS NULL AS cleared FROM tenant ORDER BY id'
+				)
+				.all()
+				.map((row) => ({ ...row })),
+			cacheCredentials: database
+				.prepare('SELECT tenant FROM tenant_cache_read_credential')
+				.all()
+		}).toStrictEqual({
+			tenants: [
+				{ id: 'alice', status: 'active', cleared: 1 },
+				{ id: 'bob', status: 'active', cleared: 1 }
+			],
+			cacheCredentials: []
+		});
+	});
+});
