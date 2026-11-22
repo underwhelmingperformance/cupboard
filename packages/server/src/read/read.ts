@@ -15,6 +15,10 @@ import { alias } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 
 import {
+	type PresentedCredential,
+	presentedCredential
+} from '../auth/credential.ts';
+import {
 	isNarInfoObjectOfCommit,
 	type NarInfoReferenceVersion,
 	recordedNarInfoMetadata
@@ -62,7 +66,6 @@ import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 
 import {
 	isReadAuthorised,
-	readAccessToken,
 	type ReadVerifier,
 	unauthorisedResponse
 } from './read-auth.ts';
@@ -94,11 +97,24 @@ export interface CacheReadAuthentication {
 		token: string,
 		cache: CacheScope
 	) => Promise<boolean>;
+	readonly isKeyAuthorised: (
+		secret: string,
+		cache: CacheScope
+	) => Promise<boolean>;
 }
 
 export interface ViewReadAuthentication {
 	readonly verifier: ReadVerifier | undefined;
 	readonly isTokenAuthorised: (token: string) => Promise<boolean>;
+	readonly isKeyAuthorised: (secret: string) => Promise<boolean>;
+}
+
+/**
+A key verifier for the read paths that do not verify access keys yet. It
+refuses every key.
+*/
+export function isKeyAuthorisedWithoutVerifier(): Promise<boolean> {
+	return Promise.resolve(false);
 }
 
 /**
@@ -125,9 +141,12 @@ export async function guardScopedRead(
 	return authenticateRead(
 		request,
 		authentication.cacheVerifier ?? entry.readVerifier,
-		(token) =>
+		(credential) =>
 			boundedSubrequest(
-				() => authentication.isTokenAuthorised(token, scope.scope),
+				() =>
+					credential.kind === 'access-token'
+						? authentication.isTokenAuthorised(credential.token, scope.scope)
+						: authentication.isKeyAuthorised(credential.secret, scope.scope),
 				'tenant.authoriseCacheContentRead',
 				unboundedCapMs
 			)
@@ -146,22 +165,22 @@ export function guardPrivateViewRead(
 	request: Request,
 	authentication: ViewReadAuthentication
 ): Promise<Response | undefined> {
-	return authenticateRead(
-		request,
-		authentication.verifier,
-		authentication.isTokenAuthorised
+	return authenticateRead(request, authentication.verifier, (credential) =>
+		credential.kind === 'access-token'
+			? authentication.isTokenAuthorised(credential.token)
+			: authentication.isKeyAuthorised(credential.secret)
 	);
 }
 
 async function authenticateRead(
 	request: Request,
 	verifier: ReadVerifier | undefined,
-	isTokenAuthorised: (token: string) => Promise<boolean>
+	isCredentialAuthorised: (credential: PresentedCredential) => Promise<boolean>
 ): Promise<Response | undefined> {
-	const token = readAccessToken(request);
+	const credential = presentedCredential(request);
 
-	if (token !== undefined) {
-		return (await isTokenAuthorised(token))
+	if (credential !== undefined) {
+		return (await isCredentialAuthorised(credential))
 			? undefined
 			: unauthorisedResponse();
 	}

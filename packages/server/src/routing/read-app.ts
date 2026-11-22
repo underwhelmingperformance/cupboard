@@ -22,6 +22,7 @@ import { upstreamTraceAttributes } from '../observability/trace-context.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
 	guardScopedRead,
+	isKeyAuthorisedWithoutVerifier,
 	narAuthorityForScope,
 	serveNar,
 	serveNarInfo
@@ -296,7 +297,8 @@ function guardRead(
 							token,
 							cache,
 							context.get('isCacheDeleted')
-						)
+						),
+					isKeyAuthorised: isKeyAuthorisedWithoutVerifier
 				}
 			),
 		'read.authentication'

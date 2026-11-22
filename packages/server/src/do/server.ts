@@ -182,6 +182,7 @@ import {
 } from '../read/metadata-page.ts';
 import {
 	guardPrivateViewRead,
+	isKeyAuthorisedWithoutVerifier,
 	missingStorePathHashes,
 	narAuthorityForView,
 	serveNar
@@ -1283,7 +1284,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			isTokenAuthorised: (token) =>
 				this.isReadTokenAuthorised(token, 'view:content-read', {
 					view: view.name
-				})
+				}),
+			isKeyAuthorised: isKeyAuthorisedWithoutVerifier
 		});
 	}
 
