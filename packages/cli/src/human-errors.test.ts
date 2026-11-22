@@ -368,11 +368,7 @@ describe('human error presentation', () => {
 			)
 		},
 		{
-			error: new TenantCreateIncompleteError(
-				tenantIdSchema.parse('acme'),
-				3,
-				true
-			)
+			error: new TenantCreateIncompleteError(tenantIdSchema.parse('acme'), 3)
 		}
 	])('renders $error.name with its own operator text', ({ error }) => {
 		expect(formatHumanError(error, { action: 'create tenant', target })).toBe(

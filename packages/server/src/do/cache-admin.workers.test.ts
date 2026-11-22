@@ -26,7 +26,6 @@ import {
 	type LocalStep
 } from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { tenantReadCredentialSchema } from '@cupboard/protocol/tenants';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq, isNull, sql } from 'drizzle-orm';
@@ -35,7 +34,6 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -54,6 +52,7 @@ import {
 	defaultCache,
 	driveToCompletion,
 	expectSingleUploadDecision,
+	failNextCacheLifecycleUpdate,
 	issueServerSignedToken,
 	migrateThrough,
 	migrateThroughConvertedCatalogue,
@@ -1290,9 +1289,7 @@ describe('cache registry admin', () => {
 		const init = await bootstrap();
 		await putCache(init.token, 'builds', 30, 'private');
 		const before = await cacheVersions();
-		const batch = vi
-			.spyOn(env.CUPBOARD_DB, 'batch')
-			.mockRejectedValueOnce(new Error('D1 unavailable'));
+		const restore = failNextCacheLifecycleUpdate(false);
 
 		let failed: Response;
 		try {
@@ -1300,7 +1297,7 @@ describe('cache registry admin', () => {
 				method: 'DELETE'
 			});
 		} finally {
-			batch.mockRestore();
+			restore();
 		}
 
 		expect({
@@ -1314,29 +1311,11 @@ describe('cache registry admin', () => {
 		});
 	});
 
-	it('finishes a committed revocation after its D1 response is lost without deleting a new credential', async () => {
+	it('finishes a committed revocation after its D1 response is lost', async () => {
 		await useTestServer('cache-admin-lost-revocation-response');
 		const init = await bootstrap();
 		await putCache(init.token, 'builds', 30, 'private');
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const credential = tenantReadCredentialSchema.parse({
-			user: 'reader',
-			password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-		});
-		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
-		await setCacheReadCredential(
-			database,
-			fixtureTenant,
-			buildsCache,
-			credential,
-			now
-		);
-		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-		const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
-		batch.mockImplementationOnce(async (statements) => {
-			await originalBatch(statements);
-			throw new Error('D1 response lost');
-		});
+		const restore = failNextCacheLifecycleUpdate(true);
 
 		let failed: Response;
 		try {
@@ -1344,36 +1323,20 @@ describe('cache registry admin', () => {
 				method: 'DELETE'
 			});
 		} finally {
-			batch.mockRestore();
+			restore();
 		}
 
 		const afterLostResponse = await cacheVersions();
-		await setCacheReadCredential(
-			database,
-			fixtureTenant,
-			buildsCache,
-			credential,
-			now
-		);
-		const replacement = await database
-			.select()
-			.from(d1Schema.tenantCacheReadCredential)
-			.get();
 		const retried = await authorisedFetch('/caches/builds', init.token, {
 			method: 'DELETE'
 		});
 		const afterRetry = await cacheVersions();
-		const retained = await database
-			.select()
-			.from(d1Schema.tenantCacheReadCredential)
-			.get();
 
 		expect({
 			failed: failed.status,
 			afterLostResponse,
 			retried: retried.status,
-			afterRetry,
-			retained
+			afterRetry
 		}).toStrictEqual({
 			failed: StatusCodes.INTERNAL_SERVER_ERROR,
 			afterLostResponse: {
@@ -1384,8 +1347,7 @@ describe('cache registry admin', () => {
 			afterRetry: {
 				local: undefined,
 				published: { generation: 2, readRevision: 2 }
-			},
-			retained: replacement
+			}
 		});
 	});
 

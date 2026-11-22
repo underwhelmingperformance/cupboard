@@ -18,8 +18,8 @@ export type PresentedCredential =
 Reads the credential from `Authorization: Bearer`, or from the password of
 `Authorization: Basic`, whose username is ignored. A Basic password is a
 credential only when it is an access key or starts with the read-token
-prefix; any other password is a static read credential, which its own
-verifier checks.
+prefix. For any other password the function returns `undefined`, and the
+request is anonymous.
 */
 export function presentedCredential(
 	request: Request

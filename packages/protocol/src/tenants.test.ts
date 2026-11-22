@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type ZodType } from 'zod';
 
-import {
-	tenantCreateBodySchema,
-	tenantReadCredentialSchema
-} from './tenants.ts';
+import { tenantCreateBodySchema } from './tenants.ts';
 
 /**
 The fields a rejection is about. Asserting only that a parse failed lets a
@@ -21,7 +18,7 @@ function rejectedPaths(schema: ZodType, value: unknown): string[] {
 
 // A create body that differs from the schema only in its owner issuer, so a
 // rejection can be attributed to that field alone.
-function bodyWith(ownerIssuer: string): unknown {
+function tenantCreateBody(ownerIssuer: string): Record<string, unknown> {
 	return {
 		id: 'acme',
 		defaultCacheAccess: 'public',
@@ -44,7 +41,7 @@ describe('tenantCreateBodySchema', () => {
 		'https://:@idp.example.test'
 	])('rejects an invalid owner issuer: %s', (ownerIssuer) => {
 		expect(
-			rejectedPaths(tenantCreateBodySchema, bodyWith(ownerIssuer))
+			rejectedPaths(tenantCreateBodySchema, tenantCreateBody(ownerIssuer))
 		).toStrictEqual(['ownerIssuer']);
 	});
 
@@ -55,63 +52,20 @@ describe('tenantCreateBodySchema', () => {
 		expect(
 			rejectedPaths(
 				tenantCreateBodySchema,
-				bodyWith('https://idp.example.test')
+				tenantCreateBody('https://idp.example.test')
 			)
 		).toStrictEqual([]);
 	});
-});
 
-// 32 random bytes in base64url, the only shape a read password may take.
-const generatedPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
-
-describe('tenantReadCredentialSchema', () => {
-	it('accepts a generated password', () => {
-		const credential = { user: 'alice', password: generatedPassword };
-
-		expect(tenantReadCredentialSchema.parse(credential)).toStrictEqual(
-			credential
-		);
-	});
-
-	// The stored verifier is a salted digest, so a password carrying less than
-	// the full 256 bits must never reach the control plane.
-	it.each([
-		{ name: 'a short password', password: 'short' },
-		{
-			name: 'a memorable password of a plausible length',
-			password: 'correct-horse-battery-staple-and-more'
-		},
-		{
-			name: 'a password one character short',
-			password: generatedPassword.slice(1)
-		},
-		{
-			name: 'a password with a space',
-			password: `${generatedPassword.slice(1)} `
-		},
-		{
-			name: 'a password with base64 padding',
-			password: `${generatedPassword.slice(1)}=`
-		}
-	])('rejects $name', ({ password }) => {
-		expect(
-			rejectedPaths(tenantReadCredentialSchema, {
+	it('rejects the removed `read` field', () => {
+		const body = {
+			...tenantCreateBody('https://idp.example.test'),
+			read: {
 				user: 'alice',
-				password
-			})
-		).toStrictEqual(['password']);
-	});
+				password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+			}
+		};
 
-	it.each([
-		{ name: 'a colon', user: 'ali:ce' },
-		{ name: 'a leading colon', user: ':alice' },
-		{ name: 'nothing', user: '' }
-	])('rejects a user with $name', ({ user }) => {
-		expect(
-			rejectedPaths(tenantReadCredentialSchema, {
-				user,
-				password: generatedPassword
-			})
-		).toStrictEqual(['user']);
+		expect(rejectedPaths(tenantCreateBodySchema, body)).toStrictEqual(['']);
 	});
 });

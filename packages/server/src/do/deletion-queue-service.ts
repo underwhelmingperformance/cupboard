@@ -1582,25 +1582,11 @@ export class DeletionQueueService {
 	Cache key, so a response the deleted cache produced is not served to a
 	reader of the next cache of this name.
 	*/
-	async revokeCacheGenerationAndClearCredential(
-		cache: ResolvedCache
-	): Promise<void> {
+	async revokeCacheGeneration(cache: ResolvedCache): Promise<void> {
 		await writeCacheLifecycle(this.context.d1, async (table) => {
 			const tenant = this.context.requireTenant();
 			const now = isoTimestamp(new Date());
 			const { scope, access } = cache;
-			const credential = and(
-				eq(d1Schema.tenantCacheReadCredential.tenant, tenant),
-				cacheIdentityCondition(
-					d1Schema.tenantCacheReadCredential.cacheKind,
-					d1Schema.tenantCacheReadCredential.cacheName,
-					scope
-				),
-				sql`changes() > 0`
-			);
-			const credentialDeleteStatement = this.context.d1
-				.delete(d1Schema.tenantCacheReadCredential)
-				.where(credential);
 			const update = this.context.d1
 				.update(table)
 				.set({
@@ -1617,10 +1603,7 @@ export class DeletionQueueService {
 						isNull(table.deletedAt)
 					)
 				);
-			const [revoked] = await this.context.d1.batch([
-				update,
-				credentialDeleteStatement
-			]);
+			const revoked = await update.run();
 
 			if (revoked.meta.changes > 0) {
 				return;
@@ -1650,10 +1633,7 @@ export class DeletionQueueService {
 					updatedAt: now
 				})
 				.onConflictDoNothing();
-			const [inserted] = await this.context.d1.batch([
-				insert,
-				credentialDeleteStatement
-			]);
+			const inserted = await insert.run();
 			if (inserted.meta.changes === 0) {
 				throw new CacheNotFoundError(scope);
 			}

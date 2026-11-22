@@ -4,7 +4,7 @@ import {
 	hexToBytes
 } from '@cupboard/nix-store/encoding';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
-import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
+import { grantsWithoutRetiredOperationsSchema } from '@cupboard/protocol/grants';
 import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { z } from 'zod';
@@ -31,7 +31,9 @@ const authorityClaimsShape = {
 	generation: z.number().int().nonnegative(),
 	expiresAt: z.iso.datetime().pipe(isoTimestampSchema),
 	identity: oidcPolicyIdentitySchema,
-	grants: authorizationDetailsSchema.min(1)
+	grants: grantsWithoutRetiredOperationsSchema.refine(
+		(grants) => grants.length > 0
+	)
 };
 
 const tenantAuthoritySchema = z.strictObject({

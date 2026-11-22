@@ -7,6 +7,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import {
 	readTokenBasicUser,
 	readTokenPasswordPrefix
@@ -15,11 +16,6 @@ import {
 	reuseViewNameSchema,
 	type ReuseViewSelectorInput
 } from '@cupboard/protocol/reuse-views';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import {
-	type TenantReadCredential,
-	tenantReadCredentialSchema
-} from '@cupboard/protocol/tenants';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -27,18 +23,21 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedWorkerFetch,
+	createTestAccessKey,
+	fixtureReaderAuthorization,
+	fixtureReaderSecret,
 	fixtureWorkerServer,
 	handlerFetch,
 	initialiseViaWorker,
 	issueWorkerSignedToken,
 	namedCache,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	readFetch,
 	recordTransition,
@@ -51,16 +50,9 @@ const tenant = tenantIdSchema.parse(fixtureTenant);
 const builds = cacheNameSchema.parse('builds');
 const privateBuilds = namedCache(builds);
 const publicBuilds = namedCache('public-builds');
-const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
-const tenantReader = { user: 'alice', password: 'secret' };
-
-// One private cache's own credential. Generated passwords are exactly 43
-// base64url characters, matching the control-plane schema.
-const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
-	user: 'reader',
-	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-});
+// The fixture reader key, which can read every cache and reuse view.
+const reader = { user: 'cupboard', password: fixtureReaderSecret };
 
 const privateViewName = reuseViewNameSchema.parse('private');
 const privateViewPath = `/reuse/${privateViewName}`;
@@ -87,12 +79,13 @@ function basic(credential: {
 	};
 }
 
+function keyBasic(secret: string): RequestInit {
+	return basic({ user: 'cupboard', password: secret });
+}
+
 function withCredential(init: RequestInit = {}): RequestInit {
 	const headers = new Headers(init.headers);
-	headers.set(
-		'authorization',
-		`Basic ${btoa(`${tenantReader.user}:${tenantReader.password}`)}`
-	);
+	headers.set('authorization', fixtureReaderAuthorization);
 
 	return { ...init, headers };
 }
@@ -146,13 +139,14 @@ async function forgetViews(): Promise<void> {
 
 /**
 Commits one store path to a private cache, defines a private view over every
-private cache, and gives the tenant a read credential. The push authenticates
-with its bearer token, so it runs before the credential exists.
+private cache, and stores the fixture reader key. The push authenticates with
+its bearer token, so it runs before the key exists.
 */
 async function publishThroughPrivateView(): Promise<string> {
 	const storePathHash = await commitTo(privateBuilds, 'private');
 	await setView([{ kind: 'all' }], privateViewName, 'private');
-	await provisionFixtureTenant({ read: tenantReader });
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 
 	return storePathHash;
 }
@@ -163,7 +157,7 @@ describe('private reuse-view access', () => {
 		await forgetViews();
 	});
 
-	it('reads an exact private view without a stored read credential', async () => {
+	it('reads an exact private view with a read token', async () => {
 		const storePathHash = await commitTo(privateBuilds, 'private');
 		await setView([{ kind: 'all' }], privateViewName, 'private');
 		await setView([{ kind: 'all' }], 'other', 'private');
@@ -219,11 +213,11 @@ describe('private reuse-view access', () => {
 		});
 	});
 
-	it('accepts the tenant credential on every content route and marks every response no-store', async () => {
+	it('accepts a tenant-wide key on every content route and marks every response no-store', async () => {
 		const storePathHash = await publishThroughPrivateView();
 		const narInfoResponse = await readFetch(
 			`${privateViewPath}/${storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic(reader)
 		);
 		const narUrl = NarInfo.parse(await narInfoResponse.text()).url;
 		const routes: readonly {
@@ -289,7 +283,7 @@ describe('private reuse-view access', () => {
 			await publishThroughPrivateView();
 
 			const anonymous = await readFetch(path, {});
-			const authenticated = await readFetch(path, basic(tenantReader));
+			const authenticated = await readFetch(path, basic(reader));
 
 			expect({
 				anonymous: anonymous.status,
@@ -309,7 +303,7 @@ describe('private reuse-view access', () => {
 
 		const refused = await readFetch(path, { method: 'HEAD' });
 		const served = await readFetch(path, withCredential({ method: 'HEAD' }));
-		const full = await readFetch(path, basic(tenantReader));
+		const full = await readFetch(path, basic(reader));
 		const fullBody = await full.text();
 
 		expect({
@@ -329,43 +323,68 @@ describe('private reuse-view access', () => {
 		});
 	});
 
-	it("opens a view to the tenant credential alone, whatever a source cache's own credential is", async () => {
+	it('opens a view to a key for the view and a source cache to a key for the cache', async () => {
 		const storePathHash = await publishThroughPrivateView();
-		await setCacheReadCredential(
-			database(),
-			tenant,
-			namedCache(builds),
-			cacheReader,
-			now
+		const viewKey = await createTestAccessKey(
+			fixtureWorkerServer(),
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_view',
+					view: privateViewName,
+					actions: ['view:content-read']
+				}
+			])
+		);
+		const cacheKey = await createTestAccessKey(
+			fixtureWorkerServer(),
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					cache: namedCache(builds),
+					actions: ['cache:content-read']
+				}
+			])
 		);
 		const viewPath = `${privateViewPath}/${storePathHash}.narinfo`;
 		const cachePath = `/cache/${builds}/${storePathHash}.narinfo`;
 
-		const viewWithTenant = await readFetch(viewPath, basic(tenantReader));
-		const viewWithCache = await readFetch(viewPath, basic(cacheReader));
-		const cacheWithTenant = await readFetch(cachePath, basic(tenantReader));
-		const cacheWithCache = await readFetch(cachePath, basic(cacheReader));
+		const viewWithViewKey = await readFetch(viewPath, keyBasic(viewKey.secret));
+		const viewWithCacheKey = await readFetch(
+			viewPath,
+			keyBasic(cacheKey.secret)
+		);
+		const cacheWithViewKey = await readFetch(
+			cachePath,
+			keyBasic(viewKey.secret)
+		);
+		const cacheWithCacheKey = await readFetch(
+			cachePath,
+			keyBasic(cacheKey.secret)
+		);
 
 		expect({
-			viewWithTenant: viewWithTenant.status,
-			viewWithCache: viewWithCache.status,
-			cacheWithTenant: cacheWithTenant.status,
-			cacheWithCache: cacheWithCache.status
+			viewWithViewKey: viewWithViewKey.status,
+			viewWithCacheKey: viewWithCacheKey.status,
+			cacheWithViewKey: cacheWithViewKey.status,
+			cacheWithCacheKey: cacheWithCacheKey.status
 		}).toStrictEqual({
-			viewWithTenant: StatusCodes.OK,
-			viewWithCache: StatusCodes.UNAUTHORIZED,
-			cacheWithTenant: StatusCodes.UNAUTHORIZED,
-			cacheWithCache: StatusCodes.OK
+			viewWithViewKey: StatusCodes.OK,
+			viewWithCacheKey: StatusCodes.UNAUTHORIZED,
+			cacheWithViewKey: StatusCodes.UNAUTHORIZED,
+			cacheWithCacheKey: StatusCodes.OK
 		});
 	});
 
-	it('refuses a private view when the tenant has no read credential', async () => {
+	it('refuses a private view to a key that the tenant does not have', async () => {
 		const storePathHash = await commitTo(privateBuilds, 'private');
 		await setView([{ kind: 'all' }], privateViewName, 'private');
 
 		const response = await readFetch(
 			`${privateViewPath}/${storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic({
+				user: 'cupboard',
+				password: `cupboard_ak_00000000-0000-4000-8000-0000000000ee_${'e'.repeat(64)}`
+			})
 		);
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
@@ -409,15 +428,16 @@ describe('private reuse-view access', () => {
 			const privateHash = await commitTo(privateBuilds, 'private');
 			const publicHash = await commitTo(publicBuilds, 'public');
 			await setView(selectors, privateViewName, 'private');
-			await provisionFixtureTenant({ read: tenantReader });
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 
 			const privateRead = await readFetch(
 				`${privateViewPath}/${privateHash}.narinfo`,
-				basic(tenantReader)
+				basic(reader)
 			);
 			const publicRead = await readFetch(
 				`${privateViewPath}/${publicHash}.narinfo`,
-				basic(tenantReader)
+				basic(reader)
 			);
 
 			expect({
@@ -503,7 +523,7 @@ describe('private reuse-view access', () => {
 		const privateView = await readFetch('/reuse/private/nix-cache-info');
 		const privateAuthenticated = await readFetch(
 			'/reuse/private/nix-cache-info',
-			basic(tenantReader)
+			basic(reader)
 		);
 		const publicView = await readFetch('/reuse/public/nix-cache-info');
 		expect({
@@ -525,19 +545,17 @@ describe('private reuse-view access', () => {
 			{ storePathHash, access: 'private' }
 		);
 		await setView([{ kind: 'all' }], privateViewName, 'private');
-		await provisionFixtureTenant({ read: tenantReader });
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const narInfoPath = `/t/${tenant}${privateViewPath}/${storePathHash}.narinfo`;
 		const narHash = nixSha256HashSchema.parse(committed.narHash);
 		const narUrl = narObjectKey(narHash, await blobIncarnation(narHash));
 
-		const narInfoResponse = await handlerFetch(
-			narInfoPath,
-			basic(tenantReader)
-		);
+		const narInfoResponse = await handlerFetch(narInfoPath, basic(reader));
 		const narInfo = NarInfo.parse(await narInfoResponse.text());
 		const narPath = new URL(narInfo.url, `https://cupboard.test${narInfoPath}`)
 			.pathname;
-		const served = await handlerFetch(narPath, basic(tenantReader));
+		const served = await handlerFetch(narPath, basic(reader));
 		const narBytes = await served.arrayBuffer();
 		const refused = await handlerFetch(narPath);
 		const publicRoute = await handlerFetch(`/t/${tenant}/${narUrl}`);
@@ -566,17 +584,15 @@ describe('private reuse-view access', () => {
 		const defaultCache: CacheScope = { kind: 'default' };
 		const storePathHash = await commitTo(defaultCache, 'private');
 		await setView([{ kind: 'default' }], privateViewName, 'private');
-		await provisionFixtureTenant({
-			defaultCacheAccess: 'private',
-			read: tenantReader
-		});
+		await provisionFixtureTenant({ defaultCacheAccess: 'private' });
+		await provisionFixtureReader();
 
 		const anonymous = await readFetch(
 			`${privateViewPath}/${storePathHash}.narinfo`
 		);
 		const authenticated = await readFetch(
 			`${privateViewPath}/${storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic(reader)
 		);
 
 		expect({
@@ -607,7 +623,7 @@ describe('private reuse-view access', () => {
 		);
 		const served = await readFetch(
 			`${privateViewPath}/${storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic(reader)
 		);
 
 		expect({ ...stored, served: served.status }).toStrictEqual({
@@ -629,7 +645,7 @@ describe('private reuse-view access', () => {
 		);
 		const privateServed = await readFetch(
 			`${privateViewPath}/${privateHash}.narinfo`,
-			basic(tenantReader)
+			basic(reader)
 		);
 
 		expect({

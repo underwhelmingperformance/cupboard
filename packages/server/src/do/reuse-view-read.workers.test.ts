@@ -9,9 +9,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	adminGrants,
 	authorisedWorkerFetch,
+	fixtureReaderAuthorization,
 	handlerFetch,
 	initialiseViaWorker,
 	issueTokenForTenant,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	provisionNamedTenant,
 	readFetch,
@@ -20,13 +22,12 @@ import {
 } from '../test-support.ts';
 
 function authorised(): RequestInit {
-	return { headers: { authorization: `Basic ${btoa('alice:secret')}` } };
+	return { headers: { authorization: fixtureReaderAuthorization } };
 }
 
 async function provisionReader(): Promise<void> {
-	await provisionFixtureTenant({
-		read: { user: 'alice', password: 'secret' }
-	});
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 }
 
 async function setView(

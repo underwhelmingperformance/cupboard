@@ -44,10 +44,12 @@ import {
 	bootstrap,
 	currentOrigin,
 	defaultCache,
+	fixtureReaderAuthorization,
 	handlerFetch,
 	initialiseViaWorker,
 	narBytes,
 	nixSha256Hash,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPath,
 	readFetch,
@@ -61,8 +63,6 @@ import { controlWorker } from './handler.ts';
 import { cachedTenantReadFetch } from './tenant-read-handler.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
-const reader = { user: 'alice', password: 'secret' };
-const credentials = `Basic ${btoa(`${reader.user}:${reader.password}`)}`;
 const unpublishedHash = '0'.repeat(32);
 
 // The control Worker gives each request an ID, which differs on every request.
@@ -179,11 +179,16 @@ interface ForwardedRequest {
 
 const jsonPost = (body: unknown): RequestInit => ({
 	method: 'POST',
-	headers: { 'content-type': 'application/json', authorization: credentials },
+	headers: {
+		'content-type': 'application/json',
+		authorization: fixtureReaderAuthorization
+	},
 	body: JSON.stringify(body)
 });
 
-const authorisedGet: RequestInit = { headers: { authorization: credentials } };
+const authorisedGet: RequestInit = {
+	headers: { authorization: fixtureReaderAuthorization }
+};
 
 const nixCacheInfo: ForwardedRequest = {
 	name: 'nix-cache-info',
@@ -459,10 +464,8 @@ describe('a request that the control Worker forwards to the tenant object', () =
 		await resetTestServer();
 		await recordTransition('cache-identity', 'complete');
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: reader,
-			defaultCacheAccess: 'private'
-		});
+		await provisionFixtureTenant({ defaultCacheAccess: 'private' });
+		await provisionFixtureReader();
 	});
 
 	it.each(reads)(

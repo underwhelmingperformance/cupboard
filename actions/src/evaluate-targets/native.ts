@@ -104,7 +104,7 @@ export async function nativeEvaluationMain(
 }
 
 /**
-Evaluates every target within the worker's inherited read credential session.
+Evaluates every target within the worker's inherited read-token session.
 */
 export async function nativeEvaluationWorker(
 	environment: Environment,

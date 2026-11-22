@@ -214,7 +214,7 @@ export function requireSourceUrl(source: URL): void {
 	if (source.username !== '' || source.password !== '') {
 		throw new CachedClosureSourceInvalidError(
 			source,
-			'pass read credentials separately from the URL'
+			'pass the credential separately from the URL'
 		);
 	}
 

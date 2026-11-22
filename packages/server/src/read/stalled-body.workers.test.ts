@@ -34,8 +34,10 @@ import {
 	bootstrap,
 	currentOrigin,
 	defaultCache,
+	fixtureReaderAuthorization,
 	namedCache,
 	narBytes,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPath,
 	resetTestServer,
@@ -44,8 +46,6 @@ import {
 import worker from '../worker.ts';
 
 const privateCache = namedCache('builds');
-const reader = { user: 'alice', password: 'secret' };
-const credentials = `Basic ${btoa(`${reader.user}:${reader.password}`)}`;
 
 // The stalled body is released, in real time, well after every deadline in
 // these tests, so only a deadline can end it first.
@@ -109,7 +109,7 @@ function privateRead(
 			`/t/${fixtureTenant}/cache/builds/${storePathHash}.narinfo`,
 			currentOrigin()
 		),
-		{ method, headers: { authorization: credentials } }
+		{ method, headers: { authorization: fixtureReaderAuthorization } }
 	);
 
 	return worker.fetch(request, Object.assign({}, env, { BLOBS: blobs }), ctx);
@@ -140,7 +140,8 @@ async function publishPath(): Promise<StorePathHash> {
 		await pushPath(token, metadata, cache);
 	}
 
-	await provisionFixtureTenant({ read: reader });
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 
 	return storePathHashSchema.parse(metadata.storePathHash);
 }

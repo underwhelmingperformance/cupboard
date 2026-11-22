@@ -21,6 +21,7 @@ import {
 	bootstrap,
 	currentServer,
 	drainAttestationInheritance,
+	failNextCacheLifecycleUpdate,
 	migrateThroughConvertedCatalogue,
 	namedCache,
 	narBytes,
@@ -1336,12 +1337,7 @@ describe('managed cache retirement', () => {
 		await stageRetirementClaim();
 		await stageRetirementClaim(secondManagedCache);
 
-		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-		const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
-		batch.mockImplementationOnce(async (statements) => {
-			await originalBatch(statements);
-			throw new Error('D1 response lost after cache revocation');
-		});
+		const restore = failNextCacheLifecycleUpdate(true);
 		let attempts: string[];
 		try {
 			attempts = await withoutAlarmArming(() =>
@@ -1359,7 +1355,7 @@ describe('managed cache retirement', () => {
 				})
 			);
 		} finally {
-			batch.mockRestore();
+			restore();
 		}
 
 		expect({
@@ -1413,12 +1409,7 @@ describe('managed cache retirement', () => {
 		await makeRetirementDue();
 		await stageRetirementClaim();
 
-		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-		const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
-		batch.mockImplementationOnce(async (statements) => {
-			await originalBatch(statements);
-			throw new Error('D1 response lost after cache revocation');
-		});
+		const restore = failNextCacheLifecycleUpdate(true);
 		let firstAttempt: string;
 		try {
 			firstAttempt = await withoutAlarmArming(() =>
@@ -1432,7 +1423,7 @@ describe('managed cache retirement', () => {
 				})
 			);
 		} finally {
-			batch.mockRestore();
+			restore();
 		}
 
 		const interrupted = {
@@ -1482,10 +1473,7 @@ describe('managed cache retirement', () => {
 		await makeRetirementDue();
 		await stageRetirementClaim();
 
-		const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
-		batch.mockRejectedValueOnce(
-			new Error('D1 revocation failed before commit')
-		);
+		const restore = failNextCacheLifecycleUpdate(false);
 		let firstAttempt: string;
 		try {
 			firstAttempt = await withoutAlarmArming(() =>
@@ -1499,7 +1487,7 @@ describe('managed cache retirement', () => {
 				})
 			);
 		} finally {
-			batch.mockRestore();
+			restore();
 		}
 
 		const disabled = await authorisedFetch('/caches/pr-1/retirement', token, {

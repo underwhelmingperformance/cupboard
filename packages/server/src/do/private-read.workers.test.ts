@@ -5,20 +5,24 @@ import {
 	readTokenBasicUser,
 	readTokenPasswordPrefix
 } from '@cupboard/protocol/read-access';
+import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { sha256Hex } from '../crypto/crypto.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	cacheWriteGrants,
 	createTestAccessKey,
 	currentNarObjectKey,
+	fixtureReaderAuthorization,
 	fixtureWorkerServer,
 	initialiseViaWorker,
 	issueTokenForTenant,
 	issueWorkerSignedToken,
 	namedCache,
 	narBytes,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPathToTenant,
 	putWorkerTestCache,
@@ -28,13 +32,9 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
-const readUser = 'alice';
-const readPassword = 'secret';
-
 async function provisionReader(): Promise<void> {
-	await provisionFixtureTenant({
-		read: { user: readUser, password: readPassword }
-	});
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 }
 
 async function putCache(
@@ -51,9 +51,7 @@ async function makeDefaultPrivate(token: string): Promise<void> {
 }
 
 function authorised(): RequestInit {
-	return {
-		headers: { authorization: `Basic ${btoa(`${readUser}:${readPassword}`)}` }
-	};
+	return { headers: { authorization: fixtureReaderAuthorization } };
 }
 
 function tokenBasic(token: string): RequestInit {
@@ -192,6 +190,27 @@ describe('per-cache private reads', () => {
 			cacheInfoStatus: StatusCodes.OK,
 			cacheInfoControl: 'no-store'
 		});
+	});
+
+	it('refuses a static read password that an earlier release stored', async () => {
+		const token = await initialiseViaWorker();
+		await provisionFixtureTenant();
+		await putCache(token, { kind: 'default' }, 'private');
+		const salt = 'legacy-salt';
+		const verifier = await sha256Hex(
+			`cupboard-read-password-v1\0${salt}\0legacy-password`
+		);
+		await env.CUPBOARD_DB.prepare(
+			'UPDATE tenant SET read_user = ?, read_password_hash = ?, read_password_salt = ? WHERE id = ?'
+		)
+			.bind('alice', verifier, salt, fixtureTenant)
+			.run();
+
+		const response = await readFetch('/nix-cache-info', {
+			headers: { authorization: `Basic ${btoa('alice:legacy-password')}` }
+		});
+
+		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
 
 	it('uses an exact read grant for all private cache routes', async () => {

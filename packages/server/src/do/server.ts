@@ -87,7 +87,6 @@ import {
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { pushIdExpiresAtSeconds } from '../blob/push-id.ts';
-import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
@@ -1276,21 +1275,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	private async guardReuseViewRead(
+	private guardReuseViewRead(
 		request: Request,
 		view: ResolvedReuseView
 	): Promise<Response | undefined> {
 		if (view.access === 'public') {
-			return undefined;
+			return Promise.resolve(undefined);
 		}
 
-		const verifier = await readTenantReadVerifier(
-			this.context.d1,
-			this.context.requireTenant()
-		);
-
 		return guardPrivateViewRead(request, {
-			verifier,
 			isTokenAuthorised: (token) =>
 				this.isCredentialAuthorised(
 					{ kind: 'access-token', token },

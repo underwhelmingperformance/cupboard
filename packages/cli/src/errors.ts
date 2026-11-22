@@ -750,7 +750,7 @@ export class InvalidWorkerUrlBaseError extends CliUsageError {
 
 /**
 A Worker URL that uses plain HTTP to a host other than a loopback address.
-Requests to a cupboard URL can contain tokens and read credentials, which an
+Requests to a cupboard URL can contain tokens and access keys, which an
 on-path observer could read over plain HTTP.
 */
 export class InsecureWorkerUrlError extends CliUsageError {
@@ -979,8 +979,8 @@ export class TenantOffboardingError extends CliError {
 
 /**
 The deployment created the tenant but could not publish its membership, so
-requests to the tenant can be refused. Repeating the identical create request,
-with the same read credential, after `retryAfterSeconds` publishes it.
+requests to the tenant can be refused. Repeating the identical create request
+after `retryAfterSeconds` publishes it.
 */
 export class TenantMembershipUnpublishedError extends CliError {
 	override readonly humanMessage: string;
@@ -1008,11 +1008,7 @@ export class TenantMembershipUnpublishedError extends CliError {
 /**
 `cupboard tenant create` repeated the create while the deployment kept failing
 to publish the tenant's membership, or a request after the first such answer
-failed in another way, which is then the cause. The tenant exists. When the
-create had a generated read credential, the command prints it before it
-throws this error, and `hasPrintedReadCredential` is true. The error never
-contains the password. Running the command again cannot succeed, because a new
-run generates a different password, so the exit code is the generic one.
+failed in another way, which is then the cause. The tenant exists.
 */
 export class TenantCreateIncompleteError extends CliError {
 	override readonly humanMessage: string;
@@ -1020,21 +1016,13 @@ export class TenantCreateIncompleteError extends CliError {
 	constructor(
 		public readonly tenant: TenantId,
 		public readonly attempts: number,
-		public readonly hasPrintedReadCredential: boolean,
 		options?: ErrorOptions
 	) {
 		super(
 			`Tenant ${tenant} exists, but the deployment could not publish its ` +
 				`membership after ${String(attempts)} attempts, so requests to it ` +
 				'can be refused. Run `cupboard deploy` again to publish the ' +
-				'membership of every tenant.' +
-				(hasPrintedReadCredential
-					? ' Do not run `cupboard tenant create` again: it generates a ' +
-						'different read password, which the deployment refuses for the ' +
-						'existing tenant. If you did not save the password from the ' +
-						'"Unconfirmed tenant read credential" output, ' +
-						'`cupboard tenant rotate-credential` replaces it.'
-					: ''),
+				'membership of every tenant.',
 			options
 		);
 		this.name = 'TenantCreateIncompleteError';

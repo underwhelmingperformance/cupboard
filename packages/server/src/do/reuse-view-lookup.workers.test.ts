@@ -34,8 +34,10 @@ import {
 	asOneInvocation,
 	currentNarObjectKey,
 	defaultCache,
+	fixtureReaderAuthorization,
 	fixtureWorkerServer,
 	namedCache,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	readFetch,
 	recordTransition,
@@ -645,20 +647,19 @@ describe('reuse-view narinfo lookup', () => {
 		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
-	it('gates a private view lookup behind the tenant read credential', async () => {
+	it('gates a private view lookup behind an access key', async () => {
 		await recordTransition('cache-identity', 'complete');
 		const path = await committedPath('reuse-private', namedCache('pr-1'), {
 			storePathHash: '9'.repeat(32),
 			access: 'private'
 		});
 		await setView([{ kind: 'named', name: 'pr-1' }], 'reuse', 'private');
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 
 		const denied = await readFetch(lookupPath(path.storePathHash));
 		const served = await readFetch(lookupPath(path.storePathHash), {
-			headers: { authorization: `Basic ${btoa('alice:secret')}` }
+			headers: { authorization: fixtureReaderAuthorization }
 		});
 		const availabilityRequest = {
 			body: JSON.stringify({ storePathHashes: [path.storePathHash] }),
@@ -673,7 +674,7 @@ describe('reuse-view narinfo lookup', () => {
 			...availabilityRequest,
 			headers: {
 				...availabilityRequest.headers,
-				authorization: `Basic ${btoa('alice:secret')}`
+				authorization: fixtureReaderAuthorization
 			}
 		});
 

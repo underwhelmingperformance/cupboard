@@ -283,7 +283,7 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 			return uncachedNotFoundResponse();
 		}
 
-		const { entry, fresh, cache, cacheVerifier, cacheVersion } = admission;
+		const { entry, fresh, cache, cacheVersion } = admission;
 
 		if (
 			isTenantRead(context.req.method, route.rest) &&
@@ -306,10 +306,6 @@ function buildApp(clock: DeadlineClock): Hono<WorkerHonoEnv> {
 		context.set('isCacheDeleted', cache?.isDeleted ?? true);
 		context.set('cacheVersion', cacheVersion);
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
-
-		if (cacheVerifier !== undefined) {
-			context.set('cacheVerifier', cacheVerifier);
-		}
 
 		await next();
 	});

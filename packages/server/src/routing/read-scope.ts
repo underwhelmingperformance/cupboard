@@ -83,28 +83,22 @@ export async function revalidateCacheReadAuthority(
 	if (admission?.entry.status !== 'active') {
 		throw new UnauthenticatedError();
 	}
-	const denied = await guardScopedRead(
-		context.req.raw,
-		admission.entry,
-		scope,
-		{
-			cacheVerifier: admission.cacheVerifier,
-			isTokenAuthorised: (token, cache) =>
-				tenantServer(context.env, tenant).authoriseCacheContentRead(
-					token,
-					cache,
-					admission.cache?.isDeleted ?? true
-				),
-			isKeyAuthorised: (secret, cache) =>
-				isAccessKeyReadAuthorised(
-					context.env,
-					tenant,
-					secret,
-					cache,
-					admission.cache?.isDeleted ?? true
-				)
-		}
-	);
+	const denied = await guardScopedRead(context.req.raw, scope, {
+		isTokenAuthorised: (token, cache) =>
+			tenantServer(context.env, tenant).authoriseCacheContentRead(
+				token,
+				cache,
+				admission.cache?.isDeleted ?? true
+			),
+		isKeyAuthorised: (secret, cache) =>
+			isAccessKeyReadAuthorised(
+				context.env,
+				tenant,
+				secret,
+				cache,
+				admission.cache?.isDeleted ?? true
+			)
+	});
 	if (denied !== undefined) {
 		throw new UnauthenticatedError();
 	}

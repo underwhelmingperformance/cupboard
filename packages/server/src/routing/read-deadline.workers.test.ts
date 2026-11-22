@@ -18,7 +18,9 @@ import {
 import { readRequestBudgetMs } from '../policy/streaming.ts';
 import {
 	defaultCache,
+	fixtureReaderAuthorization,
 	initialiseViaWorker,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	readFetch,
 	recordTransition,
@@ -27,8 +29,6 @@ import {
 
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
-const reader = { user: 'alice', password: 'secret' };
-const credentials = `Basic ${btoa(`${reader.user}:${reader.password}`)}`;
 const sentBytes = 4;
 
 // The control Worker gives each request an ID, which differs on every request.
@@ -93,7 +93,8 @@ const probes: readonly ProbeRoute[] = [
 		refusalStep: 'narinfo-object-read',
 		store: async () => {
 			await initialiseViaWorker();
-			await provisionFixtureTenant({ read: reader });
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const path = await committedPath('stalled-path-info', defaultCache(), {
 				access: 'private'
 			});
@@ -108,7 +109,7 @@ const probes: readonly ProbeRoute[] = [
 					method: 'POST',
 					headers: {
 						'content-type': 'application/json',
-						authorization: credentials
+						authorization: fixtureReaderAuthorization
 					},
 					body: JSON.stringify({ storePaths: [path.storePath] })
 				}
@@ -335,7 +336,7 @@ function nothingToRestore(): void {
 
 const markerStall: AdmissionStall = {
 	wait: 'the KV read of the membership marker',
-	authorization: credentials,
+	authorization: fixtureReaderAuthorization,
 	refusedStep: 'tenant-and-cache-rows',
 	stall: (reached) =>
 		Promise.resolve({
@@ -360,7 +361,7 @@ const tokenCheckStall: AdmissionStall = {
 
 const migrationStall: AdmissionStall = {
 	wait: 'the cache catalogue migration',
-	authorization: credentials,
+	authorization: fixtureReaderAuthorization,
 	refusedStep: 'cache-catalogue-migration',
 	stall: async (reached) => {
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
@@ -380,7 +381,7 @@ const migrationStall: AdmissionStall = {
 const admissionStalls: readonly AdmissionStall[] = [
 	{
 		wait: 'the Cache API read of the membership filter',
-		authorization: credentials,
+		authorization: fixtureReaderAuthorization,
 		stall: (reached) => {
 			const match = vi
 				.spyOn(caches.default, 'match')
@@ -396,7 +397,7 @@ const admissionStalls: readonly AdmissionStall[] = [
 	},
 	{
 		wait: 'the KV read of the membership filter',
-		authorization: credentials,
+		authorization: fixtureReaderAuthorization,
 		refusedStep: 'tenant-and-cache-rows',
 		stall: (reached) => {
 			const match = vi
@@ -679,10 +680,8 @@ describe('a read whose admission stalls', () => {
 		await resetTestServer();
 		await recordTransition('cache-identity', 'complete');
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: reader,
-			defaultCacheAccess: 'private'
-		});
+		await provisionFixtureTenant({ defaultCacheAccess: 'private' });
+		await provisionFixtureReader();
 	});
 	afterEach(() => {
 		vi.useRealTimers();

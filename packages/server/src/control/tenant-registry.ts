@@ -1,5 +1,4 @@
 import {
-	type CacheScope,
 	firstCacheGeneration,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -14,10 +13,8 @@ import {
 	type TenantListResponse,
 	type TenantQuota,
 	type TenantQuotaResponse,
-	type TenantReadCredential,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
-import type { ReadUser } from '@cupboard/shared/http';
 import {
 	and,
 	eq,
@@ -31,7 +28,6 @@ import {
 	sql
 } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
-import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
@@ -51,43 +47,10 @@ import {
 	TenantUsageRepairRequiredError
 } from '../errors.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
-import {
-	generateReadPasswordSalt,
-	hashReadPassword,
-	isReadPasswordMatching,
-	type ReadPasswordHash,
-	type ReadPasswordSalt
-} from '../read/read-auth.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
 type TenantRow = typeof d1Schema.tenant.$inferSelect;
-
-interface ReadVerifierColumns {
-	readonly readUser: ReadUser | undefined;
-	readonly readPasswordHash: ReadPasswordHash | undefined;
-	readonly readPasswordSalt: ReadPasswordSalt | undefined;
-}
-
-async function readVerifierColumnsForInsert(
-	read: TenantCreateBody['read']
-): Promise<ReadVerifierColumns> {
-	if (read === undefined) {
-		return {
-			readUser: undefined,
-			readPasswordHash: undefined,
-			readPasswordSalt: undefined
-		};
-	}
-
-	const readPasswordSalt = generateReadPasswordSalt();
-
-	return {
-		readUser: read.user,
-		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
-		readPasswordSalt
-	};
-}
 
 function toSummary(row: TenantRow): TenantSummary {
 	return {
@@ -106,7 +69,6 @@ async function hasSameConfig(
 	row: TenantRow,
 	body: TenantCreateBody
 ): Promise<boolean> {
-	const isReadMatching = await hasSameReadVerifier(row, body.read);
 	const defaultCache = await database
 		.select({ access: d1Schema.cacheLifecycle.access })
 		.from(d1Schema.cacheLifecycle)
@@ -136,35 +98,7 @@ async function hasSameConfig(
 		isAccessMatching &&
 		row.ownerIssuer === body.ownerIssuer &&
 		row.ownerSubject === body.ownerSubject &&
-		row.ownerAudience === body.ownerAudience &&
-		isReadMatching
-	);
-}
-
-async function hasSameReadVerifier(
-	row: TenantRow,
-	read: TenantCreateBody['read']
-): Promise<boolean> {
-	if (read === undefined) {
-		return (
-			row.readUser === null &&
-			row.readPasswordHash === null &&
-			row.readPasswordSalt === null
-		);
-	}
-
-	if (
-		row.readUser !== read.user ||
-		row.readPasswordHash === null ||
-		row.readPasswordSalt === null
-	) {
-		return false;
-	}
-
-	return isReadPasswordMatching(
-		read.password,
-		row.readPasswordHash,
-		row.readPasswordSalt
+		row.ownerAudience === body.ownerAudience
 	);
 }
 
@@ -176,8 +110,6 @@ export async function ensureTenant(
 	body: TenantCreateBody,
 	now: IsoTimestamp
 ): Promise<TenantSummary> {
-	const verifier = await readVerifierColumnsForInsert(body.read);
-
 	// The usage row carries the quota and the CHECK that enforces it, so a tenant
 	// row without one accepts writes that nothing counts or limits. Write the
 	// tenant, its default cache and its usage counter in one batch, which D1
@@ -188,13 +120,7 @@ export async function ensureTenant(
 
 	if (!isClaimed) {
 		await writeCacheLifecycle(database, async (table) => {
-			const provisioning = provisioningStatements(
-				database,
-				body,
-				verifier,
-				now,
-				table
-			);
+			const provisioning = provisioningStatements(database, body, now, table);
 			await database.batch([
 				provisioning.tenant,
 				provisioning.cache,
@@ -226,13 +152,7 @@ export async function ensureTenant(
 	// configuration is known to match. Only an empty tenant can start at zero.
 	if (isClaimed) {
 		await writeCacheLifecycle(database, async (table) => {
-			const provisioning = provisioningStatements(
-				database,
-				body,
-				verifier,
-				now,
-				table
-			);
+			const provisioning = provisioningStatements(database, body, now, table);
 			await database.batch([provisioning.cache, provisioning.usage]);
 		});
 	}
@@ -261,7 +181,6 @@ usage statements again for a tenant that already has its row.
 function provisioningStatements(
 	database: Database,
 	body: TenantCreateBody,
-	verifier: ReadVerifierColumns,
 	now: IsoTimestamp,
 	table: CacheLifecycleWriteTable
 ) {
@@ -343,10 +262,7 @@ function provisioningStatements(
 				ownerAudience: body.ownerAudience,
 				configVersion: 1,
 				cacheCatalogueVersion,
-				createdAt: now,
-				readUser: verifier.readUser,
-				readPasswordHash: verifier.readPasswordHash,
-				readPasswordSalt: verifier.readPasswordSalt
+				createdAt: now
 			})
 			.onConflictDoNothing(),
 		cache: database.insert(table).select(cacheRow).onConflictDoNothing(),
@@ -625,143 +541,6 @@ export async function getTenantQuota(
 	};
 }
 
-/**
-Replaces the read credential only while the tenant is active or suspended.
-*/
-export async function setTenantReadCredential(
-	database: Database,
-	id: TenantId,
-	read: TenantReadCredential
-): Promise<TenantSummary> {
-	const readPasswordSalt = generateReadPasswordSalt();
-
-	return updateLiveTenant(database, id, {
-		readUser: read.user,
-		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
-		readPasswordSalt
-	});
-}
-
-/**
-Replaces one cache's read credential while the tenant is active or
-suspended. While the row exists, it takes precedence over the tenant
-fallback credential.
-*/
-export async function setCacheReadCredential(
-	database: Database,
-	id: TenantId,
-	cache: CacheScope,
-	read: TenantReadCredential,
-	now: IsoTimestamp
-): Promise<void> {
-	await requireLiveTenant(database, id);
-
-	const readPasswordSalt = generateReadPasswordSalt();
-	const readPasswordHash = await hashReadPassword(
-		read.password,
-		readPasswordSalt
-	);
-	// Select from a live tenant in the same statement as the upsert. If
-	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
-	// recreate the credential that cleanup deleted.
-	const identity = cacheIdentityColumns(cache);
-	const insert = database.insert(d1Schema.tenantCacheReadCredential).select(
-		database
-			.select({
-				tenant: d1Schema.tenant.id,
-				cacheKind: sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
-					'cache_kind'
-				),
-				cacheName: sql<typeof identity.cacheName>`${identity.cacheName}`.as(
-					'cache_name'
-				),
-				readUser: sql<ReadUser>`${read.user}`.as('read_user'),
-				readPasswordHash: sql<ReadPasswordHash>`${readPasswordHash}`.as(
-					'read_password_hash'
-				),
-				readPasswordSalt: sql<ReadPasswordSalt>`${readPasswordSalt}`.as(
-					'read_password_salt'
-				),
-				createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
-			})
-			.from(d1Schema.tenant)
-			.where(liveTenantFilter(id))
-	);
-	const set = {
-		readUser: read.user,
-		readPasswordHash,
-		readPasswordSalt,
-		createdAt: now
-	};
-	// Each cache kind has its own partial unique index, so name the matching
-	// conflict target.
-	const written = await insert
-		.onConflictDoUpdate(
-			cache.kind === 'default'
-				? {
-						target: d1Schema.tenantCacheReadCredential.tenant,
-						targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'default'`,
-						set
-					}
-				: {
-						target: [
-							d1Schema.tenantCacheReadCredential.tenant,
-							d1Schema.tenantCacheReadCredential.cacheName
-						],
-						targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'named'`,
-						set
-					}
-		)
-		.run();
-
-	if (written.meta.changes === 0) {
-		await refuseRetiredTenant(database, id);
-	}
-}
-
-/**
-Removes one cache's read credential while the tenant is active or suspended.
-Readers of a private cache then authenticate with the tenant credential. The
-operation is idempotent.
-*/
-export async function clearCacheReadCredential(
-	database: Database,
-	id: TenantId,
-	cache: CacheScope
-): Promise<void> {
-	await requireLiveTenant(database, id);
-
-	const liveTenantRow = database
-		.select({ id: d1Schema.tenant.id })
-		.from(d1Schema.tenant)
-		.where(liveTenantFilter(id));
-	// Require a live tenant in the DELETE itself. If offboarding wins the race
-	// after the precheck, the DELETE changes no rows and the caller checks the
-	// tenant state instead of returning success.
-	const deleted = await database
-		.delete(d1Schema.tenantCacheReadCredential)
-		.where(
-			and(
-				eq(d1Schema.tenantCacheReadCredential.tenant, id),
-				cacheIdentityCondition(
-					d1Schema.tenantCacheReadCredential.cacheKind,
-					d1Schema.tenantCacheReadCredential.cacheName,
-					cache
-				),
-				exists(liveTenantRow)
-			)
-		)
-		.run();
-
-	if (deleted.meta.changes > 0) {
-		return;
-	}
-
-	// A zero-row delete succeeds for a live tenant. Re-read the tenant so a
-	// missing or retired tenant still receives the corresponding error.
-	await requireLiveTenant(database, id);
-}
-
 // Matches a tenant while its status permits writes. The `offboarding` and
 // `offboarded` states are terminal.
 function liveTenantFilter(id: TenantId): SQL | undefined {
@@ -772,73 +551,8 @@ function liveTenantFilter(id: TenantId): SQL | undefined {
 	);
 }
 
-// Reports whether an unmatched live-tenant guard refers to a missing tenant or
-// a retired tenant.
-async function refuseRetiredTenant(
-	database: Database,
-	id: TenantId
-): Promise<never> {
-	const existing = await loadTenant(database, id);
-
-	if (existing === undefined) {
-		throw new TenantNotFoundError(id);
-	}
-
-	throw new TenantRetiredError(id);
-}
-
-// Rejects a missing or retired tenant before a credential mutation starts. The
-// mutation repeats the status check in its guarded write because offboarding
-// can begin after this function returns.
-async function requireLiveTenant(
-	database: Database,
-	id: TenantId
-): Promise<void> {
-	const existing = await loadTenant(database, id);
-
-	if (existing === undefined) {
-		throw new TenantNotFoundError(id);
-	}
-
-	if (existing.status === 'offboarding' || existing.status === 'offboarded') {
-		throw new TenantRetiredError(id);
-	}
-}
-
-// A private tenant without a complete read credential fails closed. Do not clear
-// credentials after offboarding has begun.
-export async function clearTenantReadCredential(
-	database: Database,
-	id: TenantId
-): Promise<TenantSummary> {
-	return updateLiveTenant(database, id, {
-		readUser: sql`null`,
-		readPasswordHash: sql`null`,
-		readPasswordSalt: sql`null`
-	});
-}
-
-async function updateLiveTenant(
-	database: Database,
-	id: TenantId,
-	set: SQLiteUpdateSetSource<typeof d1Schema.tenant>
-): Promise<TenantSummary> {
-	const updated = await database
-		.update(d1Schema.tenant)
-		.set(set)
-		.where(liveTenantFilter(id))
-		.returning();
-	const row = updated[0];
-
-	if (row !== undefined) {
-		return toSummary(row);
-	}
-
-	return refuseRetiredTenant(database, id);
-}
-
-// Keep a tombstone so the slug cannot be reused, but clear the read credentials,
-// owner identity, and usage in one batch. The caller separately purges the
+// Keep a tombstone so the slug cannot be reused, but clear the owner identity
+// and usage in one batch. The caller separately purges the
 // tenant's Durable Object. The owner columns are not nullable, so finalisation
 // stores empty strings rather than deleting them.
 export async function finaliseOffboardedTenant(
@@ -851,9 +565,6 @@ export async function finaliseOffboardedTenant(
 				.update(d1Schema.tenant)
 				.set({
 					status: 'offboarded',
-					readUser: sql`null`,
-					readPasswordHash: sql`null`,
-					readPasswordSalt: sql`null`,
 					ownerIssuer: '',
 					ownerSubject: '',
 					ownerAudience: ''
@@ -865,9 +576,6 @@ export async function finaliseOffboardedTenant(
 			database
 				.delete(d1Schema.tenantMaintenanceEligibility)
 				.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id)),
-			database
-				.delete(d1Schema.tenantCacheReadCredential)
-				.where(eq(d1Schema.tenantCacheReadCredential.tenant, id)),
 			// An absent lifecycle row means generation one. Finalisation deletes these
 			// rows only after the tenant drain has removed every reference edge, so
 			// the deletion cannot reauthorise a first-generation edge.

@@ -10,9 +10,11 @@ import {
 	cacheWriteGrants,
 	currentNarObjectKey,
 	defaultCache,
+	fixtureReaderAuthorization,
 	handlerFetch,
 	issueTokenForTenant,
 	md5Etag,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	provisionNamedTenant,
 	pushPath,
@@ -96,7 +98,7 @@ describe('cross-tenant NAR read isolation', () => {
 		{ access: 'public', credentials: {} },
 		{
 			access: 'private',
-			credentials: { authorization: `Basic ${btoa('alice:secret')}` }
+			credentials: { authorization: fixtureReaderAuthorization }
 		}
 	])(
 		'serves a shared NAR to a later $access publisher without the upload time of the shared object',
@@ -122,10 +124,8 @@ describe('cross-tenant NAR read isolation', () => {
 			const firstVersion = await storedObjectVersion(key);
 			const later = await bootstrap();
 			await pushPath(later.token, metadata, defaultCache(), nar);
-			await provisionFixtureTenant({
-				defaultCacheAccess: access,
-				read: { user: 'alice', password: 'secret' }
-			});
+			await provisionFixtureTenant({ defaultCacheAccess: access });
+			await provisionFixtureReader();
 			const laterKey = await currentNarObjectKey(nar.narHash);
 			const read = async (
 				method: 'GET' | 'HEAD',

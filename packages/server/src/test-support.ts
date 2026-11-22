@@ -30,7 +30,10 @@ import {
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
-import { type AccessKeyCreateResponse } from '@cupboard/protocol/access-keys';
+import {
+	type AccessKeyCreateResponse,
+	accessKeyIdSchema
+} from '@cupboard/protocol/access-keys';
 import { buildInputsCapability } from '@cupboard/protocol/build-inputs';
 import {
 	type TransitionId,
@@ -98,7 +101,6 @@ import {
 } from '@cupboard/protocol/upload';
 import { withCleanup } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import {
 	abortAllDurableObjects,
 	createExecutionContext,
@@ -106,7 +108,7 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, count, eq, isNull, type SQL, sql } from 'drizzle-orm';
+import { and, count, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
@@ -149,7 +151,7 @@ import {
 	refreshTenantMembership
 } from './control/tenant-membership.ts';
 import { testControlDatabase } from './control-database.test-support.ts';
-import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
+import { generateSigningKey, parseJwk, sha256Hex } from './crypto/crypto.ts';
 import { recordD1Statements } from './d1-statements.test-support.ts';
 import {
 	cacheIdentityColumns,
@@ -165,6 +167,7 @@ import {
 	tenantBlob
 } from './db/d1-schema.ts';
 import {
+	accessKeys,
 	authKeys,
 	generationSeq,
 	narInfoDeletions,
@@ -211,12 +214,6 @@ import {
 	type R2ObjectKey,
 	stagingObjectKey
 } from './http/http.ts';
-import {
-	generateReadPasswordSalt,
-	hashReadPassword,
-	type ReadPasswordHash,
-	type ReadPasswordSalt
-} from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
 import {
 	runBlobReaper,
@@ -401,33 +398,17 @@ export async function restartTestServers(): Promise<void> {
 
 /**
 Writes the fixture tenant's authoritative D1 row and default cache, then
-refreshes the negative membership hints. `read` supplies the tenant fallback
-verifier. Repeated calls can change the default cache without resetting usage
-counters.
+refreshes the negative membership hints. Repeated calls can change the default
+cache without resetting usage counters.
 */
 export async function provisionFixtureTenant(
 	options: {
 		readonly defaultCacheAccess?: 'public' | 'private';
-		readonly read?: { readonly user: string; readonly password: string };
 		readonly quotaBytes?: number;
 	} = {}
 ): Promise<void> {
 	const defaultCacheAccess = options.defaultCacheAccess ?? 'public';
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const readUser =
-		options.read === undefined
-			? sql<null>`null`
-			: readUserInputSchema.parse(options.read.user);
-	let readPasswordHash: ReadPasswordHash | SQL<null> = sql<null>`null`;
-	let readPasswordSalt: ReadPasswordSalt | SQL<null> = sql<null>`null`;
-
-	if (options.read !== undefined) {
-		readPasswordSalt = generateReadPasswordSalt();
-		readPasswordHash = await hashReadPassword(
-			options.read.password,
-			readPasswordSalt
-		);
-	}
 	const now = isoTimestamp(testBase);
 
 	await database
@@ -439,19 +420,9 @@ export async function provisionFixtureTenant(
 			ownerSubject: fixtureOwner.subject,
 			ownerAudience: fixtureOwner.audience,
 			configVersion: 1,
-			createdAt: now,
-			readUser,
-			readPasswordHash,
-			readPasswordSalt
+			createdAt: now
 		})
-		.onConflictDoUpdate({
-			target: d1Schema.tenant.id,
-			set: {
-				readUser,
-				readPasswordHash,
-				readPasswordSalt
-			}
-		})
+		.onConflictDoNothing()
 		.run();
 
 	await provisionD1Cache(database, fixtureTenant, defaultCacheAccess, now);
@@ -1397,6 +1368,21 @@ identity `alice` from the test issuer every grant.
 */
 export const testAccessKeyRule = trustRuleIdSchema.parse('alice-rule');
 
+function installTestAccessKeyRule(context: ServerContext): void {
+	context.db
+		.insert(oidcTrust)
+		.values({
+			id: testAccessKeyRule,
+			issuer: 'https://idp.test',
+			audience: 'cupboard-aud',
+			claimsJson: JSON.stringify({ sub: 'alice' }),
+			permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+			createdAt: isoTimestamp(testBase)
+		})
+		.onConflictDoNothing()
+		.run();
+}
+
 /**
 Installs {@link testAccessKeyRule} in `server` and creates an access key with
 `grants` whose root is that rule and the identity `alice`.
@@ -1407,18 +1393,7 @@ export function createTestAccessKey(
 	expiresAt?: Date
 ): Promise<AccessKeyCreateResponse> {
 	return runInDurableObject(server, async (instance) => {
-		instance.context.db
-			.insert(oidcTrust)
-			.values({
-				id: testAccessKeyRule,
-				issuer: 'https://idp.test',
-				audience: 'cupboard-aud',
-				claimsJson: JSON.stringify({ sub: 'alice' }),
-				permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
-				createdAt: isoTimestamp(testBase)
-			})
-			.onConflictDoNothing()
-			.run();
+		installTestAccessKeyRule(instance.context);
 
 		return instance.context.accessKeys.create(
 			{
@@ -1434,6 +1409,106 @@ export function createTestAccessKey(
 			}
 		);
 	});
+}
+
+const fixtureReaderId = accessKeyIdSchema.parse(
+	'00000000-0000-4000-8000-00000000f00d'
+);
+
+/**
+The secret of the access key that {@link provisionFixtureReader} stores. Every
+test uses the same key, so the Worker's key cache in the test isolate can
+answer for it from an earlier test until the entry expires.
+*/
+export const fixtureReaderSecret = `cupboard_ak_${fixtureReaderId}_${'f'.repeat(64)}`;
+
+/**
+The value of a Basic `Authorization` header that presents
+{@link fixtureReaderSecret}.
+*/
+export const fixtureReaderAuthorization = `Basic ${btoa(`cupboard:${fixtureReaderSecret}`)}`;
+
+/**
+Stores an access key in the fixture tenant that can read every cache and
+reuse view, with the secret {@link fixtureReaderSecret}. Its root is
+{@link testAccessKeyRule} and the identity `alice`.
+*/
+export async function provisionFixtureReader(): Promise<void> {
+	const secretHash = await sha256Hex(fixtureReaderSecret);
+
+	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		installTestAccessKeyRule(instance.context);
+		instance.context.db
+			.insert(accessKeys)
+			.values({
+				id: fixtureReaderId,
+				secretHash,
+				grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+				rootIdentityJson: JSON.stringify(testTokenIdentity('alice')),
+				rootRule: testAccessKeyRule,
+				creatorSubject: oidcSubjectSchema.parse('alice'),
+				createdAt: isoTimestamp(testBase)
+			})
+			.onConflictDoNothing()
+			.run();
+	});
+}
+
+// Wraps a prepared statement so that running it fails. With `isCommitted`, the
+// statement commits before the failure, as when D1 loses the response.
+function failingStatement(
+	statement: D1PreparedStatement,
+	isCommitted: boolean
+): D1PreparedStatement {
+	return new Proxy(statement, {
+		get(target, key, receiver): unknown {
+			if (key === 'bind') {
+				return (...values: unknown[]) =>
+					failingStatement(target.bind(...values), isCommitted);
+			}
+
+			if (key === 'run') {
+				return async () => {
+					if (isCommitted) {
+						await target.run();
+					}
+
+					throw new Error('D1 response lost');
+				};
+			}
+
+			const value: unknown = Reflect.get(target, key, receiver);
+
+			return typeof value === 'function' ? value.bind(target) : value;
+		}
+	});
+}
+
+/**
+Makes the next update of the D1 cache lifecycle table fail, and returns the
+function that removes the fault. With `isCommitted`, the update commits before
+the failure, as when D1 loses the response.
+*/
+export function failNextCacheLifecycleUpdate(isCommitted: boolean): () => void {
+	const prepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+	let isArmed = true;
+	const spy = vi
+		.spyOn(env.CUPBOARD_DB, 'prepare')
+		.mockImplementation((query) => {
+			const statement = prepare(query);
+
+			if (!isArmed || !query.startsWith('update "cache_lifecycle')) {
+				return statement;
+			}
+
+			isArmed = false;
+
+			return failingStatement(statement, isCommitted);
+		});
+
+	return () => {
+		spy.mockRestore();
+	};
 }
 
 export function issueWorkerSignedToken(

@@ -41,12 +41,14 @@ import {
 	countingD1,
 	currentOrigin,
 	defaultCache,
+	fixtureReaderAuthorization,
 	fixtureWorkerServer,
 	flakyD1,
 	initialiseViaWorker,
 	issueWorkerSignedToken,
 	loggedAtWarning,
 	namedCache,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	putWorkerTestCache,
 	readFetch,
@@ -132,7 +134,7 @@ function probe(
 		method: 'POST',
 		headers: {
 			'content-type': 'application/json',
-			...(isAuthorised && { authorization: `Basic ${btoa('alice:secret')}` })
+			...(isAuthorised && { authorization: fixtureReaderAuthorization })
 		},
 		body: JSON.stringify({ storePaths: paths })
 	};
@@ -146,7 +148,8 @@ async function committedSpreadPaths(
 	access: 'private' | 'public'
 ): Promise<{ paths: StorePathString[]; foundIndexes: ReadonlySet<number> }> {
 	await initialiseViaWorker();
-	await provisionFixtureTenant({ read: { user: 'alice', password: 'secret' } });
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 	const foundIndexes = new Set([0, 6, 12]);
 	const paths: StorePathString[] = [];
 	for (let index = 0; index < 13; index += 1) {
@@ -242,9 +245,8 @@ describe('cache metadata probe', () => {
 		'counts actual canonical attempts for a %s page',
 		async (access) => {
 			await initialiseViaWorker();
-			await provisionFixtureTenant({
-				read: { user: 'alice', password: 'secret' }
-			});
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const path = await committedPath(
 				'metadata-access-count',
 				defaultCache(),
@@ -375,9 +377,8 @@ describe('cache metadata probe', () => {
 		'logs the request fields when the reference read of a %s page fails',
 		async (access) => {
 			await initialiseViaWorker();
-			await provisionFixtureTenant({
-				read: { user: 'alice', password: 'secret' }
-			});
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const path = await committedPath(
 				'metadata-reference-failure',
 				defaultCache(),
@@ -602,9 +603,8 @@ describe('cache metadata probe', () => {
 
 	it('logs one record when several private narinfo object reads fail', async () => {
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const paths = [
 			await committedPath('metadata-object-failure-1', defaultCache(), {
 				access: 'private',
@@ -665,9 +665,8 @@ describe('cache metadata probe', () => {
 		'returns complete narinfo for a %s %s source',
 		async (access, kind) => {
 			await initialiseViaWorker();
-			await provisionFixtureTenant({
-				read: { user: 'alice', password: 'secret' }
-			});
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const cache = kind === 'default' ? defaultCache() : namedCache('builds');
 			const path = await committedPath(`metadata-${access}-${kind}`, cache, {
 				access
@@ -747,9 +746,8 @@ describe('cache metadata probe', () => {
 
 	it('refuses an unauthenticated private page instead of reporting missing paths', async () => {
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const path = await committedPath(
 			'metadata-private-refusal',
 			defaultCache(),
@@ -883,9 +881,8 @@ describe('cache metadata probe', () => {
 	it('uses canonical managed-cache requests after one page admission and rejects a mid-page access change', async () => {
 		const token = await initialiseViaWorker();
 		const path = await committedPath('metadata-managed-cache', defaultCache());
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const original = await readFetch(`/${path.storePathHash}.narinfo`);
 		const narinfo = await original.text();
 		const paths: StorePathString[] = [];
@@ -970,7 +967,7 @@ describe('cache metadata probe', () => {
 				status: 'found',
 				narinfo: narinfos.get(storePath)
 			})),
-			statements: 5
+			statements: 4
 		});
 		isChange = true;
 		const racedContext = createExecutionContext();

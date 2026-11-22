@@ -37,9 +37,11 @@ import {
 	currentOrigin,
 	currentServer,
 	defaultCache,
+	fixtureReaderAuthorization,
 	handlerFetch,
 	namedCache,
 	narBytes,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPath,
 	putTestCache,
@@ -319,9 +321,8 @@ describe('cache availability query', () => {
 	it('does not purge a private cache when probing its missing NAR', async () => {
 		await recordTransition('cache-identity', 'complete');
 		const { token } = await bootstrap();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		await putTestCache(token, defaultCache(), 'private');
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(token, metadata);
@@ -341,7 +342,7 @@ describe('cache availability query', () => {
 					body: JSON.stringify({ storePathHashes: [metadata.storePathHash] }),
 					headers: {
 						'content-type': 'application/json',
-						authorization: `Basic ${btoa('alice:secret')}`
+						authorization: fixtureReaderAuthorization
 					},
 					method: 'POST'
 				}
@@ -364,9 +365,8 @@ describe('cache availability query', () => {
 	it("requires the tenant's Basic credentials when reads are private", async () => {
 		await recordTransition('cache-identity', 'complete');
 		const { token } = await bootstrap();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		await putTestCache(token, defaultCache(), 'private');
 		const request = {
 			body: JSON.stringify({ storePathHashes: [missingStorePathHash] }),
@@ -384,7 +384,7 @@ describe('cache availability query', () => {
 				...request,
 				headers: {
 					...request.headers,
-					authorization: `Basic ${btoa('alice:secret')}`
+					authorization: fixtureReaderAuthorization
 				}
 			}
 		);

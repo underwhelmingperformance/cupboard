@@ -7,7 +7,6 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
-	type CacheScope,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type StorePathHash,
@@ -19,11 +18,7 @@ import {
 } from '@cupboard/protocol/attestations';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { cacheListResponseSchema } from '@cupboard/protocol/caches';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import {
-	type TenantReadCredential,
-	tenantReadCredentialSchema
-} from '@cupboard/protocol/tenants';
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import { uploadNegotiateResponseSchema } from '@cupboard/protocol/upload';
 import {
 	createExecutionContext,
@@ -31,18 +26,11 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import {
-	clearCacheReadCredential,
-	setCacheReadCredential
-} from '../control/tenant-registry.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
-import { cacheScopeFromRow } from '../db/cache.ts';
-import * as d1Schema from '../db/d1-schema.ts';
 import {
 	drain,
 	recordKeptPromises,
@@ -59,8 +47,11 @@ import {
 	authorisedWorkerFetch,
 	cacheWriteGrants,
 	commitUploadViaWorker,
+	createTestAccessKey,
 	currentOrigin,
 	expectSingleUploadDecision,
+	fixtureReaderAuthorization,
+	fixtureReaderSecret,
 	fixtureWorkerServer,
 	handlerFetch,
 	hexBytes,
@@ -69,6 +60,7 @@ import {
 	namedCache,
 	narDigestHex,
 	narHash,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	pushPathToTenant,
 	putNarBytes,
@@ -92,60 +84,16 @@ const sibling = cacheNameSchema.parse('guides');
 const privateCache = namedCache(localName);
 const cachePrefix = `/cache/${localName}`;
 const tenant = tenantIdSchema.parse(fixtureTenant);
-const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
-// The tenant credential is the fallback for every private cache that has no
-// credential of its own.
-const tenantReader = { user: 'alice', password: 'secret' };
-
-// One private cache's own credential. Generated passwords are exactly 43
-// base64url characters, matching the control-plane schema.
-const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
-	user: 'reader',
-	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-});
-
-function basic(credential: {
-	readonly user: string;
-	readonly password: string;
-}): RequestInit {
-	return {
-		headers: {
-			authorization: `Basic ${btoa(`${credential.user}:${credential.password}`)}`
-		}
-	};
+function basic(secret: string): RequestInit {
+	return { headers: { authorization: `Basic ${btoa(`cupboard:${secret}`)}` } };
 }
 
 function withCredential(init: RequestInit = {}): RequestInit {
 	const headers = new Headers(init.headers);
-	headers.set(
-		'authorization',
-		`Basic ${btoa(`${tenantReader.user}:${tenantReader.password}`)}`
-	);
+	headers.set('authorization', fixtureReaderAuthorization);
 
 	return { ...init, headers };
-}
-
-function database() {
-	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-}
-
-async function cacheCredentialRows(): Promise<
-	{ tenant: string; cache: CacheScope }[]
-> {
-	const rows = await database()
-		.select({
-			tenant: d1Schema.tenantCacheReadCredential.tenant,
-			kind: d1Schema.tenantCacheReadCredential.cacheKind,
-			name: d1Schema.tenantCacheReadCredential.cacheName
-		})
-		.from(d1Schema.tenantCacheReadCredential)
-		.all();
-
-	return rows.map((row) => ({
-		tenant: row.tenant,
-		cache: cacheScopeFromRow({ kind: row.kind, name: row.name })
-	}));
 }
 
 const availabilityPost = (storePathHash: StorePathHash): RequestInit => ({
@@ -201,9 +149,8 @@ async function putNamedCache(
 
 /**
 Publishes one store path and one attestation bundle to the private cache
-through the routes a real push uses, then gives the tenant a read credential.
-The push authenticates with its bearer token, so it runs before the read
-credential exists.
+through the routes a real push uses, then stores the fixture reader's access
+key.
 */
 async function publishToPrivateCache(): Promise<PublishedPath> {
 	const token = await initialiseViaWorker();
@@ -211,11 +158,12 @@ async function publishToPrivateCache(): Promise<PublishedPath> {
 	await putNamedCache(token, localName, 'private');
 	await pushPathToTenant(tenant, token, metadata, undefined, privateCache);
 	const bundleDigest = await attachBundle(token, metadata.storePathHash);
-	await provisionFixtureTenant({ read: tenantReader });
+	await provisionFixtureTenant();
+	await provisionFixtureReader();
 
 	const narinfo = await readFetch(
 		`${cachePrefix}/${metadata.storePathHash}.narinfo`,
-		basic(tenantReader)
+		basic(fixtureReaderSecret)
 	);
 	expect(narinfo.status).toBe(StatusCodes.OK);
 
@@ -681,7 +629,7 @@ describe('private cache access', () => {
 
 		const cacheInfo = await readFetch(
 			`${cachePrefix}/nix-cache-info`,
-			basic(tenantReader)
+			basic(fixtureReaderSecret)
 		);
 		const availability = await readFetch(
 			`${cachePrefix}/api/v1/missing-paths`,
@@ -703,57 +651,39 @@ describe('private cache access', () => {
 		});
 	});
 
-	it("lets only a cache's own credential open it once it has one", async () => {
+	it('reads only the private cache that a scoped key names', async () => {
 		const published = await publishToPrivateCache();
 		await putNamedCache(published.token, sibling, 'private');
-		await pushPathToTenant(
-			tenant,
-			published.token,
-			uploadMetadata({ fileSize: 1234, storePathHash: 'a'.repeat(32) }),
-			undefined,
-			namedCache(sibling)
+		const key = await createTestAccessKey(
+			fixtureWorkerServer(),
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					cache: privateCache,
+					actions: ['cache:content-read']
+				}
+			])
 		);
-		await setCacheReadCredential(
-			database(),
-			tenant,
-			privateCache,
-			cacheReader,
-			now
+
+		const named = await readFetch(
+			`${cachePrefix}/${published.storePathHash}.narinfo`,
+			basic(key.secret)
 		);
-		const path = `${cachePrefix}/${published.storePathHash}.narinfo`;
-		const siblingPath = `/cache/${sibling}/nix-cache-info`;
+		const siblingCache = await readFetch(
+			`/cache/${sibling}/nix-cache-info`,
+			basic(key.secret)
+		);
 
-		const exclusiveTenant = await readFetch(path, basic(tenantReader));
-		const exclusiveCache = await readFetch(path, basic(cacheReader));
-		const exclusiveSibling = await readFetch(siblingPath, basic(tenantReader));
-		const exclusive = {
-			withTenantCredential: exclusiveTenant.status,
-			withCacheCredential: exclusiveCache.status,
-			siblingWithTenantCredential: exclusiveSibling.status
-		};
-
-		await clearCacheReadCredential(database(), tenant, privateCache);
-		const restoredTenant = await readFetch(path, basic(tenantReader));
-		const restoredCache = await readFetch(path, basic(cacheReader));
-		const restored = {
-			withTenantCredential: restoredTenant.status,
-			withCacheCredential: restoredCache.status
-		};
-
-		expect({ exclusive, restored }).toStrictEqual({
-			exclusive: {
-				withTenantCredential: StatusCodes.UNAUTHORIZED,
-				withCacheCredential: StatusCodes.OK,
-				siblingWithTenantCredential: StatusCodes.OK
-			},
-			restored: {
-				withTenantCredential: StatusCodes.OK,
-				withCacheCredential: StatusCodes.UNAUTHORIZED
-			}
+		expect({
+			named: named.status,
+			sibling: siblingCache.status
+		}).toStrictEqual({
+			named: StatusCodes.OK,
+			sibling: StatusCodes.UNAUTHORIZED
 		});
 	});
 
-	it('refuses a private cache when neither the cache nor the tenant has a credential', async () => {
+	it('refuses a private cache to a key that the tenant does not have', async () => {
 		const token = await initialiseViaWorker();
 		const metadata = uploadMetadata({ fileSize: 1234 });
 		await putNamedCache(token, localName, 'private');
@@ -761,7 +691,9 @@ describe('private cache access', () => {
 
 		const response = await readFetch(
 			`${cachePrefix}/${metadata.storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic(
+				`cupboard_ak_00000000-0000-4000-8000-0000000000ee_${'e'.repeat(64)}`
+			)
 		);
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
@@ -776,12 +708,12 @@ describe('private cache access', () => {
 		);
 		const narinfo = await readFetch(
 			`/${published.storePathHash}.narinfo`,
-			basic(tenantReader)
+			basic(fixtureReaderSecret)
 		);
 		const bareNar = await readFetch(`/${published.narUrl}`);
 		const privateNar = await readFetch(
 			`${cachePrefix}/${published.narUrl}`,
-			basic(tenantReader)
+			basic(fixtureReaderSecret)
 		);
 
 		expect({
@@ -804,11 +736,11 @@ describe('private cache access', () => {
 
 		const throughSibling = await readFetch(
 			`${siblingPrefix}/${published.narUrl}`,
-			basic(tenantReader)
+			basic(fixtureReaderSecret)
 		);
 		const throughOwnCache = await readFetch(
 			`${cachePrefix}/${published.narUrl}`,
-			basic(tenantReader)
+			basic(fixtureReaderSecret)
 		);
 
 		expect({
@@ -831,7 +763,7 @@ describe('private cache access', () => {
 		const anonymousNar = await readFetch(`/${published.narUrl}`);
 		const privateNar = await readFetch(
 			`${cachePrefix}/${published.narUrl}`,
-			basic(tenantReader)
+			basic(fixtureReaderSecret)
 		);
 
 		expect({
@@ -885,7 +817,7 @@ describe('private cache access', () => {
 		});
 	});
 
-	it('applies the tenant credential independently to the default and named caches', async () => {
+	it('applies a tenant-wide key independently to the default and named caches', async () => {
 		const published = await publishToPrivateCache();
 		const defaultPut = await authorisedWorkerFetch('/cache', published.token, {
 			body: JSON.stringify({ kind: 'access', access: 'private' }),
@@ -896,31 +828,23 @@ describe('private cache access', () => {
 		const privatePath = `${cachePrefix}/${published.storePathHash}.narinfo`;
 
 		const bareRefused = await readFetch('/nix-cache-info', {});
-		const bare = await readFetch('/nix-cache-info', basic(tenantReader));
+		const bare = await readFetch('/nix-cache-info', basic(fixtureReaderSecret));
 		const namedRefused = await readFetch(privatePath, {});
-		const namedServed = await readFetch(privatePath, basic(tenantReader));
-
-		await setCacheReadCredential(
-			database(),
-			tenant,
-			privateCache,
-			cacheReader,
-			now
+		const namedServed = await readFetch(
+			privatePath,
+			basic(fixtureReaderSecret)
 		);
-		const namedExclusive = await readFetch(privatePath, basic(tenantReader));
 
 		expect({
 			bareRefused: bareRefused.status,
 			bare: bare.status,
 			namedRefused: namedRefused.status,
-			namedServed: namedServed.status,
-			namedExclusive: namedExclusive.status
+			namedServed: namedServed.status
 		}).toStrictEqual({
 			bareRefused: StatusCodes.UNAUTHORIZED,
 			bare: StatusCodes.OK,
 			namedRefused: StatusCodes.UNAUTHORIZED,
-			namedServed: StatusCodes.OK,
-			namedExclusive: StatusCodes.UNAUTHORIZED
+			namedServed: StatusCodes.OK
 		});
 	});
 
@@ -935,7 +859,7 @@ describe('private cache access', () => {
 			const path = `${cachePrefix}${suffix}`;
 
 			const anonymous = await readFetch(path);
-			const authenticated = await readFetch(path, basic(tenantReader));
+			const authenticated = await readFetch(path, basic(fixtureReaderSecret));
 
 			expect({
 				anonymous: anonymous.status,
@@ -947,7 +871,7 @@ describe('private cache access', () => {
 		}
 	);
 
-	it('does not accept a read credential on a cache write route', async () => {
+	it('refuses an access key sent with Basic authentication on a cache write route', async () => {
 		await publishToPrivateCache();
 
 		const anonymous = await readFetch(`${cachePrefix}/uploads`, {
@@ -976,7 +900,7 @@ describe('private cache access', () => {
 			await publishToPrivateCache();
 
 			const anonymous = await readFetch(path, {});
-			const authenticated = await readFetch(path, basic(tenantReader));
+			const authenticated = await readFetch(path, basic(fixtureReaderSecret));
 
 			expect({
 				anonymous: anonymous.status,
@@ -988,7 +912,7 @@ describe('private cache access', () => {
 		}
 	);
 
-	it("creates and removes a private cache, leaving another cache in place and revoking the removed cache's read credential", async () => {
+	it('creates and removes a private cache, leaving another cache in place', async () => {
 		const published = await publishToPrivateCache();
 		const retained = cacheNameSchema.parse('retained');
 		await authorisedWorkerFetch(`/caches/${retained}`, published.token, {
@@ -996,13 +920,6 @@ describe('private cache access', () => {
 			headers: { 'content-type': 'application/json' },
 			method: 'PUT'
 		});
-		await setCacheReadCredential(
-			database(),
-			tenant,
-			privateCache,
-			cacheReader,
-			now
-		);
 
 		const created = await authorisedWorkerFetch(
 			`/caches/${localName}`,
@@ -1027,8 +944,7 @@ describe('private cache access', () => {
 			removed: await removed.json(),
 			caches: registry.caches.filter(
 				(cache) => cache.scope.kind === 'named' && touched.has(cache.scope.name)
-			),
-			credentials: await cacheCredentialRows()
+			)
 		}).toStrictEqual({
 			created: {
 				scope: privateCache,
@@ -1055,40 +971,7 @@ describe('private cache access', () => {
 					grace: { kind: 'none' },
 					graceManaged: false
 				}
-			],
-			credentials: []
-		});
-	});
-
-	it("refuses the removed cache's credential once the name is created again", async () => {
-		const published = await publishToPrivateCache();
-		await setCacheReadCredential(
-			database(),
-			tenant,
-			privateCache,
-			cacheReader,
-			now
-		);
-		const removed = await authorisedWorkerFetch(
-			`/caches/${localName}?force=true`,
-			published.token,
-			{ method: 'DELETE' }
-		);
-		expect(removed.status).toBe(StatusCodes.OK);
-
-		await putNamedCache(published.token, localName, 'private');
-		const path = `${cachePrefix}/nix-cache-info`;
-		const withRemovedCredential = await readFetch(path, basic(cacheReader));
-		const withTenantCredential = await readFetch(path, basic(tenantReader));
-
-		expect({
-			withRemovedCredential: withRemovedCredential.status,
-			withTenantCredential: withTenantCredential.status,
-			credentials: await cacheCredentialRows()
-		}).toStrictEqual({
-			withRemovedCredential: StatusCodes.UNAUTHORIZED,
-			withTenantCredential: StatusCodes.OK,
-			credentials: []
+			]
 		});
 	});
 

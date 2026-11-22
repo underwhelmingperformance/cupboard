@@ -5,7 +5,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
-	authorizationDetailsSchema
+	grantsWithoutRetiredOperationsSchema
 } from '@cupboard/protocol/grants';
 import {
 	type OidcAudience,
@@ -405,7 +405,7 @@ function parseGrants(value: unknown): AuthorizationDetails {
 		throw new MissingGrantsError();
 	}
 
-	const parsed = authorizationDetailsSchema.safeParse(value);
+	const parsed = grantsWithoutRetiredOperationsSchema.safeParse(value);
 
 	if (!parsed.success) {
 		throw new InvalidGrantsError(parsed.error);

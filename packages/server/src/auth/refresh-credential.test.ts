@@ -117,6 +117,35 @@ describe('RefreshCredential', () => {
 		).toStrictEqual(payload);
 	});
 
+	it('drops a retired operation from the grants of a readable authority', async () => {
+		const authority = {
+			...payload,
+			grants: [
+				{
+					type: 'cupboard_tenant',
+					tenant: 'acme',
+					actions: ['tenant:suspend', 'tenant:rotate-read-credential']
+				}
+			]
+		};
+		const encoded = bytesToBase64Url(
+			new TextEncoder().encode(JSON.stringify(authority))
+		);
+		const value = `${payload.memberId}.${'a'.repeat(64)}.${encoded}`;
+
+		expect(
+			await RefreshCredential.parse(value)?.authenticate(
+				await sha256Hex(value),
+				keys
+			)
+		).toStrictEqual({
+			...payload,
+			grants: [
+				{ type: 'cupboard_tenant', tenant: 'acme', actions: ['tenant:suspend'] }
+			]
+		});
+	});
+
 	it('seals the authority so the credential does not contain it', async () => {
 		const credential = await RefreshCredential.issue(payload, keys);
 		const readable = bytesToBase64Url(

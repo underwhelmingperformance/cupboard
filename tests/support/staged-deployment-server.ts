@@ -16,10 +16,7 @@ import {
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
-import {
-	tenantReadCredentialSchema,
-	type TenantStatus
-} from '@cupboard/protocol/tenants';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import {
 	Miniflare,
 	type MiniflareOptions,
@@ -96,11 +93,6 @@ const fileHash = 'sha256:0wzw5pz9bciz84825admrb4b848maxa2fh1isbsw4547mvra9czv';
 const controlWrapSecret = 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=';
 const operatorSubject = 'upgrade-deployment-operator';
 const operatorAudience = 'upgrade-deployment-client';
-const fixtureReadCredential = tenantReadCredentialSchema.parse({
-	user: 'fixture-reader',
-	password: 'f'.repeat(43)
-});
-
 const singleColumnRowsSchema = z.array(z.record(z.string(), z.unknown()));
 
 // Each Worker serves its build version at this path, which is how the harness
@@ -1033,22 +1025,32 @@ export class StagedDeploymentServer {
 		await rpc.tenants.resume({ id: tenantIdSchema.parse(tenant) });
 	}
 
-	async configureTenantReadCredential(tenant: FixtureTenant): Promise<void> {
-		const rpc = controlRpc(new URL('https://cupboard.invalid'), {
-			credential: await this.operatorCredential(),
-			fetcher: (input, init) => this.workerFetch(input, init)
+	/**
+	Creates an access key that can read `cache` of `tenant`, and returns its
+	secret.
+	*/
+	async createReadKey(tenant: FixtureTenant, cache: string): Promise<string> {
+		const rpc = await this.tenantOwnerRpc(tenant);
+		const created = await rpc.accessKeys.create({
+			grants: [
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: cacheNameSchema.parse(cache) },
+					actions: ['cache:content-read']
+				}
+			]
 		});
-		await rpc.tenants.rotateReadCredential({
-			id: tenantIdSchema.parse(tenant),
-			read: fixtureReadCredential
-		});
+
+		return created.secret;
 	}
 
-	async tenantNarInfo(tenant: FixtureTenant, cache: string): Promise<Response> {
+	async tenantNarInfo(
+		tenant: FixtureTenant,
+		cache: string,
+		secret: string
+	): Promise<Response> {
 		await this.announceTenant(tenant);
-		const credential = Buffer.from(
-			`${fixtureReadCredential.user}:${fixtureReadCredential.password}`
-		).toString('base64');
+		const credential = Buffer.from(`cupboard:${secret}`).toString('base64');
 		return this.workerFetch(`/t/${tenant}/cache/${cache}/${pathHash}.narinfo`, {
 			headers: { authorization: `Basic ${credential}` }
 		});

@@ -123,24 +123,6 @@ export class CacheRegistrationService {
 		});
 	}
 
-	async clearReadCredential(scope: CacheScope): Promise<void> {
-		const tenant = this.context.requireTenant();
-
-		await this.context.d1
-			.delete(d1Schema.tenantCacheReadCredential)
-			.where(
-				and(
-					eq(d1Schema.tenantCacheReadCredential.tenant, tenant),
-					cacheIdentityCondition(
-						d1Schema.tenantCacheReadCredential.cacheKind,
-						d1Schema.tenantCacheReadCredential.cacheName,
-						scope
-					)
-				)
-			)
-			.run();
-	}
-
 	/**
 	Creates the cache. The caller holds the critical section, so the
 	existence check and the writes see no other request between them.
@@ -159,10 +141,6 @@ export class CacheRegistrationService {
 			scope,
 			access: configuration.access
 		});
-
-		if (configuration.access === 'public') {
-			await this.clearReadCredential(scope);
-		}
 
 		const created = this.context.cacheRepository.create(scope, configuration);
 		const cache = this.context.cacheRepository.stampGeneration(

@@ -84,6 +84,7 @@ import {
 	currentCasObjectKey,
 	currentNarObjectKey,
 	fileAttestationReference,
+	fixtureReaderAuthorization,
 	fixtureWorkerServer,
 	flakyD1,
 	handlerFetch,
@@ -96,6 +97,7 @@ import {
 	namedCache,
 	narDigestHex,
 	pendingAttestationRows,
+	provisionFixtureReader,
 	provisionFixtureTenant,
 	provisionNamedTenant,
 	putNarBytes,
@@ -434,7 +436,7 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('requires read credentials for the attestation probe of a private named cache', async () => {
+	it('requires an access key for the attestation probe of a private named cache', async () => {
 		const cache = namedCache('private-probe');
 		const token = await initialiseViaWorker();
 		await putWorkerTestCache(token, cache, 'private');
@@ -450,9 +452,8 @@ describe('attestation attach and reads', () => {
 		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
 		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 		await attachBundle(token, metadata.storePathHash, bundle, cache);
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const probe = (headers: Record<string, string>) =>
 			readFetch(`/cache/${cache.name}/api/v1/attestation-info`, {
 				method: 'POST',
@@ -461,7 +462,7 @@ describe('attestation attach and reads', () => {
 			});
 		const unauthorised = await probe({});
 		const authorised = await probe({
-			authorization: `Basic ${btoa('alice:secret')}`
+			authorization: fixtureReaderAuthorization
 		});
 
 		expect({
@@ -493,9 +494,8 @@ describe('attestation attach and reads', () => {
 
 	it('requires the read challenge before it reveals a missing cache', async () => {
 		await initialiseViaWorker();
-		await provisionFixtureTenant({
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant();
+		await provisionFixtureReader();
 		const storePathHash = uniqueStorePathHash();
 		const unauthorised = await readFetch(
 			'/cache/absent/api/v1/attestation-info',
@@ -511,7 +511,7 @@ describe('attestation attach and reads', () => {
 				method: 'POST',
 				headers: {
 					'content-type': 'application/json',
-					authorization: `Basic ${btoa('alice:secret')}`
+					authorization: fixtureReaderAuthorization
 				},
 				body: JSON.stringify({ storePathHashes: [storePathHash] })
 			}
@@ -4003,11 +4003,10 @@ describe('attestation attach and reads', () => {
 				destination
 			);
 			await drainInheritance();
-			await provisionFixtureTenant({
-				read: { user: 'alice', password: 'secret' }
-			});
+			await provisionFixtureTenant();
+			await provisionFixtureReader();
 			const authorised = {
-				headers: { authorization: `Basic ${btoa('alice:secret')}` }
+				headers: { authorization: fixtureReaderAuthorization }
 			};
 
 			const list = await readFetch(
@@ -4348,12 +4347,10 @@ describe('attestation attach and reads', () => {
 	it('gates descriptor and bundle reads in private mode', async () => {
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
-		await provisionFixtureTenant({
-			defaultCacheAccess: 'private',
-			read: { user: 'alice', password: 'secret' }
-		});
+		await provisionFixtureTenant({ defaultCacheAccess: 'private' });
+		await provisionFixtureReader();
 		const authorised = {
-			headers: { authorization: `Basic ${btoa('alice:secret')}` }
+			headers: { authorization: fixtureReaderAuthorization }
 		};
 
 		const listDenied = await readFetch(
