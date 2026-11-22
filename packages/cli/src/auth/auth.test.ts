@@ -3,6 +3,7 @@ import type {
 	TokenResponse,
 	TokenResponseInput
 } from '@cupboard/protocol/oidc';
+import { refreshTokenReplayedProblem } from '@cupboard/protocol/sessions';
 import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
@@ -17,7 +18,8 @@ import { writeCachedGrant } from '../deploy/grant-store.ts';
 import {
 	authExitCode,
 	CupboardHttpError,
-	OwnerLoginRequiredError
+	OwnerLoginRequiredError,
+	SessionEndedByReplayError
 } from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';
 
@@ -1237,6 +1239,36 @@ describe('cachedOwnerProvider', () => {
 			} finally {
 				vi.unstubAllGlobals();
 			}
+		}
+	);
+
+	it.each([
+		{ problem: 'stale-refresh-token', replayed: false },
+		{ problem: refreshTokenReplayedProblem, replayed: true }
+	])(
+		'asks for a new login after a refused refresh with $problem, and names a replay',
+		async ({ problem, replayed }) => {
+			const refusal = new CupboardHttpError(
+				'POST',
+				'/token',
+				400,
+				JSON.stringify({ error: 'invalid_grant', problem })
+			);
+			const { harness } = sessionHarness(staleSession);
+			const provider = cachedOwnerProvider(target, {
+				...harness,
+				client: { tokenRefresh: () => Promise.reject(refusal) }
+			});
+			const outcome = await outcomeOf(provider.refresh());
+
+			expect({
+				loginRequired:
+					outcome.kind === 'rejected' &&
+					outcome.error instanceof OwnerLoginRequiredError,
+				replayed:
+					outcome.kind === 'rejected' &&
+					outcome.error instanceof SessionEndedByReplayError
+			}).toStrictEqual({ loginRequired: true, replayed });
 		}
 	);
 

@@ -119,19 +119,21 @@ Attestations record where published store paths came from. See
 
 ## Where keys and secrets are kept
 
-| What                                     | Where it's kept                                  | How it's protected                                                                                                            |
-| ---------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| Tenant signing and access-token keys     | The tenant's Durable Object storage              | Cloudflare's storage encryption. cupboard adds none.                                                                          |
-| Control keys, which sign operator tokens | `CONTROL_DB`                                     | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                     |
-| `CONTROL_KEY_WRAP_SECRET`                | Only the control Worker, and the operator's copy | The tenant Worker never has it. HKDF also uses this secret to derive the keys that encrypt operator refresh tokens.           |
-| R2 access key                            | The tenant Worker                                | It gives access to every tenant's stored objects.                                                                             |
-| `PUSH_ID_SIGNING_KEY`                    | Both Workers                                     | It signs push IDs. HKDF also uses this secret to derive the keys that encrypt tenant refresh tokens.                          |
-| Static read credentials                  | D1, as salted SHA-256 hashes                     | The CLI generates each password from 32 random bytes, and the server accepts only that format. The plaintext is never stored. |
-| CLI sessions and Cloudflare sign-in      | `~/.config/cupboard` on each machine             | File permissions. The Cloudflare sign-in can deploy to the account.                                                           |
+| What                                     | Where it's kept                                  | How it's protected                                                                                                                          |
+| ---------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tenant signing and access-token keys     | The tenant's Durable Object storage              | Cloudflare's storage encryption. cupboard adds none.                                                                                        |
+| Control keys, which sign operator tokens | `CONTROL_DB`                                     | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                                   |
+| `CONTROL_KEY_WRAP_SECRET`                | Only the control Worker, and the operator's copy | The tenant Worker never has it. HKDF also uses this secret to derive the keys that encrypt operator refresh tokens.                         |
+| R2 access key                            | The tenant Worker                                | It gives access to every tenant's stored objects.                                                                                           |
+| `PUSH_ID_SIGNING_KEY`                    | Both Workers                                     | It signs push IDs. HKDF also uses this secret to derive the keys that encrypt tenant refresh tokens and identities in tenant access tokens. |
+| Static read credentials                  | D1, as salted SHA-256 hashes                     | The CLI generates each password from 32 random bytes, and the server accepts only that format. The plaintext is never stored.               |
+| CLI sessions and Cloudflare sign-in      | `~/.config/cupboard` on each machine             | File permissions. The Cloudflare sign-in can deploy to the account.                                                                         |
 
 Changing `PUSH_ID_SIGNING_KEY` ends every tenant refresh session issued by this
 release, and tenant administrators with such a session have to sign in again.
 Changing `CONTROL_KEY_WRAP_SECRET` ends every operator session in the same way.
+Tenant access tokens issued before a change of `PUSH_ID_SIGNING_KEY` can no
+longer create access keys, and they expire within 15 minutes.
 
 When a client uploads to R2, it gets a temporary credential. That credential can
 only write to its own push's staging area, and lasts at most six hours.
@@ -179,6 +181,26 @@ grants the matching trust rules permit. A token whose audience is the tenant
 URL, as for a CI job, gets only an access token. A tenant also issues no refresh
 token for a request for content-read grants only, such as a read acquisition.
 
+A tenant access token contains its grants, the trust rule that issued them when
+one rule covers them (`cb_rule`), and the id of the refresh session that it came
+from (`cb_session`). It also contains the verified identity that it was issued
+for, in `cb_identity`, encrypted so that anyone with the token can't read it. A
+token narrowed by attenuation keeps all three. Revoking a session with
+`cupboard session revoke` also deletes every access key below it.
+
+The server rotates a session's refresh token on each renewal. When a refresh
+token that was already used arrives again after the retry grace, the server ends
+the session. A lost refresh response or a restored backup causes such a replay
+as well as a stolen token, so the server doesn't delete the keys below the
+session: deleting long-lived keys needs a deliberate revocation. A key created
+with `access-key:create` outlives the session, and any other key expires no
+later than the token that created it. The CLI that presents the replayed token
+reports the replay, and `cupboard session list` shows the ended session with the
+time of the replay and the number of keys below it. To deal with a theft, find
+the session with `cupboard session list`, run `cupboard session revoke` with its
+ID, which deletes the keys below it, and check the remaining keys with
+`cupboard access-key list`.
+
 A subject token can be bound to the server that exchanges it in two ways. It is
 audience-bound when its audience is the tenant or deployment URL, as for a
 GitHub Actions job. It is nonce-bound when the token request includes a random
@@ -211,15 +233,15 @@ in either case.
 
 ## Revoking access
 
-| To revoke                       | Do this                                                                                         | It takes effect                                     |
-| ------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| An administrator                | Remove every matching trust rule that permits their authority.                                  | Within 10 minutes, when their access token expires. |
-| A CI job                        | Remove its trust rule.                                                                          | Within 15 minutes.                                  |
-| A sign-in session               | List it with `cupboard session list`, then run `cupboard session revoke`.                       | Within 10 minutes; renewal stops at once.           |
-| An operator's sign-in session   | List it with `cupboard deployment session list`, then run `cupboard deployment session revoke`. | Within 10 minutes; renewal stops at once.           |
-| A leaked access token           | [Rotate the access-token key](./admin/keys.md#access-token-keys), then retire the old one.      | Immediately.                                        |
-| A leaked static read credential | Rotate it with `cupboard tenant rotate-credential` or `rotate-cache-credential`.                | Immediately.                                        |
-| A compromised signing key       | [Rotate it](./admin/keys.md#rotating-the-signing-key), and remove it from clients.              | As clients are updated.                             |
+| To revoke                       | Do this                                                                                                                | It takes effect                                     |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| An administrator                | Remove every matching trust rule that permits their authority.                                                         | Within 10 minutes, when their access token expires. |
+| A CI job                        | Remove its trust rule.                                                                                                 | Within 15 minutes.                                  |
+| A sign-in session               | List it with `cupboard session list`, then run `cupboard session revoke`. This also deletes every access key below it. | Within 10 minutes; renewal stops at once.           |
+| An operator's sign-in session   | List it with `cupboard deployment session list`, then run `cupboard deployment session revoke`.                        | Within 10 minutes; renewal stops at once.           |
+| A leaked access token           | [Rotate the access-token key](./admin/keys.md#access-token-keys), then retire the old one.                             | Immediately.                                        |
+| A leaked static read credential | Rotate it with `cupboard tenant rotate-credential` or `rotate-cache-credential`.                                       | Immediately.                                        |
+| A compromised signing key       | [Rotate it](./admin/keys.md#rotating-the-signing-key), and remove it from clients.                                     | As clients are updated.                             |
 
 `cupboard logout` deletes the sessions saved on one machine, and with
 `--cloudflare` the saved Cloudflare sign-in too. It also sends the server, or

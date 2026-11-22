@@ -2371,6 +2371,45 @@ authorisation uses the issued grants and does not depend on that audit claim.
 Implicit interactive exchanges keep their existing single-rule selection.
 Composition creates no refresh session for a CI exchange or a read acquisition.
 
+Every tenant access token also contains, in `cb_identity`, the verified OIDC
+identity that it was issued for: the issuer, the subject, the audiences and the
+other string claims that trust-rule selection reads. The claim is sealed with
+AES-GCM. HKDF derives the key from `PUSH_ID_SIGNING_KEY` with a random salt for
+each token and the `info` label `cupboard/access-identity/v1` with the tenant.
+The token's subject is the additional authenticated data, so the sealed value
+opens only in a token with the same subject. Anyone with the token can't read
+the identity. Verification checks only that the claim is present and well
+formed. The tenant object opens it when the token creates an access key.
+
+A token issued with a refresh token, or from a refresh family, also contains the
+family's id in `cb_session`. Revoking that session with `session:revoke` deletes
+the access keys below it. A logout, an expiry and a replayed refresh token end
+the family and keep those keys, because a replay also follows a lost refresh
+response. Attenuation copies `cb_identity`, `cb_rule` and `cb_session` into the
+narrower token without opening the identity. A tenant access token without
+`cb_identity` is refused.
+
+A replay deletes the family's members, sets `replayed_at` on the family row and
+advances its generation. No refresh token of the family authenticates again, and
+a token from the session can no longer create a key below it. A rotation that
+read the family before the replay fails its compare-and-set on the generation. A
+retry is refused because the family has `replayed_at` set. When a logout, a
+refresh after expiry, the member limit or a change of policy ends a family, the
+tenant object deletes the family's members and leaves a replayed row in place.
+Collection deletes that row once the family has expired and `retained_by_keys`
+is clear. The presenter of the replayed token gets the problem
+`refresh-token-replayed`.
+
+The replay also sets `retained_by_keys` when access keys remain below the
+session. Deleting or collecting the last of them clears it. `session list` shows
+an unexpired family and a retained one, with the number of keys below each, and
+`session revoke` deletes either. Collection and the maintenance schedule read
+families through `refresh_session_family_collectable_idx`, a partial index that
+leaves out retained families, so their cost does not grow with the number of
+retained sessions. Releases before migration `0090_access_keys` read families
+through `refresh_session_family_expires_at_idx`. The index can be dropped once
+no supported rollback target predates `0090_access_keys`.
+
 Interactive refresh credentials contain a versioned, tenant-bound identity and
 maximum grant set. Their complete opaque value is authenticated against the
 member's stored hash before any claims enter policy selection. Each refresh
@@ -2382,7 +2421,9 @@ Version 2 credentials encrypt the identity and grant set with AES-GCM, under a
 key that HKDF derives from `PUSH_ID_SIGNING_KEY`, the tenant and the member, so
 a client cannot read them. The server still accepts version 1 credentials, which
 contain both as readable JSON, but every rotation issues version 2. Changing
-`PUSH_ID_SIGNING_KEY` therefore ends every version 2 session.
+`PUSH_ID_SIGNING_KEY` therefore ends every version 2 session. A tenant access
+token issued before the change can no longer create access keys, because its
+identity no longer opens. Such a token expires within 15 minutes.
 
 `refresh_session_family` records the active member, generation and timestamps.
 It also records who the family belongs to: the verified issuer and subject, and

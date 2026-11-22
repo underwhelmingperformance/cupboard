@@ -880,13 +880,39 @@ export const refreshTokenFamilies = sqliteTable(
 		// until their next rotation.
 		issuer: text('issuer').$type<OidcIssuer>(),
 		subject: text('subject').$type<OidcSubject>(),
-		rule: text('rule').$type<TrustRuleId>()
+		rule: text('rule').$type<TrustRuleId>(),
+		// When a replayed refresh token ended the family. The family then has no
+		// members, so it cannot renew, and the row remains so that the tenant
+		// can find the session and revoke it with the access keys below it.
+		replayedAt: text('replayed_at').$type<IsoTimestamp>(),
+		// Whether a replay ended the family while access keys remain below it.
+		// Collection keeps such a family. Deleting or collecting the last key
+		// below it clears the flag.
+		retainedByKeys: integer('retained_by_keys', { mode: 'boolean' })
+			.notNull()
+			.default(false)
 	},
 	(table) => [
 		unique('refresh_session_family_active_member_unique').on(
 			table.activeMemberId
 		),
-		index('refresh_session_family_expires_at_idx').on(table.expiresAt, table.id)
+		// Releases before migration 0090_access_keys read families through this
+		// index in collection and maintenance. Later releases use the two partial
+		// indexes below. Drop this index once no supported rollback target
+		// predates 0090_access_keys.
+		index('refresh_session_family_expires_at_idx').on(
+			table.expiresAt,
+			table.id
+		),
+		// Collection and maintenance scans read families in expiry order. The
+		// families that keys retain stay out of this index, so those scans never
+		// read them.
+		index('refresh_session_family_collectable_idx')
+			.on(table.expiresAt, table.id)
+			.where(sql`${table.retainedByKeys} = 0`),
+		index('refresh_session_family_retained_idx')
+			.on(table.id)
+			.where(sql`${table.retainedByKeys} = 1`)
 	]
 );
 

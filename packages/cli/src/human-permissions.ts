@@ -37,7 +37,8 @@ const operationLabels: Readonly<Record<Operation, string>> = {
 	'auth-key:rotate': 'rotate tenant sign-in keys',
 	'auth-key:retire': 'retire tenant sign-in keys',
 	'session:list': 'list tenant sign-in sessions',
-	'session:revoke': 'revoke tenant sign-in sessions',
+	'session:revoke':
+		'revoke tenant sign-in sessions and delete the access keys below them',
 	'oidc-trust:list': 'list tenant trust rules',
 	'oidc-trust:read': 'read tenant trust rules',
 	'oidc-trust:add': 'add or extend tenant trust rules',

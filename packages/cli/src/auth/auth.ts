@@ -3,6 +3,7 @@ import {
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import { refreshTokenReplayedProblem } from '@cupboard/protocol/sessions';
 import { bestEffort } from '@cupboard/shared/cleanup';
 import { StatusCodes } from 'http-status-codes';
 
@@ -11,14 +12,18 @@ import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
 import { type RefreshWindow } from '../client/refresh-retry.ts';
 import { jwtExpiryMs } from '../deploy/cloudflare-oauth.ts';
-import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
+import {
+	CupboardHttpError,
+	OwnerLoginRequiredError,
+	SessionEndedByReplayError
+} from '../errors.ts';
 
 import {
 	fetchGithubOidcToken,
 	type GithubOidcEnvironment,
 	githubOidcExchangeFailure
 } from './github-oidc.ts';
-import { hasOAuthErrorCode } from './oauth-error.ts';
+import { hasOAuthErrorCode, oauthErrorProblem } from './oauth-error.ts';
 import { type SecretFileLockState } from './secret-lock.ts';
 import {
 	type CachedSession,
@@ -230,6 +235,13 @@ async function rotateSession(
 			await client.tokenRefresh(refreshToken, window)
 		);
 	} catch (error) {
+		if (
+			isStaleRefreshToken(error) &&
+			oauthErrorProblem(error) === refreshTokenReplayedProblem
+		) {
+			throw new SessionEndedByReplayError({ cause: error });
+		}
+
 		if (isStaleRefreshToken(error)) {
 			return undefined;
 		}

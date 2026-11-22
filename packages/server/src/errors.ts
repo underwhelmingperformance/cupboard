@@ -32,6 +32,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
 import { invalidPlanArchiveTicketProblem } from '@cupboard/protocol/plan-archive';
+import { refreshTokenReplayedProblem } from '@cupboard/protocol/sessions';
 import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import {
@@ -1460,6 +1461,21 @@ export class StaleRefreshTokenError extends InvalidGrantError {
 	constructor() {
 		super('Refresh token is invalid or expired');
 		this.name = 'StaleRefreshTokenError';
+	}
+}
+
+/**
+A presented refresh token authenticated, but another request had already used
+it after the retry grace. The server has ended the session. The presenter
+already has a token of the family, so the distinct problem reveals nothing
+about other sessions.
+*/
+export class RefreshTokenReplayedError extends InvalidGrantError {
+	readonly problem = refreshTokenReplayedProblem;
+
+	constructor() {
+		super('Refresh token was already used; the session has ended');
+		this.name = 'RefreshTokenReplayedError';
 	}
 }
 

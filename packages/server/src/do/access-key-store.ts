@@ -33,6 +33,7 @@ import {
 	isNotNull,
 	isNull,
 	lte,
+	notExists,
 	or,
 	type SQL,
 	sql
@@ -56,6 +57,7 @@ import {
 } from '../errors.ts';
 
 import { type SchemaWriter } from './context.ts';
+import { jsonValueList } from './json-list.ts';
 
 /**
 The limits on how many access keys can exist. The depth and origin limits
@@ -139,10 +141,33 @@ export async function openAccessKeyCreator(
 type AccessKeyRow = typeof accessKeys.$inferSelect;
 
 /**
+Counts the stored access keys below `ancestor`, at any depth.
+*/
+export function countAccessKeysBelow(
+	database: SchemaWriter,
+	ancestor: AccessKeyParent
+): number {
+	return (
+		database
+			.select({ count: count() })
+			.from(accessKeyAncestors)
+			.where(
+				and(
+					eq(accessKeyAncestors.ancestorKind, ancestor.kind),
+					eq(accessKeyAncestors.ancestorId, ancestor.id)
+				)
+			)
+			.get()?.count ?? 0
+	);
+}
+
+/**
 Deletes the access keys below `ancestor`, and the key itself when it is an
 access key, with every row that records their ancestry. Returns the number
 of deleted keys. Collection keeps the rows in which a collected key is the
 ancestor, so a collected key below `ancestor` does not hide the keys below it.
+A session that no key remains below is released, as
+{@link releaseKeylessFamilies} describes.
 */
 export function deleteAccessKeysBelow(
 	database: SchemaWriter,
@@ -157,6 +182,13 @@ export function deleteAccessKeysBelow(
 				eq(accessKeyAncestors.ancestorId, ancestor.id)
 			)
 		);
+	const sessions =
+		ancestor.kind === 'access-key'
+			? sessionsAbove(
+					database,
+					eq(accessKeyAncestors.descendantId, ancestor.id)
+				)
+			: [ancestor.id];
 	const deleted = database
 		.delete(accessKeys)
 		.where(
@@ -179,7 +211,59 @@ export function deleteAccessKeysBelow(
 		)
 		.run();
 
+	releaseKeylessFamilies(database, sessions);
+
 	return deleted.length;
+}
+
+/**
+Returns the sessions above the keys that `descendants` selects from
+`access_key_ancestor`. Each key has at most one session above it, at the root
+of its lineage.
+*/
+function sessionsAbove(database: SchemaWriter, descendants: SQL): string[] {
+	return database
+		.selectDistinct({ id: accessKeyAncestors.ancestorId })
+		.from(accessKeyAncestors)
+		.where(and(eq(accessKeyAncestors.ancestorKind, 'session'), descendants))
+		.all()
+		.map((row) => row.id);
+}
+
+/**
+Clears `retained_by_keys` on each family among `sessions` that has no access
+key left below it. Collection then deletes the family once it has expired.
+*/
+function releaseKeylessFamilies(
+	database: SchemaWriter,
+	sessions: readonly string[]
+): void {
+	if (sessions.length === 0) {
+		return;
+	}
+
+	const keysBelow = database
+		.select({ id: accessKeyAncestors.descendantId })
+		.from(accessKeyAncestors)
+		.where(
+			and(
+				eq(accessKeyAncestors.ancestorKind, 'session'),
+				eq(accessKeyAncestors.ancestorId, refreshTokenFamilies.id)
+			)
+		);
+	const listed = jsonValueList(sessions);
+
+	database
+		.update(refreshTokenFamilies)
+		.set({ retainedByKeys: false })
+		.where(
+			and(
+				inArray(refreshTokenFamilies.id, listed),
+				sql`${refreshTokenFamilies.retainedByKeys} = 1`,
+				notExists(keysBelow)
+			)
+		)
+		.run();
 }
 
 /**
@@ -396,19 +480,25 @@ export class AccessKeyStore {
 				)
 				.orderBy(asc(accessKeys.expiresAt), asc(accessKeys.id))
 				.limit(limit);
+			const sessions = sessionsAbove(
+				transaction,
+				inArray(accessKeyAncestors.descendantId, due)
+			);
 
 			transaction
 				.delete(accessKeyAncestors)
 				.where(inArray(accessKeyAncestors.descendantId, due))
 				.run();
 
-			return (
-				transaction
-					.delete(accessKeys)
-					.where(inArray(accessKeys.id, due))
-					.returning({ id: accessKeys.id })
-					.all().length === limit
-			);
+			const deleted = transaction
+				.delete(accessKeys)
+				.where(inArray(accessKeys.id, due))
+				.returning({ id: accessKeys.id })
+				.all();
+
+			releaseKeylessFamilies(transaction, sessions);
+
+			return deleted.length === limit;
 		});
 	}
 }
@@ -562,7 +652,8 @@ function isParentLive(
 				.where(
 					and(
 						eq(refreshTokenFamilies.id, parent.id),
-						gt(refreshTokenFamilies.expiresAt, now)
+						gt(refreshTokenFamilies.expiresAt, now),
+						isNull(refreshTokenFamilies.replayedAt)
 					)
 				)
 				.get() !== undefined

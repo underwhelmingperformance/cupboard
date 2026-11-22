@@ -74,6 +74,7 @@ import {
 } from './garbage-collection-inputs.ts';
 import { inFlightUploadSelect } from './in-flight-upload.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
+import { collectableFamilyCondition } from './refresh-sessions-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { RootReleaseService } from './root-releases.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
@@ -1927,7 +1928,12 @@ export class GarbageCollectionService {
 			const family = transaction
 				.select({ id: schema.refreshTokenFamilies.id })
 				.from(schema.refreshTokenFamilies)
-				.where(lte(schema.refreshTokenFamilies.expiresAt, now))
+				.where(
+					and(
+						lte(schema.refreshTokenFamilies.expiresAt, now),
+						collectableFamilyCondition()
+					)
+				)
 				.orderBy(
 					asc(schema.refreshTokenFamilies.expiresAt),
 					asc(schema.refreshTokenFamilies.id)
@@ -1979,7 +1985,12 @@ export class GarbageCollectionService {
 			const next = transaction
 				.select({ id: schema.refreshTokenFamilies.id })
 				.from(schema.refreshTokenFamilies)
-				.where(lte(schema.refreshTokenFamilies.expiresAt, now))
+				.where(
+					and(
+						lte(schema.refreshTokenFamilies.expiresAt, now),
+						collectableFamilyCondition()
+					)
+				)
 				.limit(1)
 				.get();
 

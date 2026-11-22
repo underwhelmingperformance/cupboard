@@ -9,6 +9,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { accessKeyIdSchema } from '@cupboard/protocol/access-keys';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	uploadActionDecisionSchema,
@@ -442,8 +443,27 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 292,
-			largeBacklogCost: 292
+			smallBacklogCost: 294,
+			largeBacklogCost: 294
+		});
+	});
+
+	// A family that a replay ended stays while access keys remain below it,
+	// which can be for good. Collection and the eligibility scan must not read
+	// those families.
+	it('collects and reconciles without reading retained replayed families', async () => {
+		await initialise();
+		await currentServer().runGarbageCollection();
+
+		await seedRetainedReplayedFamilies(3, 'small');
+		const smallBacklog = await collectionAndReconcileCost();
+
+		await seedRetainedReplayedFamilies(197, 'large');
+		const largeBacklog = await collectionAndReconcileCost();
+
+		expect({ smallBacklog, largeBacklog }).toStrictEqual({
+			smallBacklog: { collection: 294, reconcile: 24 },
+			largeBacklog: { collection: 294, reconcile: 24 }
 		});
 	});
 
@@ -453,12 +473,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 276,
+				rowsRead: 278,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 276,
+				rowsRead: 278,
 				usesIndex: true,
 				sorts: false
 			}
@@ -495,8 +515,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 302,
-			largeBacklogCost: 302
+			smallBacklogCost: 304,
+			largeBacklogCost: 304
 		});
 	});
 
@@ -527,8 +547,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 934, rowsWritten: 130 },
-			largeBacklog: { rowsRead: 934, rowsWritten: 130 }
+			smallBacklog: { rowsRead: 936, rowsWritten: 130 },
+			largeBacklog: { rowsRead: 936, rowsWritten: 130 }
 		});
 	});
 
@@ -554,8 +574,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 330,
-			largeBacklogCost: 330
+			smallBacklogCost: 332,
+			largeBacklogCost: 332
 		});
 	});
 });
@@ -828,6 +848,53 @@ async function seedRefreshTokenFamilies(
 			});
 		}
 	});
+}
+
+// Expired families that a replay ended, each with one access key below it.
+async function seedRetainedReplayedFamilies(
+	count: number,
+	label: string
+): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		for (let index = 0; index < count; index += 1) {
+			const id = `${label}-${String(index)}`;
+
+			instance.context.db.transaction((transaction) => {
+				transaction
+					.insert(schema.refreshTokenFamilies)
+					.values({
+						id,
+						activeMemberId: `${id}-member`,
+						generation: 1,
+						createdAt: isoTimestampSchema.parse('2019-01-01T00:00:00.000Z'),
+						expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z'),
+						replayedAt: isoTimestampSchema.parse('2019-06-01T00:00:00.000Z'),
+						retainedByKeys: true
+					})
+					.run();
+				transaction
+					.insert(schema.accessKeyAncestors)
+					.values({
+						ancestorKind: 'session',
+						ancestorId: id,
+						descendantId: accessKeyIdSchema.parse(crypto.randomUUID())
+					})
+					.run();
+			});
+		}
+	});
+}
+
+// The rows that one collection pass and one eligibility reconciliation read.
+async function collectionAndReconcileCost(): Promise<{
+	collection: number;
+	reconcile: number;
+}> {
+	const collection = await maintenancePassCost('garbage-collection', () =>
+		currentServer().runGarbageCollection()
+	);
+
+	return { collection: collection.rowsRead, reconcile: await reconcileCost() };
 }
 
 async function seedExpiredRefreshFamily(

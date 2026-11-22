@@ -45,6 +45,7 @@ import {
 } from './access-key-store.ts';
 import { type ServerContext } from './context.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
+import { markFamilyReplayed } from './refresh-sessions-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const now = new Date('2001-01-01T00:00:00.000Z');
@@ -150,6 +151,15 @@ async function outcomeOf(creating: Promise<unknown>): Promise<CreationOutcome> {
 
 		throw error;
 	}
+}
+
+// The `retained_by_keys` flag of the session's family.
+function retainedFamily(context: ServerContext): boolean | undefined {
+	return context.db
+		.select({ retained: refreshTokenFamilies.retainedByKeys })
+		.from(refreshTokenFamilies)
+		.where(eq(refreshTokenFamilies.id, session))
+		.get()?.retained;
 }
 
 function storedKeyIds(context: ServerContext): string[] {
@@ -509,6 +519,108 @@ describe('access-key listing and deletion', () => {
 			},
 			{ accessKeys: [third], unreadableAccessKeys: [] }
 		]);
+	});
+
+	it.each([
+		{
+			name: 'one of two sibling keys is deleted',
+			build: async (store: AccessKeyStore) => {
+				const first = await store.create(tokenCreator(), {
+					grants: [readBuilds]
+				});
+				const second = await store.create(tokenCreator(), {
+					grants: [readBuilds]
+				});
+
+				return {
+					remove: () => {
+						store.delete(first.id);
+					},
+					remaining: second.id
+				};
+			}
+		},
+		{
+			name: 'a child key is deleted',
+			build: async (store: AccessKeyStore) => {
+				const parent = await store.create(tokenCreator(), {
+					grants: [readBuilds]
+				});
+				const child = await store.create(keyCreator(parent.id), {
+					grants: [readBuilds]
+				});
+
+				return {
+					remove: () => {
+						store.delete(child.id);
+					},
+					remaining: parent.id
+				};
+			}
+		},
+		{
+			name: 'a parent key is collected while its child remains',
+			build: async (store: AccessKeyStore) => {
+				const parent = await store.create(tokenCreator(), {
+					grants: [readBuilds],
+					expiresAt: withinToken
+				});
+				const child = await store.create(keyCreator(parent.id), {
+					grants: [readBuilds]
+				});
+				const afterParent = isoTimestamp(new Date(Date.parse(withinToken) + 1));
+
+				return {
+					remove: () => {
+						store.deleteExpired(afterParent, phaseStepSize);
+					},
+					remaining: child.id
+				};
+			}
+		}
+	])(
+		'keeps a replayed session retained while a key remains below it after $name',
+		async ({ build }) => {
+			const result = await withStore(async (store, context) => {
+				const { remove, remaining } = await build(store);
+				markFamilyReplayed(context.db, session, isoTimestamp(now));
+				remove();
+				const afterRemoval = {
+					keys: storedKeyIds(context),
+					retained: retainedFamily(context)
+				};
+				store.delete(accessKeyIdSchema.parse(remaining));
+
+				return {
+					afterRemoval,
+					afterLast: {
+						keys: storedKeyIds(context),
+						retained: retainedFamily(context)
+					},
+					remaining
+				};
+			});
+
+			expect(result).toStrictEqual({
+				afterRemoval: { keys: [result.remaining], retained: true },
+				afterLast: { keys: [], retained: false },
+				remaining: result.remaining
+			});
+		}
+	);
+
+	it('releases a replayed session when it deletes the keys below the session', async () => {
+		const result = await withStore(async (store, context) => {
+			await store.create(tokenCreator(), { grants: [readBuilds] });
+			markFamilyReplayed(context.db, session, isoTimestamp(now));
+			context.db.transaction((transaction) =>
+				deleteAccessKeysBelow(transaction, { kind: 'session', id: session })
+			);
+
+			return { keys: storedKeyIds(context), retained: retainedFamily(context) };
+		});
+
+		expect(result).toStrictEqual({ keys: [], retained: false });
 	});
 
 	it('deletes a key and every key below it, and keeps the others', async () => {

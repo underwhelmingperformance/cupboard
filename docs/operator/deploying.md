@@ -162,8 +162,9 @@ need a copy. Both Workers keep it. When a deploy finds that only one Worker has
 the key, it generates a new one for both, and pushes that were in progress have
 to be run again. Changing the key also ends every tenant refresh session issued
 by this release, and tenant administrators with such a session have to sign in
-again. If `PUSH_ID_SIGNING_KEY` is set in the environment, `init` uploads that
-value to both Workers on every deploy.
+again. Tenant access tokens issued before the change can no longer create access
+keys, and they expire within 15 minutes. If `PUSH_ID_SIGNING_KEY` is set in the
+environment, `init` uploads that value to both Workers on every deploy.
 
 ## The instance name
 

@@ -21,6 +21,7 @@ import * as schema from '../db/schema.ts';
 
 import { type ServerContext } from './context.ts';
 import { GarbageCollectionInputs } from './garbage-collection-inputs.ts';
+import { collectableFamilyCondition } from './refresh-sessions-service.ts';
 import {
 	subrequestSliceReserve,
 	withHeldSubrequests
@@ -187,6 +188,7 @@ export class MaintenanceEligibilityService {
 		const family = this.context.db
 			.select({ expiresAt: schema.refreshTokenFamilies.expiresAt })
 			.from(schema.refreshTokenFamilies)
+			.where(collectableFamilyCondition())
 			.orderBy(
 				asc(schema.refreshTokenFamilies.expiresAt),
 				asc(schema.refreshTokenFamilies.id)

@@ -795,6 +795,21 @@ export class OwnerLoginRequiredError extends CliError {
 }
 
 /**
+The server ended the sign-in session because one of its refresh tokens was
+used twice. That follows a lost refresh response or a restored backup of the
+CLI's sessions, and also a copied token.
+*/
+export class SessionEndedByReplayError extends OwnerLoginRequiredError {
+	constructor(options?: ErrorOptions) {
+		super(
+			'The server ended your cupboard session because one of its refresh tokens was used twice. That happens after a lost response or a restored backup of your sessions, and also when someone else has a copy. Run `cupboard login`. A tenant administrator should check `cupboard session list` for the ended session and run `cupboard session revoke <id>` if it may have been stolen.',
+			options
+		);
+		this.name = 'SessionEndedByReplayError';
+	}
+}
+
+/**
 Renders a renewal window in whole seconds, for error messages.
 */
 export function windowSeconds(windowMs: number): string {

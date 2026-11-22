@@ -1,8 +1,8 @@
 import type { CliUi } from '@cupboard/cli-ui';
+import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type RefreshSessionId,
 	refreshSessionIdSchema,
-	type RefreshSessionListResponse,
 	type RefreshSessionRevokeResponse,
 	type RefreshSessionSummary
 } from '@cupboard/protocol/sessions';
@@ -34,11 +34,26 @@ const sessionNouns: Readonly<Record<SessionScope, string>> = {
 	operator: 'operator sign-in session'
 };
 
+/**
+A listed session. A tenant session also counts the access keys below it, and
+records when a replayed refresh token ended it.
+*/
+type ListedSession = RefreshSessionSummary & {
+	readonly accessKeysBelow?: number;
+	readonly replayedAt?: IsoTimestamp;
+};
+
 export interface SessionClient {
-	list(): Promise<RefreshSessionListResponse>;
+	list(): Promise<{ readonly sessions: readonly ListedSession[] }>;
+	/**
+	Revokes a session. A tenant session's response also counts the access keys
+	below the session that the revocation deleted.
+	*/
 	revoke(input: {
 		id: RefreshSessionId;
-	}): Promise<RefreshSessionRevokeResponse>;
+	}): Promise<
+		RefreshSessionRevokeResponse & { readonly deletedAccessKeys?: number }
+	>;
 }
 
 export function registerSessionCommands(
@@ -54,7 +69,7 @@ export function registerSessionCommands(
 	session
 		.command('list')
 		.description(
-			'List unexpired sign-in sessions with their recorded identity and trust rule.'
+			'List unexpired sign-in sessions with their recorded identity, trust rule and the number of access keys below each, and each session that a replayed refresh token ended while it is unexpired or has access keys below it.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -70,7 +85,7 @@ export function registerSessionCommands(
 	session
 		.command('revoke')
 		.description(
-			'Revoke a sign-in session. Its refresh token stops working immediately, and its last access token expires within ten minutes.'
+			'Revoke a sign-in session and delete every access key below it, even when the session has already ended. Its refresh token stops working immediately, and its last access token expires within ten minutes.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'session ID, as `cupboard session list` shows it')
@@ -180,7 +195,9 @@ export async function runSessionRevoke(
 	const outcome = await ui.confirm({
 		message: `Revoke ${noun} ${id}?`,
 		detail:
-			'Its refresh token stops working immediately. Its last access token remains valid until it expires, within ten minutes.'
+			scope === 'tenant'
+				? 'Its refresh token stops working immediately, and every access key below it is deleted. Its last access token remains valid until it expires, within ten minutes.'
+				: 'Its refresh token stops working immediately. Its last access token remains valid until it expires, within ten minutes.'
 	});
 
 	if (outcome !== 'yes') {
@@ -204,12 +221,20 @@ export async function runSessionRevoke(
 			{
 				label: 'Outcome',
 				value: result.revoked ? 'session revoked' : 'session not found'
-			}
+			},
+			...(result.deletedAccessKeys === undefined
+				? []
+				: [
+						{
+							label: 'Access keys deleted',
+							value: String(result.deletedAccessKeys)
+						}
+					])
 		]
 	});
 }
 
-function sessionRow(session: RefreshSessionSummary): ResultRow {
+function sessionRow(session: ListedSession): ResultRow {
 	return {
 		label: session.id,
 		value: [
@@ -217,9 +242,21 @@ function sessionRow(session: RefreshSessionSummary): ResultRow {
 			`subject ${session.subject ?? 'unknown'}`,
 			`rule ${session.rule ?? 'unknown'}`,
 			`created ${formatTimestamp(session.createdAt)}`,
-			`expires ${formatTimestamp(session.expiresAt)}`
+			`expires ${formatTimestamp(session.expiresAt)}`,
+			...(session.accessKeysBelow === undefined
+				? []
+				: [accessKeysBelowDescription(session.accessKeysBelow)]),
+			...(session.replayedAt === undefined
+				? []
+				: [
+						`ended at ${formatTimestamp(session.replayedAt)} by a refresh token that was used twice, so revoke it if it may have been stolen`
+					])
 		].join('; ')
 	};
+}
+
+function accessKeysBelowDescription(count: number): string {
+	return `${String(count)} access ${count === 1 ? 'key' : 'keys'} below it`;
 }
 
 function capitalised(text: string): string {
