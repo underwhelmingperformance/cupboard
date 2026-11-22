@@ -7,6 +7,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, type SQL, sql } from 'drizzle-orm';
@@ -64,6 +65,7 @@ import {
 } from '../http/http.ts';
 import { remainingReadBudgetMs } from '../http/read-deadline.ts';
 
+import { isCacheReadCovered } from './cache-read-grants.ts';
 import {
 	isReadAuthorised,
 	type ReadVerifier,
@@ -110,6 +112,26 @@ export interface ViewReadAuthentication {
 }
 
 /**
+The grants that every read of a cache has, whatever credential it presents:
+content reads of a public cache, and none for a private cache. A credential
+that fails verification adds no grants. A public cache therefore serves its
+request as it serves an anonymous one, and a private cache refuses it.
+*/
+export function publicReadGrants(scope: ReadScope): AuthorizationDetails {
+	if (scope.access !== 'public') {
+		return [];
+	}
+
+	return [
+		{
+			type: 'cupboard_cache',
+			actions: ['cache:content-read'],
+			cache: scope.scope
+		}
+	];
+}
+
+/**
 Authenticates a read, or returns the refusal to send instead.
 
 Admission reads every verifier from the authoritative D1 rows on each
@@ -126,7 +148,10 @@ export async function guardScopedRead(
 	scope: ReadScope,
 	authentication: CacheReadAuthentication
 ): Promise<Response | undefined> {
-	if (scope.access === 'public') {
+	// A verified credential's grants add to the public grants. When the
+	// public grants cover the read, the credential cannot change the outcome,
+	// so it is not verified.
+	if (isCacheReadCovered(publicReadGrants(scope), scope.scope, false)) {
 		return undefined;
 	}
 

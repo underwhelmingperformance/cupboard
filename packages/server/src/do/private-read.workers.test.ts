@@ -78,6 +78,12 @@ function keyBasic(secret: string, user = 'anyone'): RequestInit {
 	};
 }
 
+function unknownKeyBasic(): RequestInit {
+	return keyBasic(
+		`cupboard_ak_00000000-0000-4000-8000-0000000000ff_${'a'.repeat(64)}`
+	);
+}
+
 describe('per-cache private reads', () => {
 	beforeEach(async () => {
 		await resetTestServer();
@@ -530,5 +536,41 @@ describe('access-key reads', () => {
 			wrong: StatusCodes.UNAUTHORIZED,
 			right: StatusCodes.OK
 		});
+	});
+
+	it.each([
+		{ name: 'an unknown access key', credential: unknownKeyBasic },
+		{
+			name: 'an invalid access token',
+			credential: () => tokenBasic('malformed')
+		}
+	])(
+		'serves a public cache to a request with $name as to an anonymous one',
+		async ({ credential }) => {
+			const admin = await initialiseViaWorker();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			await pushPathToTenant(fixtureTenant, admin, metadata);
+			const path = `/${metadata.storePathHash}.narinfo`;
+
+			const anonymous = await readFetch(path);
+			const presented = await readFetch(path, credential());
+
+			expect({
+				status: presented.status,
+				body: await presented.text()
+			}).toStrictEqual({
+				status: anonymous.status,
+				body: await anonymous.text()
+			});
+		}
+	);
+
+	it('refuses a private cache to a request with an unknown access key', async () => {
+		const admin = await initialiseViaWorker();
+		await putCache(admin, { kind: 'default' }, 'private');
+
+		const response = await readFetch('/nix-cache-info', unknownKeyBasic());
+
+		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
 });
