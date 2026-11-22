@@ -45,3 +45,32 @@ AFTER DELETE ON `access_key`
 BEGIN
 	UPDATE `access_key_state` SET `key_count` = `key_count` - 1 WHERE `id` = 1;
 END;
+--> statement-breakpoint
+CREATE TABLE `oidc_trust_revision` (
+	`id` integer PRIMARY KEY NOT NULL,
+	`revision` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE TRIGGER `oidc_trust_revision_insert`
+AFTER INSERT ON `oidc_trust`
+BEGIN
+	INSERT INTO `oidc_trust_revision` (`id`, `revision`)
+	VALUES (1, 1)
+	ON CONFLICT (`id`) DO UPDATE SET `revision` = `revision` + 1;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `oidc_trust_revision_update`
+AFTER UPDATE ON `oidc_trust`
+BEGIN
+	INSERT INTO `oidc_trust_revision` (`id`, `revision`)
+	VALUES (1, 1)
+	ON CONFLICT (`id`) DO UPDATE SET `revision` = `revision` + 1;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `oidc_trust_revision_delete`
+AFTER DELETE ON `oidc_trust`
+BEGIN
+	INSERT INTO `oidc_trust_revision` (`id`, `revision`)
+	VALUES (1, 1)
+	ON CONFLICT (`id`) DO UPDATE SET `revision` = `revision` + 1;
+END;

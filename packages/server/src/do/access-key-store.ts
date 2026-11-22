@@ -41,7 +41,11 @@ import {
 
 import { type AccessIdentityKeyContext } from '../auth/access-identity.ts';
 import { type AccessClaims } from '../auth/auth.ts';
-import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
+import {
+	oidcPolicyIdentity,
+	recordedOidcIdentity
+} from '../auth/oidc-identity.ts';
+import { type VerifiedAccessKey } from '../auth/principal.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	accessKeyAncestors,
@@ -397,6 +401,52 @@ export class AccessKeyStore {
 					)
 				: [],
 			...(rows.length > limit && last !== undefined && { cursor: last.id })
+		};
+	}
+
+	/**
+	Returns an unexpired key with its secret hash, or undefined when no key
+	has the id or the key has expired.
+	*/
+	verifiable(
+		id: AccessKeyId,
+		now: Date
+	):
+		| { readonly secretHash: string; readonly key: VerifiedAccessKey }
+		| undefined {
+		const unexpiredKey = and(
+			eq(accessKeys.id, id),
+			unexpired(isoTimestamp(now))
+		);
+		const row = this.database
+			.select()
+			.from(accessKeys)
+			.where(unexpiredKey)
+			.get();
+		const rootIdentity =
+			row === undefined
+				? undefined
+				: recordedOidcIdentity(JSON.parse(row.rootIdentityJson));
+		const grants = row === undefined ? undefined : storedGrants(row.grantsJson);
+
+		if (
+			row === undefined ||
+			rootIdentity === undefined ||
+			grants === undefined
+		) {
+			return undefined;
+		}
+
+		return {
+			secretHash: row.secretHash,
+			key: {
+				id: row.id,
+				grants,
+				...(row.expiresAt !== null && { expiresAt: new Date(row.expiresAt) }),
+				creatorSubject: row.creatorSubject,
+				rootIdentity,
+				...(row.rootRule !== null && { rootRule: row.rootRule })
+			}
 		};
 	}
 

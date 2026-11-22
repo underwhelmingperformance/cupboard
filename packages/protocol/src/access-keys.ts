@@ -24,6 +24,18 @@ export const accessKeySecretSchema = z
 export type AccessKeySecret = z.output<typeof accessKeySecretSchema>;
 
 /**
+Returns the id of the key that a well-formed secret belongs to.
+*/
+export function accessKeyIdOf(secret: AccessKeySecret): AccessKeyId {
+	return accessKeyIdSchema.parse(
+		secret.slice(
+			accessKeySecretPrefix.length,
+			accessKeySecretPrefix.length + 36
+		)
+	);
+}
+
+/**
 The most grants that one access key can contain.
 */
 export const maxAccessKeyGrants = 64;

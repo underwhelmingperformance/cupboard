@@ -24,15 +24,12 @@ import {
 	scheduledAccessKeyRetireAt,
 	verifyTenantAccessJwt
 } from '../auth/auth.ts';
-import { bearerCredential } from '../auth/credential.ts';
-import { type Principal, tokenPrincipal } from '../auth/principal.ts';
 import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
 	InvalidAccessTokenError,
 	LastAuthKeyError,
-	TenantNotConfiguredError,
-	UnauthenticatedError
+	TenantNotConfiguredError
 } from '../errors.ts';
 
 import { type AuthKey, type ServerContext } from './context.ts';
@@ -359,23 +356,6 @@ export class AuthKeysService {
 			alg: authJwtAlgorithm,
 			use: 'sig'
 		}));
-	}
-
-	// Authentication verifies the token and returns the principal that it
-	// presents. The router separately checks its grants against procedure
-	// metadata.
-	async authenticate(request: Request): Promise<Principal> {
-		const credential = bearerCredential(request);
-
-		if (credential === undefined) {
-			throw new UnauthenticatedError();
-		}
-
-		if (credential.kind === 'access-key') {
-			throw new InvalidAccessTokenError();
-		}
-
-		return tokenPrincipal(await this.authenticateToken(credential.token));
 	}
 
 	async authenticateToken(token: string): Promise<AccessClaims> {

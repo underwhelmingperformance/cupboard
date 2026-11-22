@@ -704,11 +704,7 @@ export class TokenExchangeService {
 		authority: AuthenticatedRefreshAuthority,
 		grants: AuthorizationDetails
 	) {
-		return selectOidcTrust(
-			this.oidcTrust.enabledOidcTrustRulesFor(logger, authority.identity),
-			authority.identity,
-			grants
-		);
+		return this.oidcTrust.currentSelection(logger, authority.identity, grants);
 	}
 
 	private async refresh(

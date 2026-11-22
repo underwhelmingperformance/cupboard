@@ -78,6 +78,7 @@ import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type AccessClaims } from '../auth/auth.ts';
+import { type PresentedCredential } from '../auth/credential.ts';
 import {
 	type Principal,
 	principalAuthorityHorizon,
@@ -182,7 +183,6 @@ import {
 } from '../read/metadata-page.ts';
 import {
 	guardPrivateViewRead,
-	isKeyAuthorisedWithoutVerifier,
 	missingStorePathHashes,
 	narAuthorityForView,
 	serveNar
@@ -286,6 +286,7 @@ import {
 	withOperationCost
 } from './operation-cost.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import { PrincipalAuthenticator } from './principal-authenticator.ts';
 import { publicationFailure, PublicationStore } from './publication-store.ts';
 import { isTransientR2Error } from './r2-read.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
@@ -633,6 +634,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly buildInputs: BuildInputsService;
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
+	private readonly authenticator: PrincipalAuthenticator;
 	private readonly retention: RetentionService;
 	private readonly legacyRetention: LegacyRetentionService;
 	private readonly reuseViews: ReuseViewAdminService;
@@ -699,6 +701,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.stats = new StatsService(this.context);
 		this.buildInputs = new BuildInputsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
+		this.authenticator = new PrincipalAuthenticator(
+			this.authKeys,
+			this.context.accessKeys,
+			this.oidcTrust
+		);
 		this.retention = new RetentionService(this.context);
 		this.legacyRetention = new LegacyRetentionService(this.context);
 		this.reuseViews = new ReuseViewAdminService(this.context);
@@ -836,7 +843,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				isUploadGraceEndpoint &&
 				hasAcceptedCapability(context.req.raw, buildInputsCapability);
 			const authenticate = authenticateOnce(() =>
-				this.authKeys.authenticate(context.req.raw)
+				this.authenticator.authenticate(context.get('logger'), context.req.raw)
 			);
 			const contract = new ContractRequest(
 				context.req.raw,
@@ -1282,15 +1289,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return guardPrivateViewRead(request, {
 			verifier,
 			isTokenAuthorised: (token) =>
-				this.isReadTokenAuthorised(token, 'view:content-read', {
-					view: view.name
-				}),
-			isKeyAuthorised: isKeyAuthorisedWithoutVerifier
+				this.isCredentialAuthorised(
+					{ kind: 'access-token', token },
+					'view:content-read',
+					{ view: view.name }
+				),
+			isKeyAuthorised: (secret) =>
+				this.isCredentialAuthorised(
+					{ kind: 'access-key', secret },
+					'view:content-read',
+					{ view: view.name }
+				)
 		});
 	}
 
-	private async isReadTokenAuthorised(
-		token: string,
+	private async isCredentialAuthorised(
+		credential: PresentedCredential,
 		operation:
 			| 'cache:read'
 			| 'cache:content-read'
@@ -1299,13 +1313,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		resource: { readonly cache: CacheScope } | { readonly view: ReuseViewName }
 	): Promise<boolean> {
 		try {
-			const claims = await this.authKeys.authenticateToken(token);
-
+			const principal = await this.authenticator.authenticateCredential(
+				rootLogger(),
+				credential
+			);
 			const operations =
 				typeof operation === 'string' ? [operation] : operation;
 
 			return operations.some((required) =>
-				isCoveredByToken(claims.grants, required, resource)
+				isCoveredByToken(principalGrants(principal), required, resource)
 			);
 		} catch (error) {
 			if (
@@ -2748,7 +2764,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// row is checked against the same cache before it can commit.
 	private commitSessionGuard() {
 		return createMiddleware<TenantHonoEnv>(async (context, next) => {
-			const principal = await this.authKeys.authenticate(context.req.raw);
+			const principal = await this.authenticator.authenticate(
+				context.get('logger'),
+				context.req.raw
+			);
 			const cache = context.get('cache');
 
 			await authoriseRequest(
@@ -4802,7 +4821,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		try {
-			const principal = await this.authKeys.authenticate(request);
+			const principal = await this.authenticator.authenticate(
+				rootLogger(),
+				request
+			);
 
 			await authoriseRequest(
 				principal,
@@ -4824,8 +4846,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		isAbsent = false
 	): Promise<boolean> {
 		await this.initialise();
-		return this.isReadTokenAuthorised(
-			token,
+		return this.isCredentialAuthorised(
+			{ kind: 'access-token', token },
 			isAbsent ? ['cache:content-read', 'cache:read'] : 'cache:content-read',
 			{ cache }
 		);

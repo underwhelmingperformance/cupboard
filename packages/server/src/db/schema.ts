@@ -1008,6 +1008,15 @@ export const accessKeyState = sqliteTable('access_key_state', {
 	keyCount: integer('key_count').notNull()
 });
 
+// Triggers on `oidc_trust` increment `revision` on every insert, update and
+// delete. A tenant object keeps its parsed enabled rules while the revision
+// stays the same. Writes outside the trust service, such as migrations, reach
+// the revision through the triggers too.
+export const oidcTrustRevision = sqliteTable('oidc_trust_revision', {
+	id: integer('id').primaryKey(),
+	revision: integer('revision').notNull()
+});
+
 // One row for each session or access key above an access key. When the
 // garbage collector deletes an expired key, it deletes the rows where that key
 // is the descendant and keeps the rows where it is the ancestor. Revoking a
