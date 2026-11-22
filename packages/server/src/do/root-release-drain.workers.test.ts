@@ -336,7 +336,6 @@ describe('root release drain', () => {
 			'SEARCH retention_root_target USING INDEX sqlite_autoindex_retention_root_target_1 (cache_id=? AND root_name=? AND store_path_hash=?)',
 			'LIST SUBQUERY 1',
 			'SCAN json_each VIRTUAL TABLE INDEX 1:',
-			'CREATE BLOOM FILTER',
 			'SEARCH retention_root_release USING INDEX retention_root_release_root_idx (cache_id=? AND root_name=? AND incarnation=?)'
 		]);
 	});

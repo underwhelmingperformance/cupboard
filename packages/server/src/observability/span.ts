@@ -12,8 +12,6 @@ export type SpanAttributes = Readonly<
 	Record<string, boolean | number | string | undefined>
 >;
 
-const tracer = trace.getTracer('cupboard');
-
 function definedAttributes(attributes: SpanAttributes): Attributes {
 	return Object.fromEntries(
 		Object.entries(attributes).filter(([, value]) => value !== undefined)
@@ -140,19 +138,23 @@ export function withSpan<T>(
 	attributes: SpanAttributes,
 	body: (span: Span) => Promise<T>
 ): Promise<T> {
-	return tracer.startActiveSpan(
-		name,
-		{ attributes: definedAttributes(attributes) },
-		async (span) => {
-			try {
-				return await body(span);
-			} catch (error) {
-				recordSpanError(span, error);
+	// The tracer is looked up on each call, so that a test can replace the
+	// registered provider.
+	return trace
+		.getTracer('cupboard')
+		.startActiveSpan(
+			name,
+			{ attributes: definedAttributes(attributes) },
+			async (span) => {
+				try {
+					return await body(span);
+				} catch (error) {
+					recordSpanError(span, error);
 
-				throw error;
-			} finally {
-				span.end();
+					throw error;
+				} finally {
+					span.end();
+				}
 			}
-		}
-	);
+		);
 }

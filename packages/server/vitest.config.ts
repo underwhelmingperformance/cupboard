@@ -3,10 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants, zstdCompressSync } from 'node:zlib';
 
-import {
-	cloudflareTest,
-	readD1Migrations
-} from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { defineConfig } from 'vitest/config';
 
@@ -172,6 +169,16 @@ export default defineConfig(async () => {
 };`
 									},
 									{
+										name: 'test-trace-collector',
+										modules: true,
+										compatibilityDate: '2026-08-18',
+										script: `export default {
+  tailStream() {
+    return () => {};
+  }
+};`
+									},
+									{
 										name: 'test-control-database',
 										modules: true,
 										compatibilityDate: '2026-08-18',
@@ -213,6 +220,10 @@ export default defineConfig(async () => {
 };`
 									}
 								],
+								// workerd traces an invocation only when a tail consumer receives
+								// its events, so this consumer lets the Workers tracing bridge
+								// create real spans. It discards the events.
+								streamingTails: ['test-trace-collector'],
 								dataBlobBindings: {
 									TEST_COMPRESSED_NAR_BYTES: narFixture.compressed
 								},

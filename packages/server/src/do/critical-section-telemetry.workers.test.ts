@@ -132,10 +132,7 @@ describe('critical section telemetry', () => {
 
 	// An enclosing deadline that ends first aborts the section before its own
 	// budget, so the section did not pass its budget. The test runs the
-	// observer outside a gate. On the test pool's workerd (1.20260815.1), a
-	// due timer that was created outside a gate keeps the gate's own timers
-	// from firing, so the object resets after 30 seconds. workerd fixed this
-	// in v1.20261014.1 (commit 1fa562228).
+	// observer directly, outside a Durable Object gate.
 	it('writes no record when an enclosing deadline stops the section', async () => {
 		const hang = hangDeletes();
 		const logs = startCapture();

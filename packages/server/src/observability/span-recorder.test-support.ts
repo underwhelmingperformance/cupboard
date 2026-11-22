@@ -11,9 +11,9 @@ import {
 const registration: { exporter?: InMemorySpanExporter } = {};
 
 /**
-Registers an in-memory OTel tracer provider for this isolate on first use and
-clears the spans that it has recorded. The test pool's `workerd` cannot run
-the Workers tracing bridge, so without this provider spans are no-ops.
+Replaces the Workers tracing bridge with an in-memory OTel tracer provider for
+the rest of this isolate on first use, and clears the spans that it has
+recorded. The bridge sends spans to the runtime, which a test cannot read back.
 
 Call it at the start of each test that reads spans, then read the spans that
 ended since with {@link finishedSpans}.
@@ -25,6 +25,9 @@ export function recordSpans(): void {
 	}
 
 	const recorder = new InMemorySpanExporter();
+
+	trace.disable();
+	context.disable();
 
 	if (
 		!context.setGlobalContextManager(

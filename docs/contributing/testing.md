@@ -155,7 +155,7 @@ projects in `packages/server/vitest.config.ts`:
 - `node` runs `src/**/*.test.ts` in Node. These tests are for code that doesn't
   need the Workers runtime.
 - `workers` runs `src/**/*.workers.test.ts` inside `workerd`, Cloudflare's
-  Workers runtime, using `@cloudflare/vitest-pool-workers`.
+  Workers runtime, using `@cloudflare/vitest-plugin`.
 
 The Worker under test in the `workers` project is `src/test-worker.ts`, with the
 tenant Worker's configuration. Tests can reach the Durable Object with
@@ -163,6 +163,17 @@ tenant Worker's configuration. Tests can reach the Durable Object with
 handler directly, using `controlFetch` from `src/test-support.ts`. The
 control-plane secrets aren't bound in this project, so the Durable Object
 doesn't have them, which matches production.
+
+The Worker under test registers the OpenTelemetry bridge to Workers tracing, as
+the deployed Workers do. `workerd` traces an invocation only when a tail
+consumer receives its events, so the project gives the Worker a tail consumer,
+`test-trace-collector`, that discards them. A test can't read back the spans
+that the runtime records. A test that checks span names or attributes calls
+`recordSpans()` from `src/observability/span-recorder.test-support.ts`, which
+replaces the bridge with an in-memory provider for the rest of the isolate, and
+reads them with `finishedSpans()`.
+`src/observability/workers-otel-bridge.workers.test.ts` covers the bridge
+itself.
 
 The test environment binds test R2 credentials, a test push ID signing key, both
 KV namespaces and the maintenance queue. It sets the subrequest limit to the

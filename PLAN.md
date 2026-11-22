@@ -409,8 +409,8 @@ default that is the operator's Cloudflare identity.
 - [x] Tier 1 runs on per-package Vitest defaults (`*.test.ts` alongside the
       code); only `packages/server` needs its own config, for the Tier 2 Worker
       pool. No separate workspace-root setup is required.
-- [x] `@cloudflare/vitest-pool-workers` configured in `packages/server` for Tier
-      2, picking up `*.workers.test.ts` only so the unit run is not slowed by
+- [x] `@cloudflare/vitest-plugin` configured in `packages/server` for Tier 2,
+      picking up `*.workers.test.ts` only so the unit run is not slowed by
       Worker boot.
 - [x] `fast-check` added as a dev dependency for property tests.
 - [x] Fixture generation script that runs `nix-store --dump` against a small set
@@ -558,7 +558,7 @@ sandboxed, where fixtures live, and the cross-cutting principles.
 Pure functions in either package. No Worker runtime, no I/O. TDD-friendly. Lives
 as `*.test.ts` alongside the code.
 
-### Tier 2: Worker integration (`@cloudflare/vitest-pool-workers`)
+### Tier 2: Worker integration (`@cloudflare/vitest-plugin`)
 
 Real `workerd`, real DO SQLite, real R2, all in-process. No mocking of
 Cloudflare primitives. Lives as `*.workers.test.ts` under `packages/server/src/`
@@ -2037,7 +2037,7 @@ but Cloudflare's public zlib docs do not list zstd. No shared-CAS work depends
 on unmeasured zstd behaviour.
 
 The first V5 step is a runtime spike on the real account runtime and under
-Miniflare/`vitest-pool-workers`. It must confirm:
+Miniflare/`vitest-plugin`. It must confirm:
 
 - `createZstdDecompress` exists and streams;
 - the DO honours `limits.cpu_ms = 300_000`;

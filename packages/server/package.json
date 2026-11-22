@@ -22,7 +22,7 @@
 		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.23.0",
+		"@cloudflare/vitest-plugin": "^1.9.0",
 		"@cloudflare/workers-types": "catalog:",
 		"@opentelemetry/context-async-hooks": "^3.0.0",
 		"@opentelemetry/sdk-trace": "^3.0.0",

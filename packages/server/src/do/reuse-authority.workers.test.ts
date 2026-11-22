@@ -375,7 +375,6 @@ describe('readable reference select', () => {
 				'SEARCH blob_ref_storage USING INDEX blob_ref_readable_nar_idx (tenant=? AND nar_hash=?)',
 				'LIST SUBQUERY 1',
 				'SCAN json_each VIRTUAL TABLE INDEX 1:',
-				'CREATE BLOOM FILTER',
 				'CORRELATED SCALAR SUBQUERY 2',
 				'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)',
 				'SEARCH tenant_blob USING COVERING INDEX sqlite_autoindex_tenant_blob_1 (tenant=? AND nar_hash=?)',
