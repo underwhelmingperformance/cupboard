@@ -11,6 +11,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { accessKeyIdSchema } from '@cupboard/protocol/access-keys';
 import {
 	type PermittedGrant,
 	storedPermittedGrantsSchema
@@ -40,7 +41,15 @@ import {
 	type ReadResource,
 	readResourcesSchema
 } from '@cupboard/protocol/read-access';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
+import {
+	refreshSessionIdSchema,
+	refreshTokenReplayedProblem
+} from '@cupboard/protocol/sessions';
 import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import { Decrypter, Encrypter } from 'age-encryption';
 import { runInDurableObject } from 'cloudflare:test';
@@ -68,6 +77,7 @@ import {
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
+	accessKeys,
 	cacheIdentities,
 	consumedSubjectNonces,
 	oidcTrust,
@@ -79,6 +89,7 @@ import {
 	OAuthError,
 	OwnerConfigurationInvalidError,
 	ReadResourcesNotPermittedError,
+	RefreshTokenReplayedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	StoredOidcTrustInvalidError,
@@ -115,10 +126,12 @@ import {
 	useTestServer
 } from '../test-support.ts';
 
+import { openAccessKeyCreator } from './access-key-store.ts';
 import { AuthKeysService } from './auth-keys-service.ts';
 import { ownerRuleId, type ServerContext } from './context.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { RefreshSessionsService } from './refresh-sessions-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { TenantIdentityService } from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
@@ -2137,14 +2150,62 @@ function refreshTokenMemberRows(): Promise<
 	);
 }
 
+interface ReplayFamilyRow {
+	readonly id: string;
+	readonly activeMemberId: string;
+	readonly generation: number;
+	readonly replayedAt: string | null;
+	readonly retainedByKeys: boolean;
+}
+
+// The family rows with the columns that a replay changes.
+function replayFamilyRows(): Promise<ReplayFamilyRow[]> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		replayFamilyRowsIn(state)
+	);
+}
+
+function replayFamilyRowsIn(state: DurableObjectState): ReplayFamilyRow[] {
+	return drizzle(state.storage, { schema: { refreshTokenFamilies } })
+		.select({
+			id: refreshTokenFamilies.id,
+			activeMemberId: refreshTokenFamilies.activeMemberId,
+			generation: refreshTokenFamilies.generation,
+			replayedAt: refreshTokenFamilies.replayedAt,
+			retainedByKeys: refreshTokenFamilies.retainedByKeys
+		})
+		.from(refreshTokenFamilies)
+		.all();
+}
+
+// The row that a replay at `replayedAt` leaves of the family that was
+// `before`, with no access keys below it. The replay advances the generation.
+function replayedFamily(
+	before: ReplayFamilyRow | undefined,
+	replayedAt: string
+): Record<string, unknown> {
+	return {
+		id: before?.id,
+		activeMemberId: before?.activeMemberId,
+		generation: (before?.generation ?? 0) + 1,
+		replayedAt,
+		retainedByKeys: false
+	};
+}
+
 /**
 Presents a refresh token to a token service in the tenant object. `fault`
-runs first and can make the rotation fail. Returns the response, or the
-error that the refresh throws.
+runs first and can make the rotation fail. It receives `present`, which
+presents another refresh token to the same service while the first one is in
+flight. Returns the response, or the error that the refresh throws.
 */
 function refreshWithFault(
 	refreshToken: string,
-	fault: (authKeys: AuthKeysService, state: DurableObjectState) => void
+	fault: (
+		authKeys: AuthKeysService,
+		state: DurableObjectState,
+		present: (token: string) => Promise<unknown>
+	) => void
 ): Promise<unknown> {
 	return runInDurableObject(currentServer(), async (instance, state) => {
 		const tenantIdentity = new TenantIdentityService(instance.context);
@@ -2154,22 +2215,26 @@ function refreshWithFault(
 			authKeys,
 			new OidcTrustService(instance.context, tenantIdentity)
 		);
-		const request = new Request(new URL('/token', currentOrigin()), {
-			method: 'POST',
-			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				grant_type: refreshTokenGrantType,
-				refresh_token: refreshToken
-			}).toString()
-		});
+		const present = async (token: string): Promise<unknown> => {
+			const request = new Request(new URL('/token', currentOrigin()), {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({
+					grant_type: refreshTokenGrantType,
+					refresh_token: token
+				}).toString()
+			});
 
-		fault(authKeys, state);
+			try {
+				return await service.handleToken(rootLogger(), request);
+			} catch (error: unknown) {
+				return error;
+			}
+		};
 
-		try {
-			return await service.handleToken(rootLogger(), request);
-		} catch (error: unknown) {
-			return error;
-		}
+		fault(authKeys, state, present);
+
+		return present(refreshToken);
 	});
 }
 
@@ -2265,6 +2330,8 @@ describe('refresh grant', () => {
 				'generation',
 				'id',
 				'issuer',
+				'replayedAt',
+				'retainedByKeys',
 				'rule',
 				'subject'
 			],
@@ -2730,6 +2797,7 @@ describe('refresh grant', () => {
 			);
 
 			vi.setSystemTime(new Date(startedAt.getTime() + 60_001));
+			const [before] = await replayFamilyRows();
 			const late = await staleRefreshOutcome(original);
 			const successor = await staleRefreshOutcome(first.refresh_token ?? '');
 
@@ -2737,20 +2805,22 @@ describe('refresh grant', () => {
 				atDeadline: atDeadline.refresh_token,
 				late,
 				successor,
-				families: await refreshTokenRows()
+				families: await replayFamilyRows(),
+				members: await refreshTokenMemberRows()
 			}).toStrictEqual({
 				atDeadline: first.refresh_token,
 				late: {
 					status: StatusCodes.BAD_REQUEST,
 					error: 'invalid_grant',
-					problem: 'stale-refresh-token'
+					problem: refreshTokenReplayedProblem
 				},
 				successor: {
 					status: StatusCodes.BAD_REQUEST,
 					error: 'invalid_grant',
 					problem: 'stale-refresh-token'
 				},
-				families: []
+				families: [replayedFamily(before, '2026-01-01T00:01:00.001Z')],
+				members: []
 			});
 		} finally {
 			vi.useRealTimers();
@@ -2766,6 +2836,7 @@ describe('refresh grant', () => {
 			const exchanged = await exchange(await installTrustedIdp('admin'));
 			const original = exchanged.refresh_token ?? '';
 			await refresh(original);
+			const [before] = await replayFamilyRows();
 
 			const result = await runInDurableObject(
 				currentServer(),
@@ -2805,16 +2876,101 @@ describe('refresh grant', () => {
 			);
 
 			expect({
-				stale: result instanceof StaleRefreshTokenError,
-				families: await refreshTokenRows()
+				replayed: result instanceof RefreshTokenReplayedError,
+				families: await replayFamilyRows(),
+				members: await refreshTokenMemberRows()
 			}).toStrictEqual({
-				stale: true,
-				families: []
+				replayed: true,
+				families: [replayedFamily(before, '2026-01-01T00:01:00.001Z')],
+				members: []
 			});
 		} finally {
 			vi.useRealTimers();
 		}
 	});
+
+	it.each([
+		{
+			name: 'a rotation of the active token',
+			presented: (tokens: { active: string; consumed: string }) =>
+				tokens.active,
+			isRuleDisabled: false
+		},
+		{
+			name: 'a rotation of the active token, with the rule disabled during the pause,',
+			presented: (tokens: { active: string; consumed: string }) =>
+				tokens.active,
+			isRuleDisabled: true
+		},
+		{
+			name: 'a retry of the consumed token',
+			presented: (tokens: { active: string; consumed: string }) =>
+				tokens.consumed,
+			isRuleDisabled: false
+		}
+	])(
+		'refuses $name that a replay interrupts while it signs',
+		async ({ presented, isRuleDisabled }) => {
+			vi.useFakeTimers();
+
+			try {
+				vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+				const exchanged = await exchange(await installTrustedIdp('admin'));
+				const original = exchanged.refresh_token ?? '';
+				const firstResponse = await refresh(original);
+				const first = tokenResponseSchema.parse(await firstResponse.json());
+				const secondResponse = await refresh(first.refresh_token ?? '');
+				const second = tokenResponseSchema.parse(await secondResponse.json());
+				const [before] = await replayFamilyRows();
+				const interleaved: { replay?: unknown; afterReplay?: unknown } = {};
+				// The held refresh signs its access token after it has read the
+				// family. The replay of the original token runs at that point.
+				const outcome = await refreshWithFault(
+					presented({
+						active: second.refresh_token ?? '',
+						consumed: first.refresh_token ?? ''
+					}),
+					(authKeys, state, present) => {
+						const activeAuthKey = authKeys.activeAuthKey.bind(authKeys);
+
+						vi.spyOn(authKeys, 'activeAuthKey').mockImplementationOnce(
+							async () => {
+								interleaved.replay = await present(original);
+								interleaved.afterReplay = replayFamilyRowsIn(state);
+
+								// The paused rotation then ends the family for a change
+								// of policy, which leaves the replayed row in place.
+								if (isRuleDisabled) {
+									state.storage.sql.exec(
+										'UPDATE oidc_trust SET disabled_at = ?',
+										'2026-01-01T00:00:00.000Z'
+									);
+								}
+
+								return activeAuthKey();
+							}
+						);
+					}
+				);
+
+				expect({
+					isReplayed: interleaved.replay instanceof RefreshTokenReplayedError,
+					afterReplay: interleaved.afterReplay,
+					isStale: outcome instanceof StaleRefreshTokenError,
+					afterRelease: await replayFamilyRows(),
+					members: await refreshTokenMemberRows()
+				}).toStrictEqual({
+					isReplayed: true,
+					afterReplay: [replayedFamily(before, '2026-01-01T00:00:00.000Z')],
+					isStale: true,
+					afterRelease: [replayedFamily(before, '2026-01-01T00:00:00.000Z')],
+					members: []
+				});
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
 
 	it('does not recover a random successor issued before the grace policy', async () => {
 		const exchanged = await exchange(await installTrustedIdp('admin'));
@@ -3187,6 +3343,7 @@ describe('refresh grant', () => {
 
 		const replay = await staleRefreshOutcome(original);
 		const activeAfterReplay = await staleRefreshOutcome(active);
+		const afterReplay = await refreshTokenRows();
 
 		expect({
 			beforeReplay: {
@@ -3200,7 +3357,10 @@ describe('refresh grant', () => {
 			},
 			replay,
 			activeAfterReplay,
-			families: await refreshTokenRows(),
+			families: afterReplay.map((family) => ({
+				activeMemberId: family.activeMemberId,
+				generation: family.generation
+			})),
 			members: await refreshTokenMemberRows()
 		}).toStrictEqual({
 			beforeReplay: {
@@ -3210,14 +3370,14 @@ describe('refresh grant', () => {
 			replay: {
 				status: StatusCodes.BAD_REQUEST,
 				error: 'invalid_grant',
-				problem: 'stale-refresh-token'
+				problem: refreshTokenReplayedProblem
 			},
 			activeAfterReplay: {
 				status: StatusCodes.BAD_REQUEST,
 				error: 'invalid_grant',
 				problem: 'stale-refresh-token'
 			},
-			families: [],
+			families: [{ activeMemberId, generation: 3 }],
 			members: []
 		});
 	});
@@ -4669,6 +4829,335 @@ async function exchangeWith(
 
 	return { status: response.status, body: await response.json() };
 }
+
+// Creates a wildcard access key below the session of `accessToken`.
+function createSessionKeyWithSecret(
+	accessToken: string,
+	expiresAt?: IsoTimestamp
+): Promise<{ readonly id: string; readonly secret: string }> {
+	return runInDurableObject(currentServer(), async (instance) => {
+		const claims = await new AuthKeysService(
+			instance.context,
+			new TenantIdentityService(instance.context)
+		).authenticateToken(accessToken);
+		const created = await instance.context.accessKeys.create(
+			await openAccessKeyCreator(claims, identityKeys(instance.context)),
+			{
+				grants: [{ type: 'cupboard_wildcard' }],
+				...(expiresAt !== undefined && { expiresAt })
+			}
+		);
+
+		return { id: created.id, secret: created.secret };
+	});
+}
+
+async function createSessionKey(
+	accessToken: string,
+	expiresAt?: IsoTimestamp
+): Promise<string> {
+	const created = await createSessionKeyWithSecret(accessToken, expiresAt);
+
+	return created.id;
+}
+
+// The tenant's sessions as `session list` reports them, without the times.
+async function listedSessions(): Promise<
+	{
+		readonly id: string;
+		readonly accessKeysBelow: number;
+		readonly isReplayed: boolean;
+	}[]
+> {
+	const { sessions } = await runInDurableObject(currentServer(), (instance) =>
+		new RefreshSessionsService(instance.context).list()
+	);
+
+	return sessions.map((entry) => ({
+		id: entry.id,
+		accessKeysBelow: entry.accessKeysBelow,
+		isReplayed: entry.replayedAt !== undefined
+	}));
+}
+
+// Each family with its `retained_by_keys` flag.
+function retainedFamilies(): Promise<
+	{ readonly id: string; readonly retainedByKeys: boolean }[]
+> {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				id: refreshTokenFamilies.id,
+				retainedByKeys: refreshTokenFamilies.retainedByKeys
+			})
+			.from(refreshTokenFamilies)
+			.all()
+	);
+}
+
+function accessKeyIds(): Promise<string[]> {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({ id: accessKeys.id })
+			.from(accessKeys)
+			.all()
+			.map((key) => key.id)
+	);
+}
+
+function expireRefreshFamilies(): Promise<void> {
+	return runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.update(refreshTokenFamilies)
+			.set({
+				expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
+			})
+			.run();
+	});
+}
+
+describe('access keys below a session', () => {
+	beforeEach(resetTestServer);
+
+	it.each([
+		{ name: 'a live session', isEnded: false },
+		{ name: 'a session that has ended with a logout', isEnded: true }
+	])(
+		'deletes the keys of $name that session:revoke revokes',
+		async ({ isEnded }) => {
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			await createSessionKey(exchanged.access_token);
+			const [family] = await refreshTokenRows();
+			const session = refreshSessionIdSchema.parse(family?.id);
+
+			if (isEnded) {
+				await revocationOutcome({ token: exchanged.refresh_token ?? '' });
+			}
+
+			const revocation = await runInDurableObject(currentServer(), (instance) =>
+				new RefreshSessionsService(instance.context).revoke(session)
+			);
+
+			expect({
+				revocation,
+				keys: await accessKeyIds(),
+				families: await refreshTokenRows()
+			}).toStrictEqual({
+				revocation: { id: session, revoked: true, deletedAccessKeys: 1 },
+				keys: [],
+				families: []
+			});
+		}
+	);
+
+	it('keeps a session that a replay ends, with its keys, until session:revoke deletes them', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const key = await createSessionKeyWithSecret(exchanged.access_token);
+		const [family] = await refreshTokenRows();
+		const session = refreshSessionIdSchema.parse(family?.id);
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const secondResponse = await refresh(first.refresh_token ?? '');
+		const second = tokenResponseSchema.parse(await secondResponse.json());
+		const tenant = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.tenant()
+		);
+		const capture = startCapture();
+		let replay: unknown;
+
+		try {
+			replay = await staleRefreshOutcome(original);
+		} finally {
+			capture.stop();
+		}
+
+		const replayLogs = capture.logs
+			.filter(
+				(entry) => entry.message === 'refresh-token replay ended a session'
+			)
+			.map((entry) => ({ level: entry.level, properties: entry.properties }));
+		const afterReplay = {
+			newest: await staleRefreshOutcome(second.refresh_token ?? ''),
+			keys: await accessKeyIds(),
+			sessions: await listedSessions(),
+			members: await refreshTokenMemberRows()
+		};
+		const revocation = await runInDurableObject(currentServer(), (instance) =>
+			new RefreshSessionsService(instance.context).revoke(session)
+		);
+		const afterRevocation = {
+			keys: await accessKeyIds(),
+			sessions: await listedSessions()
+		};
+
+		expect({
+			replay,
+			replayLogs,
+			afterReplay,
+			revocation,
+			afterRevocation
+		}).toStrictEqual({
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: refreshTokenReplayedProblem
+			},
+			replayLogs: [
+				{
+					level: 'warning',
+					properties: {
+						method: 'POST',
+						path: '/token',
+						tenant,
+						session,
+						accessKeysBelow: 1
+					}
+				}
+			],
+			afterReplay: {
+				newest: {
+					status: StatusCodes.BAD_REQUEST,
+					error: 'invalid_grant',
+					problem: 'stale-refresh-token'
+				},
+				keys: [key.id],
+				sessions: [{ id: session, accessKeysBelow: 1, isReplayed: true }],
+				members: []
+			},
+			revocation: { id: session, revoked: true, deletedAccessKeys: 1 },
+			afterRevocation: {
+				keys: [],
+				sessions: []
+			}
+		});
+	});
+
+	it('lists a session that a replay ended with no keys below it until it expires', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const [family] = await refreshTokenRows();
+		const session = refreshSessionIdSchema.parse(family?.id);
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		await refresh(first.refresh_token ?? '');
+		await staleRefreshOutcome(original);
+		const beforeExpiry = await listedSessions();
+		await expireRefreshFamilies();
+
+		expect({
+			beforeExpiry,
+			afterExpiry: await listedSessions(),
+			retained: await retainedFamilies()
+		}).toStrictEqual({
+			beforeExpiry: [{ id: session, accessKeysBelow: 0, isReplayed: true }],
+			afterExpiry: [],
+			retained: [{ id: session, retainedByKeys: false }]
+		});
+	});
+
+	it.each([
+		{
+			name: 'is deleted',
+			removeKey: (key: string) =>
+				runInDurableObject(currentServer(), (instance) => {
+					instance.context.accessKeys.delete(accessKeyIdSchema.parse(key));
+				})
+		},
+		{
+			name: 'expires and collection deletes it',
+			removeKey: async (key: string) => {
+				await runInDurableObject(currentServer(), (instance) => {
+					instance.context.db
+						.update(accessKeys)
+						.set({
+							expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
+						})
+						.where(eq(accessKeys.id, accessKeyIdSchema.parse(key)))
+						.run();
+				});
+				await currentServer().runGarbageCollection();
+			}
+		}
+	])(
+		'collects a session that a replay ended once it has expired and the last key below it $name',
+		async ({ removeKey }) => {
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			const inOneHour = new Date(Date.now() + 3_600_000);
+			const key = await createSessionKey(
+				exchanged.access_token,
+				isoTimestamp(inOneHour)
+			);
+			const [family] = await refreshTokenRows();
+			const session = refreshSessionIdSchema.parse(family?.id);
+			const original = exchanged.refresh_token ?? '';
+			const firstResponse = await refresh(original);
+			const first = tokenResponseSchema.parse(await firstResponse.json());
+			await refresh(first.refresh_token ?? '');
+			await staleRefreshOutcome(original);
+			await expireRefreshFamilies();
+
+			await currentServer().runGarbageCollection();
+			const withKey = {
+				sessions: await listedSessions(),
+				retained: await retainedFamilies()
+			};
+			await removeKey(key);
+			const withoutKey = {
+				sessions: await listedSessions(),
+				retained: await retainedFamilies()
+			};
+			await currentServer().runGarbageCollection();
+
+			expect({
+				withKey,
+				withoutKey,
+				families: await refreshTokenRows()
+			}).toStrictEqual({
+				withKey: {
+					sessions: [{ id: session, accessKeysBelow: 1, isReplayed: true }],
+					retained: [{ id: session, retainedByKeys: true }]
+				},
+				withoutKey: {
+					sessions: [],
+					retained: [{ id: session, retainedByKeys: false }]
+				},
+				families: []
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'a logout',
+			end: (refreshToken: string) => revocationOutcome({ token: refreshToken })
+		},
+		{
+			name: 'an expiry found at refresh',
+			end: async (refreshToken: string) => {
+				await expireRefreshFamilies();
+				return staleRefreshOutcome(refreshToken);
+			}
+		},
+		{
+			name: 'an expiry found by garbage collection',
+			end: async () => {
+				await expireRefreshFamilies();
+				await currentServer().runGarbageCollection();
+			}
+		}
+	])('keeps the keys of a session that ends with $name', async ({ end }) => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const key = await createSessionKey(exchanged.access_token);
+
+		await end(exchanged.refresh_token ?? '');
+
+		expect({
+			keys: await accessKeyIds(),
+			families: await refreshTokenRows()
+		}).toStrictEqual({ keys: [key], families: [] });
+	});
+});
 
 describe('token revocation', () => {
 	beforeEach(resetTestServer);

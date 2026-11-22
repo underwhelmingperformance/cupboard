@@ -101,6 +101,7 @@ import {
 	InvalidReadResourcesError,
 	OAuthError,
 	ReadResourcesNotPermittedError,
+	RefreshTokenReplayedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	SubjectTokenReplayedError,
@@ -129,13 +130,18 @@ import {
 } from '../oidc/subject-binding.ts';
 import { warnUnpinnedGithubMatches } from '../oidc/unpinned-github-rule.ts';
 
+import { countAccessKeysBelow } from './access-key-store.ts';
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import {
 	type OidcTrustRuleSnapshot,
 	type OidcTrustService
 } from './oidc-trust-service.ts';
-import { deleteRefreshFamily } from './refresh-sessions-service.ts';
+import {
+	deleteRefreshFamily,
+	markFamilyReplayed,
+	type RefreshFamilyRemoval
+} from './refresh-sessions-service.ts';
 
 interface PreparedRefreshToken {
 	readonly token: string;
@@ -172,6 +178,14 @@ type RefreshTokenMember = typeof schema.refreshTokenMembers.$inferSelect;
 type RefreshTokenDatabase = SchemaWriter;
 type RefreshTokenRotationOutcome =
 	'rotated' | 'policy-changed' | 'stale-member';
+
+// Whether the row exists and no replay has ended the family. An absent row
+// gives undefined, which is not null, so the comparison covers both cases.
+function isUnreplayedFamily(
+	family: RefreshTokenFamily | undefined
+): family is RefreshTokenFamily {
+	return family?.replayedAt === null;
+}
 
 export class TokenExchangeService {
 	constructor(
@@ -722,11 +736,11 @@ export class TokenExchangeService {
 			.from(schema.refreshTokenFamilies)
 			.where(eq(schema.refreshTokenFamilies.id, member.familyId))
 			.get();
-		if (authority === undefined || family === undefined) {
+		if (authority === undefined || !isUnreplayedFamily(family)) {
 			throw new StaleRefreshTokenError();
 		}
 		if (family.expiresAt <= isoTimestamp(new Date())) {
-			this.revokeFamily(family.id);
+			this.removeFamily(family.id, 'ending');
 			throw new StaleRefreshTokenError();
 		}
 		if (!isRefreshStateMatching(authority, family, member)) {
@@ -744,11 +758,11 @@ export class TokenExchangeService {
 		);
 		const selection = this.currentRefreshPolicy(logger, authority, grants);
 		if (selection.outcome !== 'selected') {
-			this.revokeFamily(family.id);
+			this.removeFamily(family.id, 'ending');
 			throw new StaleRefreshTokenError();
 		}
 		if (family.generation >= maxRefreshTokenFamilyMembers - 1) {
-			this.revokeFamily(family.id);
+			this.removeFamily(family.id, 'ending');
 			this.logFamilyRevocation(logger, 'member-limit');
 			throw new StaleRefreshTokenError();
 		}
@@ -802,7 +816,7 @@ export class TokenExchangeService {
 			.from(schema.refreshTokenFamilies)
 			.where(eq(schema.refreshTokenFamilies.id, member.familyId))
 			.get();
-		if (family === undefined) {
+		if (!isUnreplayedFamily(family)) {
 			throw new StaleRefreshTokenError();
 		}
 		const successor = this.context.db
@@ -816,8 +830,11 @@ export class TokenExchangeService {
 			.where(eq(schema.refreshTokenMembers.id, member.id))
 			.get();
 		const nowIso = isoTimestamp(new Date());
+		if (family.expiresAt <= nowIso) {
+			this.removeFamily(family.id, 'ending');
+			throw new StaleRefreshTokenError();
+		}
 		if (
-			family.expiresAt <= nowIso ||
 			spent?.familyId !== family.id ||
 			spent.credentialHash !== member.credentialHash ||
 			successor?.familyId !== family.id ||
@@ -825,9 +842,8 @@ export class TokenExchangeService {
 			family.generation !== successor.generation ||
 			!isWithinRefreshRetryGrace(successor.createdAt, nowIso)
 		) {
-			this.revokeFamily(family.id);
-			this.logFamilyRevocation(logger, 'replay');
-			throw new StaleRefreshTokenError();
+			this.endReplayedFamily(logger, family.id);
+			throw new RefreshTokenReplayedError();
 		}
 		const value = await openRefreshSuccessor(
 			this.refreshKeyContext(),
@@ -861,7 +877,7 @@ export class TokenExchangeService {
 			authority.grants
 		);
 		if (selection.outcome !== 'selected') {
-			this.revokeFamily(family.id);
+			this.removeFamily(family.id, 'ending');
 			throw new StaleRefreshTokenError();
 		}
 		const accessToken = await this.issueRuleToken(
@@ -874,32 +890,38 @@ export class TokenExchangeService {
 			authority.grants,
 			adminJwtTtlSeconds
 		);
-		const isCurrent = this.context.db.transaction((transaction) => {
-			const active = transaction
+		const outcome = this.context.db.transaction((transaction) => {
+			const current = transaction
 				.select()
 				.from(schema.refreshTokenFamilies)
-				.where(
-					and(
-						eq(schema.refreshTokenFamilies.id, family.id),
-						eq(schema.refreshTokenFamilies.activeMemberId, successor.id),
-						eq(schema.refreshTokenFamilies.generation, successor.generation)
-					)
-				)
+				.where(eq(schema.refreshTokenFamilies.id, family.id))
 				.get();
+			if (!isUnreplayedFamily(current)) {
+				return 'stale';
+			}
 			const transactionTime = isoTimestamp(new Date());
 			if (
-				active === undefined ||
-				active.expiresAt <= transactionTime ||
-				!isWithinRefreshRetryGrace(successor.createdAt, transactionTime) ||
+				current.expiresAt <= transactionTime ||
 				this.currentRefreshPolicy(logger, authority, authority.grants)
 					.outcome !== 'selected'
 			) {
-				this.revokeFamily(family.id, transaction);
-				return false;
+				this.removeFamily(family.id, 'ending', transaction);
+				return 'stale';
 			}
-			return true;
+			if (
+				current.activeMemberId !== successor.id ||
+				current.generation !== successor.generation ||
+				!isWithinRefreshRetryGrace(successor.createdAt, transactionTime)
+			) {
+				this.endReplayedFamily(logger, family.id, transaction);
+				return 'replayed';
+			}
+			return 'current';
 		});
-		if (!isCurrent) {
+		if (outcome === 'replayed') {
+			throw new RefreshTokenReplayedError();
+		}
+		if (outcome === 'stale') {
 			throw new StaleRefreshTokenError();
 		}
 		return oauthJsonResponse({
@@ -1106,7 +1128,7 @@ export class TokenExchangeService {
 				this.currentRefreshPolicy(logger, authority, grants).outcome !==
 					'selected'
 			) {
-				this.revokeFamily(family.id, transaction);
+				this.removeFamily(family.id, 'ending', transaction);
 				return 'policy-changed';
 			}
 
@@ -1177,27 +1199,65 @@ export class TokenExchangeService {
 		}
 	}
 
-	private revokeFamily(
+	private removeFamily(
 		familyId: string,
+		removal: RefreshFamilyRemoval,
 		database?: RefreshTokenDatabase
 	): void {
-		const revoke = (transaction: RefreshTokenDatabase): void => {
-			deleteRefreshFamily(transaction, familyId);
+		const remove = (transaction: RefreshTokenDatabase): void => {
+			deleteRefreshFamily(
+				transaction,
+				refreshSessionIdSchema.parse(familyId),
+				removal
+			);
 		};
 
 		if (database !== undefined) {
-			revoke(database);
+			remove(database);
 			return;
 		}
 
-		this.context.db.transaction(revoke);
+		this.context.db.transaction(remove);
 	}
 
-	private logFamilyRevocation(
-		logger: Logger,
-		reason: 'member-limit' | 'replay'
-	): void {
+	private logFamilyRevocation(logger: Logger, reason: 'member-limit'): void {
 		logger.warn('refresh-token family revoked', { reason });
+	}
+
+	/**
+	Ends a family whose refresh token was presented again outside the retry
+	grace. A replay follows a lost refresh response as well as a stolen token,
+	so it ends the session and leaves the access keys below it. The family row
+	remains, marked as ended by a replay, so that `session list` shows the
+	session with the number of keys below it and `session revoke` can delete
+	them. The log records the same.
+	*/
+	private endReplayedFamily(
+		logger: Logger,
+		familyId: string,
+		database?: RefreshTokenDatabase
+	): void {
+		const session = refreshSessionIdSchema.parse(familyId);
+		const accessKeysBelow = countAccessKeysBelow(database ?? this.context.db, {
+			kind: 'session',
+			id: session
+		});
+
+		const replay = (transaction: RefreshTokenDatabase): void => {
+			markFamilyReplayed(transaction, session, isoTimestamp(new Date()));
+		};
+
+		if (database === undefined) {
+			this.context.db.transaction(replay);
+		} else {
+			replay(database);
+		}
+
+		logger.warn('refresh-token replay ended a session', {
+			tenant: this.context.tenant(),
+			session,
+			accessKeysBelow
+		});
 	}
 
 	private async issueRuleToken(
@@ -1262,7 +1322,7 @@ export class TokenExchangeService {
 			return;
 		}
 
-		this.revokeFamily(member.familyId);
+		this.removeFamily(member.familyId, 'ending');
 		logger.info('refresh-token family revoked', {
 			reason: 'revocation-request'
 		});

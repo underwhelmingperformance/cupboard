@@ -6,6 +6,10 @@ CREATE TABLE `access_key_ancestor` (
 );
 --> statement-breakpoint
 CREATE INDEX `access_key_ancestor_descendant_idx` ON `access_key_ancestor` (`descendant_id`);--> statement-breakpoint
+ALTER TABLE `refresh_session_family` ADD `replayed_at` text;--> statement-breakpoint
+ALTER TABLE `refresh_session_family` ADD `retained_by_keys` integer DEFAULT false NOT NULL;--> statement-breakpoint
+CREATE INDEX `refresh_session_family_collectable_idx` ON `refresh_session_family` (`expires_at`,`id`) WHERE "refresh_session_family"."retained_by_keys" = 0;--> statement-breakpoint
+CREATE INDEX `refresh_session_family_retained_idx` ON `refresh_session_family` (`id`) WHERE "refresh_session_family"."retained_by_keys" = 1;--> statement-breakpoint
 CREATE TABLE `access_key` (
 	`id` text PRIMARY KEY NOT NULL,
 	`secret_hash` text NOT NULL,

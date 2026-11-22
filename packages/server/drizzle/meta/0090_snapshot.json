@@ -2747,6 +2747,21 @@
 					"primaryKey": false,
 					"notNull": false,
 					"autoincrement": false
+				},
+				"replayed_at": {
+					"name": "replayed_at",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false,
+					"autoincrement": false
+				},
+				"retained_by_keys": {
+					"name": "retained_by_keys",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": false
 				}
 			},
 			"indexes": {
@@ -2754,6 +2769,18 @@
 					"name": "refresh_session_family_expires_at_idx",
 					"columns": ["expires_at", "id"],
 					"isUnique": false
+				},
+				"refresh_session_family_collectable_idx": {
+					"name": "refresh_session_family_collectable_idx",
+					"columns": ["expires_at", "id"],
+					"isUnique": false,
+					"where": "\"refresh_session_family\".\"retained_by_keys\" = 0"
+				},
+				"refresh_session_family_retained_idx": {
+					"name": "refresh_session_family_retained_idx",
+					"columns": ["id"],
+					"isUnique": false,
+					"where": "\"refresh_session_family\".\"retained_by_keys\" = 1"
 				},
 				"refresh_session_family_active_member_unique": {
 					"name": "refresh_session_family_active_member_unique",

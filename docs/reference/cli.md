@@ -1369,10 +1369,15 @@ Options:
 
 Commands:
   list <url>                   List unexpired sign-in sessions with their
-                               recorded identity and trust rule.
-  revoke [options] <url> <id>  Revoke a sign-in session. Its refresh token stops
-                               working immediately, and its last access token
-                               expires within ten minutes.
+                               recorded identity, trust rule and the number of
+                               access keys below each, and each session that a
+                               replayed refresh token ended while it is
+                               unexpired or has access keys below it.
+  revoke [options] <url> <id>  Revoke a sign-in session and delete every access
+                               key below it, even when the session has already
+                               ended. Its refresh token stops working
+                               immediately, and its last access token expires
+                               within ten minutes.
   help [command]               display help for command
 ```
 
@@ -1381,7 +1386,9 @@ Commands:
 ```text
 Usage: cupboard session list [options] <url>
 
-List unexpired sign-in sessions with their recorded identity and trust rule.
+List unexpired sign-in sessions with their recorded identity, trust rule and the
+number of access keys below each, and each session that a replayed refresh token
+ended while it is unexpired or has access keys below it.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1395,7 +1402,8 @@ Options:
 ```text
 Usage: cupboard session revoke [options] <url> <id>
 
-Revoke a sign-in session. Its refresh token stops working immediately, and its
+Revoke a sign-in session and delete every access key below it, even when the
+session has already ended. Its refresh token stops working immediately, and its
 last access token expires within ten minutes.
 
 Arguments:

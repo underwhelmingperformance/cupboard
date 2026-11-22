@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 import {
 	refreshSessionIdSchema,
-	refreshSessionListResponseSchema,
-	refreshSessionRevokeResponseSchema
+	tenantSessionListResponseSchema,
+	tenantSessionRevokeResponseSchema
 } from '../sessions.ts';
 
 import { baseProcedure } from './base.ts';
@@ -16,11 +16,11 @@ export const sessionsContract = {
 			workBound: 'size'
 		})
 		.route({ method: 'GET', path: '/sessions' })
-		.output(refreshSessionListResponseSchema),
+		.output(tenantSessionListResponseSchema),
 
 	revoke: baseProcedure
 		.meta({ requires: 'session:revoke', workBound: 'time' })
 		.route({ method: 'DELETE', path: '/sessions/{id}' })
 		.input(z.strictObject({ id: refreshSessionIdSchema }))
-		.output(refreshSessionRevokeResponseSchema)
+		.output(tenantSessionRevokeResponseSchema)
 };

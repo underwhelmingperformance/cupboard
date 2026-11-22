@@ -1943,7 +1943,8 @@ describe('tenant contract round trip', () => {
 		const unknownSession = {
 			id: unknown,
 			createdAt,
-			expiresAt
+			expiresAt,
+			accessKeysBelow: 0
 		};
 
 		expect({ listed, revoked, repeated, remaining, members }).toStrictEqual({
@@ -1955,13 +1956,14 @@ describe('tenant contract round trip', () => {
 						subject: 'alice',
 						rule: 'admin',
 						createdAt,
-						expiresAt
+						expiresAt,
+						accessKeysBelow: 0
 					},
 					unknownSession
 				]
 			},
-			revoked: { id: owned, revoked: true },
-			repeated: { id: owned, revoked: false },
+			revoked: { id: owned, revoked: true, deletedAccessKeys: 0 },
+			repeated: { id: owned, revoked: false, deletedAccessKeys: 0 },
 			remaining: { sessions: [unknownSession] },
 			members: []
 		});

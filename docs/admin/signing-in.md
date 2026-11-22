@@ -250,6 +250,11 @@ and when it expires. A session that started before cupboard recorded these
 details shows them as `unknown` until its next renewal. The rule is also
 `unknown` when several trust rules together permit the session's authority.
 
+Each tenant session also shows the number of access keys below it. The list
+includes a session that a replayed refresh token ended, with the time of the
+replay, until you revoke it, or until it has expired and no keys remain below
+it.
+
 To end a session, give its ID:
 
 ```sh
