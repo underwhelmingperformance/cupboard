@@ -31,13 +31,14 @@ The stored access key that a procedure acts on.
   those that the key's grants select, and the token must authorise
   `requires` for every one of them. When no key has the id, the token must
   authorise `requires` for some resource, and the procedure reports the key
-  as absent.
+  as absent. With `self: true`, a request that an access key authenticates
+  may act on that key without `requires`.
 - `{ listed: true }`: the procedure lists keys. The token must authorise
   `requires` for some resource, and the procedure returns only the keys that
   the server's `isAccessKeyCovered` admits for that operation.
 */
 export type AccessKeyLocation =
-	{ readonly field: string } | { readonly listed: true };
+	{ readonly field: string; readonly self?: true } | { readonly listed: true };
 
 export interface ResourceSpec {
 	readonly cache?: ResourceLocation;

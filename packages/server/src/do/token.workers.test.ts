@@ -72,6 +72,7 @@ import {
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
 import { oidcPolicyIdentity } from '../auth/oidc-identity.ts';
+import { tokenPrincipal } from '../auth/principal.ts';
 import {
 	RefreshCredential,
 	refreshCredentialMaxBytes,
@@ -4844,7 +4845,10 @@ function createSessionKeyWithSecret(
 			new TenantIdentityService(instance.context)
 		).authenticateToken(accessToken);
 		const created = await instance.context.accessKeys.create(
-			await openAccessKeyCreator(claims, identityKeys(instance.context)),
+			await openAccessKeyCreator(
+				tokenPrincipal(claims),
+				identityKeys(instance.context)
+			),
 			{
 				grants: [{ type: 'cupboard_wildcard' }],
 				...(expiresAt !== undefined && { expiresAt })

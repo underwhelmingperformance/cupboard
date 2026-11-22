@@ -389,6 +389,32 @@ describe('authoriseRequest for access keys', () => {
 
 	it.each([
 		{
+			name: 'its own id',
+			id: '00000000-0000-4000-8000-000000000009',
+			outcome: 'authorised'
+		},
+		{ name: 'another key', id: 'known', outcome: 'insufficient-scope' }
+	])(
+		'decides a key without access-key:delete deleting $name',
+		async ({ id, outcome }) => {
+			const authorised = authoriseRequest(
+				keyWith([readBuilds]),
+				{
+					requires: 'access-key:delete',
+					resource: { accessKey: { field: 'id', self: true } }
+				},
+				{ id },
+				undefined,
+				noPendingCache,
+				resolver
+			);
+
+			expect(await decision(authorised)).toBe(outcome);
+		}
+	);
+
+	it.each([
+		{
 			name: 'a caller with access-key:list for one cache',
 			grants: [cacheGrant('builds', ['access-key:list'])],
 			outcome: 'authorised'

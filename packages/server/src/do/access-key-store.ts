@@ -40,12 +40,11 @@ import {
 } from 'drizzle-orm';
 
 import { type AccessIdentityKeyContext } from '../auth/access-identity.ts';
-import { type AccessClaims } from '../auth/auth.ts';
 import {
 	oidcPolicyIdentity,
 	recordedOidcIdentity
 } from '../auth/oidc-identity.ts';
-import { type VerifiedAccessKey } from '../auth/principal.ts';
+import { type Principal, type VerifiedAccessKey } from '../auth/principal.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	accessKeyAncestors,
@@ -118,14 +117,27 @@ export interface AccessKeyCreator {
 }
 
 /**
-Opens the sealed identity of a tenant access token and describes the token
-as the creator of an access key. Refuses a token whose identity does not
-open, such as one sealed before `PUSH_ID_SIGNING_KEY` changed.
+Describes a principal as the creator of an access key. A key creates keys
+below itself with its own root identity and rule. A token's sealed identity
+is opened, and a token whose identity does not open, such as one sealed
+before `PUSH_ID_SIGNING_KEY` changed, is refused.
 */
 export async function openAccessKeyCreator(
-	claims: AccessClaims,
+	principal: Principal,
 	keys: AccessIdentityKeyContext
 ): Promise<AccessKeyCreator> {
+	if (principal.kind === 'access-key') {
+		const { key } = principal;
+
+		return {
+			subject: key.creatorSubject,
+			identity: key.rootIdentity,
+			...(key.rootRule !== undefined && { ruleId: key.rootRule }),
+			parent: { kind: 'access-key', id: key.id }
+		};
+	}
+
+	const { claims } = principal;
 	const identity = await claims.identity.open(keys);
 
 	if (identity === undefined) {

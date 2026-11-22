@@ -22,10 +22,7 @@ import {
 	principalGrants
 } from '../auth/principal.ts';
 import { openAccessKeyCreator } from '../do/access-key-store.ts';
-import {
-	BuildInputsCapabilityRequiredError,
-	InsufficientScopeError
-} from '../errors.ts';
+import { BuildInputsCapabilityRequiredError } from '../errors.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
 	internalOrigin,
@@ -228,19 +225,15 @@ export const tenantRouter = os.router({
 		)
 	},
 	accessKeys: {
-		create: os.accessKeys.create.handler(async ({ input, context }) => {
-			if (context.principal.kind !== 'access-token') {
-				throw new InsufficientScopeError();
-			}
-
-			return context.services.accessKeys.create(
+		create: os.accessKeys.create.handler(async ({ input, context }) =>
+			context.services.accessKeys.create(
 				await openAccessKeyCreator(
-					context.principal.claims,
+					context.principal,
 					context.services.accessIdentityKeys()
 				),
 				input
-			);
-		}),
+			)
+		),
 		list: os.accessKeys.list.handler(({ input, context }) =>
 			context.services.accessKeys.list(
 				principalGrants(context.principal),

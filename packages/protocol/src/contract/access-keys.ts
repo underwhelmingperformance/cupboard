@@ -56,7 +56,7 @@ export const accessKeysContract = {
 	delete: baseProcedure
 		.meta({
 			requires: 'access-key:delete',
-			resource: { accessKey: { field: 'id' } },
+			resource: { accessKey: { field: 'id', self: true } },
 			workBound: 'time'
 		})
 		.route({ method: 'DELETE', path: '/access-keys/{id}' })
