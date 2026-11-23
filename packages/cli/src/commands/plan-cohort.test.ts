@@ -26,7 +26,6 @@ import {
 	type Reporter,
 	type ResultPayload
 } from '@cupboard/reporter';
-import { readUserSchema } from '@cupboard/shared/http';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { fetch as undiciFetch, Response } from 'undici';
@@ -44,15 +43,18 @@ import {
 	recordingCacheScopedClient
 } from '../client/cache-scoped.test-support.ts';
 import {
+	InvalidAccessKeyError,
 	InvalidCohortTargetsFileError,
 	InvalidStoreUriError
 } from '../errors.ts';
 import { confirmUpstreamAvailabilityWith } from '../plan/upstream-confirmation.ts';
 import {
-	basicAuthorization,
-	environmentCredentialCases,
-	readCredentialVariables,
+	accessKeyAuthorization,
+	accessKeyVariables,
+	destinationAccessKey,
+	environmentAccessKeyCases,
 	type RecordedRequest,
+	sourceAccessKey,
 	withRecordingServer
 } from '../test-support.ts';
 
@@ -1367,22 +1369,14 @@ async function probeRequests(
 
 describe('planProbes', () => {
 	beforeEach(() => {
-		for (const variable of readCredentialVariables) {
+		for (const variable of accessKeyVariables) {
 			vi.stubEnv(variable, undefined);
 		}
 	});
 
-	const environmentCredentials = {
-		CUPBOARD_READ_USER: 'destination-reader',
-		CUPBOARD_READ_PASSWORD: 'destination-secret',
-		CUPBOARD_VIEW_READ_USER: 'view-reader',
-		CUPBOARD_VIEW_READ_PASSWORD: 'view-secret'
-	};
-	const optionCredentials = {
-		readUser: readUserSchema.parse('option-destination-reader'),
-		readPassword: 'option-destination-secret',
-		viewReadUser: readUserSchema.parse('option-view-reader'),
-		viewReadPassword: 'option-view-secret'
+	const environmentKeys = {
+		CUPBOARD_ACCESS_KEY: destinationAccessKey,
+		CUPBOARD_VIEW_ACCESS_KEY: sourceAccessKey
 	};
 
 	afterEach(() => {
@@ -1391,44 +1385,38 @@ describe('planProbes', () => {
 
 	it.each([
 		{
-			name: 'a reuse view with credentials from the environment',
+			name: 'a reuse view with keys from the environment',
 			source: (_origin: string) => ({ reuseView: 'pr-view' }),
 			sourcePath: '/t/acme/reuse/pr-view/api/v1/missing-paths',
 			options: {},
-			destination: {
-				user: 'destination-reader',
-				password: 'destination-secret'
-			},
-			view: { user: 'view-reader', password: 'view-secret' }
+			destination: destinationAccessKey,
+			view: sourceAccessKey
 		},
 		{
-			name: 'a reference source with credentials from the environment',
+			name: 'a reference source with keys from the environment',
 			source: (origin: string) => ({
 				referenceSource: new URL(`${origin}/t/acme/cache/source`)
 			}),
 			sourcePath: '/t/acme/cache/source/api/v1/missing-paths',
 			options: {},
-			destination: {
-				user: 'destination-reader',
-				password: 'destination-secret'
-			},
-			view: { user: 'view-reader', password: 'view-secret' }
+			destination: destinationAccessKey,
+			view: sourceAccessKey
 		},
 		{
 			name: 'a reuse view with options in preference to the environment',
 			source: (_origin: string) => ({ reuseView: 'pr-view' }),
 			sourcePath: '/t/acme/reuse/pr-view/api/v1/missing-paths',
-			options: optionCredentials,
-			destination: {
-				user: 'option-destination-reader',
-				password: 'option-destination-secret'
+			options: {
+				accessKey: sourceAccessKey,
+				viewAccessKey: destinationAccessKey
 			},
-			view: { user: 'option-view-reader', password: 'option-view-secret' }
+			destination: sourceAccessKey,
+			view: destinationAccessKey
 		}
 	] as const)(
-		'sends each cache its own credential for $name',
+		'sends each cache its own access key for $name',
 		async ({ source, sourcePath, options, destination, view }) => {
-			for (const [variable, value] of Object.entries(environmentCredentials)) {
+			for (const [variable, value] of Object.entries(environmentKeys)) {
 				vi.stubEnv(variable, value);
 			}
 
@@ -1450,15 +1438,12 @@ describe('planProbes', () => {
 						{
 							method: 'POST',
 							path: '/t/acme/api/v1/missing-paths',
-							authorization: basicAuthorization(
-								destination.user,
-								destination.password
-							)
+							authorization: accessKeyAuthorization(destination)
 						},
 						{
 							method: 'POST',
 							path: sourcePath,
-							authorization: basicAuthorization(view.user, view.password)
+							authorization: accessKeyAuthorization(view)
 						}
 					]);
 				}
@@ -1466,20 +1451,14 @@ describe('planProbes', () => {
 		}
 	);
 
-	it.each(environmentCredentialCases)(
-		'pairs a $flag option with $variable for the $role',
-		async ({ flag, value, variable, variableValue, role }) => {
-			vi.stubEnv(variable, variableValue);
+	it.each(environmentAccessKeyCases)(
+		'sends the key in $variable only to the $role',
+		async ({ variable, key, role }) => {
+			vi.stubEnv(variable, key);
 
-			const options = {
-				'--read-user': { readUser: readUserSchema.parse(value) },
-				'--read-password': { readPassword: value },
-				'--view-read-user': { viewReadUser: readUserSchema.parse(value) },
-				'--view-read-password': { viewReadPassword: value }
-			}[flag];
-			const credential = basicAuthorization('reader', 'synthetic-secret');
+			const credential = accessKeyAuthorization(key);
 
-			expect(await probeRequests(options)).toStrictEqual([
+			expect(await probeRequests({})).toStrictEqual([
 				{
 					method: 'POST',
 					path: '/t/acme/api/v1/missing-paths',
@@ -1493,32 +1472,11 @@ describe('planProbes', () => {
 			]);
 		}
 	);
-
-	it('sends a reference source no credential when only the destination variables are set', async () => {
-		vi.stubEnv('CUPBOARD_READ_USER', 'destination-reader');
-		vi.stubEnv('CUPBOARD_READ_PASSWORD', 'destination-secret');
-
-		expect(await probeRequests({})).toStrictEqual([
-			{
-				method: 'POST',
-				path: '/t/acme/api/v1/missing-paths',
-				authorization: basicAuthorization(
-					'destination-reader',
-					'destination-secret'
-				)
-			},
-			{
-				method: 'POST',
-				path: '/t/acme/cache/source/api/v1/missing-paths',
-				authorization: undefined
-			}
-		]);
-	});
 });
 
 describe('plan cohort command', () => {
 	beforeEach(() => {
-		for (const variable of readCredentialVariables) {
+		for (const variable of accessKeyVariables) {
 			vi.stubEnv(variable, undefined);
 		}
 	});
@@ -1527,37 +1485,22 @@ describe('plan cohort command', () => {
 		vi.unstubAllEnvs();
 	});
 
-	it.each(environmentCredentialCases)(
-		'accepts $flag with $variable from the environment',
-		async ({ flag, value, variable, variableValue }) => {
-			const directory = mkdtempSync(
-				path.join(tmpdir(), 'cupboard-plan-credentials-')
-			);
-			const targetsFile = path.join(directory, 'targets.json');
-			vi.stubEnv(variable, variableValue);
-
-			try {
-				await writeFile(targetsFile, 'not json');
-
-				await expect(
-					silentProgram().parseAsync(
-						[
-							'plan',
-							'cohort',
-							'https://cache.example.workers.dev/t/acme',
-							'--targets-file',
-							targetsFile,
-							flag,
-							value
-						],
-						{ from: 'user' }
-					)
-				).rejects.toBeInstanceOf(InvalidCohortTargetsFileError);
-			} finally {
-				rmSync(directory, { recursive: true, force: true });
-			}
-		}
-	);
+	it('refuses an access token in place of an access key', async () => {
+		await expect(
+			silentProgram().parseAsync(
+				[
+					'plan',
+					'cohort',
+					'https://cache.example.workers.dev/t/acme',
+					'--targets-file',
+					'targets.json',
+					'--access-key',
+					'eyJhbGciOiJFZERTQSJ9.e30.signature'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toBeInstanceOf(InvalidAccessKeyError);
+	});
 
 	it.each([
 		{ publish: 'none' as const, authenticated: false },
@@ -1610,21 +1553,16 @@ describe('plan cohort command', () => {
 		});
 	});
 
-	const destinationVariables = {
-		user: 'CUPBOARD_READ_USER',
-		password: 'CUPBOARD_READ_PASSWORD'
-	};
-	const viewVariables = {
-		user: 'CUPBOARD_VIEW_READ_USER',
-		password: 'CUPBOARD_VIEW_READ_PASSWORD'
-	};
-
-	it('does not read the view variables without a reuse view or reference source', async () => {
+	it('does not read the view variable without a reuse view or reference source', async () => {
 		const directory = mkdtempSync(
 			path.join(tmpdir(), 'cupboard-plan-credentials-')
 		);
 		const targetsFile = path.join(directory, 'targets.json');
-		vi.stubEnv('CUPBOARD_VIEW_READ_USER', 'source-reader');
+		// Reading this value would fail, because it is not an access key.
+		vi.stubEnv(
+			'CUPBOARD_VIEW_ACCESS_KEY',
+			'eyJhbGciOiJFZERTQSJ9.e30.signature'
+		);
 
 		try {
 			await writeFile(targetsFile, 'not json');
@@ -1647,36 +1585,15 @@ describe('plan cohort command', () => {
 	});
 
 	it.each([
-		{
-			flag: '--read-user',
-			value: 'reader',
-			view: [],
-			variables: destinationVariables
-		},
-		{
-			flag: '--read-password',
-			value: 'synthetic-secret',
-			view: [],
-			variables: destinationVariables
-		},
-		{
-			flag: '--view-read-user',
-			value: 'reader',
-			view: ['--reuse-view', 'pr-view'],
-			variables: viewVariables
-		},
-		{
-			flag: '--view-read-password',
-			value: 'synthetic-secret',
-			view: ['--reuse-view', 'pr-view'],
-			variables: viewVariables
-		}
+		{ variable: 'CUPBOARD_ACCESS_KEY', view: [] },
+		{ variable: 'CUPBOARD_VIEW_ACCESS_KEY', view: ['--reuse-view', 'pr-view'] }
 	])(
-		'rejects an incomplete $flag pair before reading targets',
-		async ({ flag, value, view, variables }) => {
+		'refuses an access token in $variable before reading targets',
+		async ({ variable, view }) => {
 			const directory = mkdtempSync(
 				path.join(tmpdir(), 'cupboard-plan-credentials-')
 			);
+			vi.stubEnv(variable, 'eyJhbGciOiJFZERTQSJ9.e30.signature');
 
 			try {
 				await expect(
@@ -1687,15 +1604,13 @@ describe('plan cohort command', () => {
 							'https://cache.example.workers.dev/t/acme',
 							'--targets-file',
 							path.join(directory, 'missing.json'),
-							flag,
-							value,
 							...view
 						],
 						{ from: 'user' }
 					)
 				).rejects.toMatchObject({
-					name: 'ReadCredentialPairError',
-					variables
+					name: 'InvalidAccessKeyError',
+					source: variable
 				});
 			} finally {
 				rmSync(directory, { recursive: true, force: true });

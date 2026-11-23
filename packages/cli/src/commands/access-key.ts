@@ -39,6 +39,10 @@ import { collectProgressively } from '@cupboard/shared/collections';
 import { cursorPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
+import {
+	type AccessKeyOptions,
+	parseAccessKey
+} from '../access-key-options.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { listingLimits } from '../client/listings.ts';
@@ -91,11 +95,11 @@ export interface AccessKeyExpiryOptions {
 }
 
 interface AccessKeyCreateOptions
-	extends AccessKeyGrantOptions, AccessKeyExpiryOptions {
+	extends AccessKeyGrantOptions, AccessKeyExpiryOptions, AccessKeyOptions {
 	readonly grantsFile?: string;
 }
 
-interface AccessKeyDeleteOptions {
+interface AccessKeyDeleteOptions extends AccessKeyOptions {
 	readonly yes?: boolean;
 }
 
@@ -226,6 +230,11 @@ export function registerAccessKeyCommands(
 			'--no-expiry',
 			'create a key that does not expire; a credential that expires needs access-key:create for every resource in the grants'
 		)
+		.option(
+			'--access-key <key>',
+			'authenticate with this access key instead of your saved `cupboard login` session',
+			parseAccessKey
+		)
 		.addHelpText(
 			'after',
 			[
@@ -249,7 +258,7 @@ export function registerAccessKeyCommands(
 			await runAccessKeyCreate(
 				{ grants, ...(expiresAt !== undefined && { expiresAt }) },
 				reporter,
-				accessKeyClientFor(url, programOptions)
+				accessKeyClientFor(url, programOptions, options)
 			);
 		});
 
@@ -259,16 +268,24 @@ export function registerAccessKeyCommands(
 			'List the access keys whose grants you can see, with their grants and expiry.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.action(async (url: URL) => {
+		.option(
+			'--access-key <key>',
+			'authenticate with this access key instead of your saved `cupboard login` session',
+			parseAccessKey
+		)
+		.action(async (url: URL, options: AccessKeyOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 
-			await runAccessKeyList(reporter, accessKeyClientFor(url, programOptions));
+			await runAccessKeyList(
+				reporter,
+				accessKeyClientFor(url, programOptions, options)
+			);
 		});
 
 	accessKey
 		.command('delete')
 		.description(
-			'Delete an access key and every key created below it. The read routes can accept a deleted key for up to five minutes.'
+			'Delete an access key and every key created below it. Reads can accept a deleted key for up to five minutes, and work that it started can continue for up to 15 minutes.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
@@ -277,6 +294,11 @@ export function registerAccessKeyCommands(
 			parseAccessKeyId
 		)
 		.option('-y, --yes', 'delete without the confirmation prompt')
+		.option(
+			'--access-key <key>',
+			'authenticate with this access key instead of your saved `cupboard login` session',
+			parseAccessKey
+		)
 		.action(
 			async (url: URL, id: AccessKeyId, options: AccessKeyDeleteOptions) => {
 				const ui = commandUi(program, programOptions, {
@@ -286,7 +308,7 @@ export function registerAccessKeyCommands(
 				await runAccessKeyDelete(
 					id,
 					ui,
-					accessKeyClientFor(url, programOptions)
+					accessKeyClientFor(url, programOptions, options)
 				);
 			}
 		);
@@ -294,10 +316,13 @@ export function registerAccessKeyCommands(
 
 function accessKeyClientFor(
 	url: URL,
-	programOptions: ProgramOptions
+	programOptions: ProgramOptions,
+	options: AccessKeyOptions
 ): AccessKeyClient {
 	return tenantRpc(url, {
-		credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+		credential:
+			options.accessKey ??
+			cachedOwnerProvider(url, { signal: programOptions.signal }),
 		signal: programOptions.signal
 	}).accessKeys;
 }

@@ -6,6 +6,7 @@ import {
 	cacheNameSchema,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
@@ -24,7 +25,6 @@ import {
 import { type ReuseViewSelectorInput } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { filterProgressively } from '@cupboard/shared/collections';
-import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
 import {
@@ -88,8 +88,7 @@ export interface GithubCheckOptions {
 	readonly branch: string;
 	readonly workflowRef: string;
 	readonly rootPrefix?: string;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 }
 
 export interface GithubCheckClient {

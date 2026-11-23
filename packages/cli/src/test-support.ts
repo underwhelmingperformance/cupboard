@@ -3,51 +3,48 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { accessKeySecretSchema } from '@cupboard/protocol/access-keys';
 import { test, vi } from 'vitest';
 
-export const readCredentialVariables = [
-	'CUPBOARD_READ_USER',
-	'CUPBOARD_READ_PASSWORD',
-	'CUPBOARD_VIEW_READ_USER',
-	'CUPBOARD_VIEW_READ_PASSWORD'
+export const accessKeyVariables = [
+	'CUPBOARD_ACCESS_KEY',
+	'CUPBOARD_VIEW_ACCESS_KEY'
 ] as const;
 
 /**
-Each case supplies one half of a read credential as an option and the other
-half as an environment variable. Together they form the credential `reader`
-with the password `synthetic-secret` for the destination or for the view or
-reference source.
+An access key for the addressed cache and one for the reuse view or reference
+source, in tests that read both.
 */
-export const environmentCredentialCases = [
+export const destinationAccessKey = accessKeySecretSchema.parse(
+	`cupboard_ak_00000000-0000-4000-8000-00000000000d_${'d'.repeat(64)}`
+);
+export const sourceAccessKey = accessKeySecretSchema.parse(
+	`cupboard_ak_00000000-0000-4000-8000-00000000000e_${'e'.repeat(64)}`
+);
+
+/**
+Each case supplies one access key in an environment variable, for the
+destination or for the reuse view or reference source.
+*/
+export const environmentAccessKeyCases = [
 	{
-		flag: '--read-user',
-		value: 'reader',
-		variable: 'CUPBOARD_READ_PASSWORD',
-		variableValue: 'synthetic-secret',
+		variable: 'CUPBOARD_ACCESS_KEY',
+		key: destinationAccessKey,
 		role: 'destination'
 	},
 	{
-		flag: '--read-password',
-		value: 'synthetic-secret',
-		variable: 'CUPBOARD_READ_USER',
-		variableValue: 'reader',
-		role: 'destination'
-	},
-	{
-		flag: '--view-read-user',
-		value: 'reader',
-		variable: 'CUPBOARD_VIEW_READ_PASSWORD',
-		variableValue: 'synthetic-secret',
-		role: 'source'
-	},
-	{
-		flag: '--view-read-password',
-		value: 'synthetic-secret',
-		variable: 'CUPBOARD_VIEW_READ_USER',
-		variableValue: 'reader',
+		variable: 'CUPBOARD_VIEW_ACCESS_KEY',
+		key: sourceAccessKey,
 		role: 'source'
 	}
 ] as const;
+
+/**
+The Authorization header that presents an access key to a read route.
+*/
+export function accessKeyAuthorization(key: string): string {
+	return basicAuthorization('cupboard', key);
+}
 
 /**
 The Authorization header for HTTP Basic authentication with a user name and

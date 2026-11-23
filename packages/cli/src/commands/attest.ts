@@ -4,6 +4,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import type { AccessKeySecret } from '@cupboard/protocol/access-keys';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import {
 	formatCount,
@@ -11,7 +12,6 @@ import {
 	type ResultRow,
 	shouldShowDetails
 } from '@cupboard/reporter';
-import type { ReadUser } from '@cupboard/shared/http';
 import {
 	defaultVerifierThreshold,
 	IneffectiveCtlogThresholdError,
@@ -21,6 +21,11 @@ import {
 import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import {
+	accessKeyFor,
+	parseAccessKey,
+	sessionReplacingAccessKey
+} from '../access-key-options.ts';
 import {
 	parseAttestationBundle,
 	readCommittedAttestationPathInfos,
@@ -51,20 +56,17 @@ import {
 	CliUsageError
 } from '../errors.ts';
 import { pushClientFor } from '../push/push-client.ts';
-import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { registerAttestStatusCommand } from './attest-status.ts';
 import { parsePathFile, resolvePushPath } from './push.ts';
-import { environmentValue, readCredentials } from './read-credentials.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
 	readonly url?: URL;
 	readonly storePathHash?: string;
 	readonly bundleDigest?: string;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 	readonly trustedPublicKey?: string;
 	readonly trustCachePubkey?: boolean;
 	readonly certificateIdentity?: string;
@@ -117,8 +119,7 @@ export function parseVerifierThreshold(option: string, minimum: number) {
 interface AttachOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 	readonly attestation: readonly string[];
 	readonly attestationsFile?: string;
 	readonly pathsFile?: string;
@@ -281,13 +282,9 @@ export function registerAttestCommands(
 			parseAudience
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--read-password <password>',
-			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
+			'--access-key <key>',
+			'access key that attaches attestations and reads the cache, in place of the login session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--bundle, --attestation <bundle>',
@@ -319,7 +316,9 @@ export function registerAttestCommands(
 			].join('\n')
 		)
 		.action(async (url: URL, paths: string[], options: AttachOptions) => {
-			const credential = readCredentials(options);
+			const reporter = commandUi(program, programOptions).reporter();
+			const accessKey = sessionReplacingAccessKey(options, reporter);
+
 			const bundlePaths = await attachmentBundlePaths(
 				options.attestation,
 				options.attestationsFile
@@ -335,23 +334,24 @@ export function registerAttestCommands(
 				payloadDescription: 'a published store path',
 				parsePayloadEntry: (entry) => parseAttachPath(entry),
 				authorise: (target) =>
-					authenticate(
-						CupboardClient.fromUrl(target.tenantUrl, {
-							cache: target.cache,
-							signal: programOptions.signal
-						}),
-						{
-							githubOidc: options.githubOidc,
-							audience:
-								options.audience ?? audienceSchema.parse(target.tenantUrl),
-							authorizationDetails: attestAttachAuthorizationDetails({
-								cache: target.cache
-							})
-						}
-					),
+					accessKey === undefined
+						? authenticate(
+								CupboardClient.fromUrl(target.tenantUrl, {
+									cache: target.cache,
+									signal: programOptions.signal
+								}),
+								{
+									githubOidc: options.githubOidc,
+									audience:
+										options.audience ?? audienceSchema.parse(target.tenantUrl),
+									authorizationDetails: attestAttachAuthorizationDetails({
+										cache: target.cache
+									})
+								}
+							)
+						: Promise.resolve(accessKey),
 				signal: programOptions.signal
 			});
-			const reporter = commandUi(program, programOptions).reporter();
 			const cache = resolved.target.cache;
 			const resolvedPaths = [...resolved.payload, ...filePaths];
 			const pathInfos = await reporter.progress(
@@ -363,10 +363,7 @@ export function registerAttestCommands(
 						{
 							url: resolved.target.tenantUrl,
 							cache,
-							...(credential !== undefined && {
-								readUser: credential.user,
-								readPassword: credential.password
-							})
+							...(accessKey !== undefined && { accessKey })
 						},
 						{
 							onProgress: () => {
@@ -425,13 +422,9 @@ export function registerAttestCommands(
 			'verify only the bundle with this digest (needed when the cache has several bundles with the predicate type)'
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--read-password <password>',
-			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
+			'--access-key <key>',
+			'access key for a private cache (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--trusted-public-key <key>',
@@ -514,11 +507,7 @@ export function registerAttestCommands(
 		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const readUser =
-				options.readUser ??
-				parseReadUser(environmentValue('CUPBOARD_READ_USER'));
-			const readPassword =
-				options.readPassword ?? environmentValue('CUPBOARD_READ_PASSWORD');
+			const accessKey = accessKeyFor(options);
 			const common = {
 				certificateIdentity: options.certificateIdentity,
 				certificateIdentityRegex: options.certificateIdentityRegex,
@@ -561,8 +550,7 @@ export function registerAttestCommands(
 						storePathHash: options.storePathHash,
 						cache: target.cache,
 						bundleDigest: options.bundleDigest,
-						readUser,
-						readPassword,
+						...(accessKey !== undefined && { accessKey }),
 						trustedPublicKey: options.trustedPublicKey,
 						trustCachePubkey: options.trustCachePubkey,
 						signal: programOptions.signal

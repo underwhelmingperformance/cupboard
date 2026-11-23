@@ -33,11 +33,13 @@ inputs:
       Audience of the GitHub OIDC token. Defaults to url without a trailing
       slash.
     required: false
-  read-user:
-    description: User name of a read credential for a private destination cache.
-    required: false
-  read-password:
-    description: Password of a read credential for a private destination cache.
+  access-key:
+    description:
+      Access key for a private destination cache, as `cupboard access-key
+      create` prints it. With it, the action reads the cache and attaches
+      attestations with the key instead of the job's OIDC token, so the key
+      needs the attestation grants. When the input is empty, the action uses the
+      CUPBOARD_ACCESS_KEY environment variable.
     required: false
   receipt-file:
     description: Receipt for the paths published earlier in the job.
@@ -96,8 +98,7 @@ runs:
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CACHE: ${{ inputs.cache }}
         AUDIENCE: ${{ inputs.audience }}
-        READ_USER: ${{ inputs.read-user }}
-        READ_PASSWORD: ${{ inputs.read-password }}
+        ACCESS_KEY: ${{ inputs.access-key }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         BUNDLE: ${{ inputs.bundle }}
@@ -108,7 +109,6 @@ runs:
           --cupboard-path "$CUPBOARD_PATH"
           --cache "$CACHE"
           --audience "$AUDIENCE"
-          --read-user "$READ_USER"
           --receipt-file "$RECEIPT_FILE"
           --checksums-file "$CHECKSUMS_FILE"
           --bundle "$BUNDLE"

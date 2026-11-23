@@ -63,14 +63,6 @@ export function registerAttestCheckCommand(
 			'Tenant URL of the destination. Check every subject against the narinfo in the destination cache.'
 		)
 		.option('--cache <name>', 'Named destination cache.')
-		.option(
-			'--read-user <user>',
-			'Username for reading the destination cache. Requires --read-password.'
-		)
-		.option(
-			'--read-password <password>',
-			'Password for reading the destination cache. Defaults to READ_PASSWORD. Requires --read-user.'
-		)
 		.action((options: AttestCheckOptions) =>
 			attestCheckAction(options, environment)
 		);

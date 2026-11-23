@@ -287,7 +287,7 @@ export interface GithubRepairOptions {
 	readonly allowBranchWorkflow?: boolean;
 	readonly trustScope?: GithubTrustScope;
 	readonly tagPattern?: string;
-	readonly readUser?: string;
+	readonly hasAccessKey?: boolean;
 }
 
 type ReuseViewSetInput = Parameters<ReuseViewClient['set']>[0];
@@ -2090,7 +2090,9 @@ export async function runDiscoveredGithubRepair(
 			{
 				repo: result.identity.fullName,
 				branch: result.branch,
-				...(options.readUser !== undefined && { readUser: options.readUser }),
+				...(options.hasAccessKey !== undefined && {
+					hasAccessKey: options.hasAccessKey
+				}),
 				isVerification: true
 			},
 			ui.reporter(),

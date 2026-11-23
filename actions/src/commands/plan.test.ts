@@ -23,17 +23,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	accessKeyAuthorization,
+	destinationAccessKey,
+	viewAccessKey
+} from '../access-key.test-support.ts';
+import {
+	AccessKeyInvalidError,
+	AccessKeyVersionError,
 	BooleanInputInvalidError,
 	CohortFailureToleranceError,
 	ComponentRootTargetLimitError,
-	EnvironmentCredentialVersionError,
 	MatrixJobLimitError,
 	MissingInputError,
 	PackCapacityInvalidError,
 	PublishRootTargetLimitError,
-	ReadCredentialVariablesIncompleteError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
 	RemoteOutputPathUnknownDuringPlanningError,
 	RetentionChoiceConflictError,
 	RootEnsureCommandError,
@@ -158,11 +161,9 @@ describe('planAction', () => {
 				{
 					...baseOptions,
 					optimise: 'true',
-					referenceSource,
-					fallbackReadUser: 'reader',
-					fallbackReadPassword: 'private-source-password'
+					referenceSource
 				},
-				{ RUNNER_TEMP: '/tmp' },
+				{ RUNNER_TEMP: '/tmp', VIEW_ACCESS_KEY: viewAccessKey },
 				undefined,
 				{
 					evaluator,
@@ -224,69 +225,43 @@ describe('planAction', () => {
 
 	it.each([
 		{
-			name: 'refuses a CLI that reads no password from its environment',
-			credential: {
-				fallbackReadUser: 'source-reader',
-				fallbackReadPassword: 'source-secret'
-			},
-			environment: {},
-			error: { minimumVersion: 'v0.0.50', version: 'v0.0.49' },
+			name: 'refuses a CLI that reads no access key from its environment',
+			environment: { VIEW_ACCESS_KEY: viewAccessKey },
+			error: { minimumVersion: 'v0.0.56', version: 'v0.0.55' },
 			inspected: [['/unused/cupboard', undefined]]
 		},
 		{
-			name: 'refuses a CLI that ignores a reference credential set as environment variables',
-			credential: {},
-			environment: {
-				CUPBOARD_VIEW_READ_USER: 'source-reader',
-				CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
-			},
-			error: { minimumVersion: 'v0.0.50', version: 'v0.0.49' },
+			name: 'refuses a CLI that ignores a reference key set as an environment variable',
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey },
+			error: { minimumVersion: 'v0.0.56', version: 'v0.0.55' },
 			inspected: [['/unused/cupboard', undefined]]
 		},
 		{
-			name: 'does not check the CLI version without a reference credential',
-			credential: {},
+			name: 'does not check the CLI version without a reference key',
 			environment: {},
 			error: 'evaluated',
 			inspected: []
 		},
 		{
-			name: 'does not check the CLI version when the job sets empty credential variables',
-			credential: {},
-			environment: {
-				CUPBOARD_VIEW_READ_USER: '',
-				CUPBOARD_VIEW_READ_PASSWORD: ''
-			},
+			name: 'does not check the CLI version when the job sets an empty key variable',
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: '' },
 			error: 'evaluated',
 			inspected: []
 		},
-		...[
-			{ CUPBOARD_VIEW_READ_USER: 'source-reader' },
-			{
-				CUPBOARD_VIEW_READ_USER: 'source-reader',
-				CUPBOARD_VIEW_READ_PASSWORD: ''
+		{
+			name: 'rejects an access token set as the reference key variable',
+			environment: {
+				CUPBOARD_VIEW_ACCESS_KEY: 'eyJhbGciOiJFZERTQSJ9.e30.signature'
 			},
-			{ CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' },
-			{
-				CUPBOARD_VIEW_READ_USER: '',
-				CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
-			}
-		].map((environment) => ({
-			name: `rejects half a reference credential set as environment variables: ${JSON.stringify(environment)}`,
-			credential: {},
-			environment,
-			error: {
-				userVariable: 'CUPBOARD_VIEW_READ_USER',
-				passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
-			},
+			error: { source: 'CUPBOARD_VIEW_ACCESS_KEY' },
 			inspected: []
-		}))
-	])('$name', async ({ credential, environment, error, inspected }) => {
+		}
+	])('$name', async ({ environment, error, inspected }) => {
 		const evaluation = new Error('evaluation stops the plan');
 		const evaluator = vi.fn(() => Promise.reject(evaluation));
 		const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
 		const fetcher = vi.fn(() => Promise.resolve(new Response('{}')));
-		const inspectVersion = vi.fn(() => Promise.resolve('v0.0.49'));
+		const inspectVersion = vi.fn(() => Promise.resolve('v0.0.55'));
 		let failure: unknown;
 
 		try {
@@ -294,8 +269,7 @@ describe('planAction', () => {
 				{
 					...baseOptions,
 					optimise: 'true',
-					referenceSource: 'https://cupboard.example/t/acme/cache/source',
-					...credential
+					referenceSource: 'https://cupboard.example/t/acme/cache/source'
 				},
 				{ RUNNER_TEMP: '/tmp', ...environment },
 				undefined,
@@ -315,16 +289,13 @@ describe('planAction', () => {
 
 		expect({
 			error:
-				failure instanceof EnvironmentCredentialVersionError
+				failure instanceof AccessKeyVersionError
 					? {
 							minimumVersion: failure.minimumVersion,
 							version: failure.version
 						}
-					: failure instanceof ReadCredentialVariablesIncompleteError
-						? {
-								userVariable: failure.userVariable,
-								passwordVariable: failure.passwordVariable
-							}
+					: failure instanceof AccessKeyInvalidError
+						? { source: failure.source }
 						: failure instanceof TargetEvaluationError &&
 							  failure.cause === evaluation
 							? 'evaluated'
@@ -469,25 +440,18 @@ describe('planAction', () => {
 		).rejects.toThrow(BooleanInputInvalidError);
 	});
 
-	it.each([
-		[
-			'read-user is supplied without read-password',
-			{ readUser: 'ci' },
-			ReadPasswordRequiredError
-		],
-		[
-			'read-password is supplied without read-user',
-			{ readPassword: 'secret' },
-			ReadUserRequiredError
-		]
-	])('rejects when %s', async (_name, overrides, errorType) => {
-		await expect(
-			planAction(
-				{ ...baseOptions, ...overrides },
-				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
-			)
-		).rejects.toThrow(errorType);
-	});
+	it.each(['ACCESS_KEY', 'VIEW_ACCESS_KEY'])(
+		'rejects an access token in %s',
+		async (variable) => {
+			await expect(
+				planAction(baseOptions, {
+					RUNNER_TEMP: '/tmp',
+					GITHUB_RUN_ID: '12345',
+					[variable]: 'eyJhbGciOiJFZERTQSJ9.e30.signature'
+				})
+			).rejects.toThrow(AccessKeyInvalidError);
+		}
+	);
 
 	it.each([
 		{
@@ -659,26 +623,19 @@ describe('resolvePlanInputs', () => {
 		expect(inputs.publish).toBe('built');
 	});
 
-	it('reads the read passwords from the action environment', () => {
-		const inputs = resolvePlanInputs(
-			{ ...baseOptions, readUser: 'reader', fallbackReadUser: 'fallback' },
-			{
-				...environment,
-				READ_PASSWORD: 'secret',
-				FALLBACK_READ_PASSWORD: 'fallback-secret'
-			}
-		);
+	it('reads the access keys from the action environment', () => {
+		const inputs = resolvePlanInputs(baseOptions, {
+			...environment,
+			ACCESS_KEY: destinationAccessKey,
+			VIEW_ACCESS_KEY: viewAccessKey
+		});
 
 		expect({
-			readUser: inputs.readUser,
-			readPassword: inputs.readPassword,
-			fallbackReadUser: inputs.fallbackReadUser,
-			fallbackReadPassword: inputs.fallbackReadPassword
+			accessKey: inputs.accessKey,
+			viewAccessKey: inputs.viewAccessKey
 		}).toStrictEqual({
-			readUser: 'reader',
-			readPassword: 'secret',
-			fallbackReadUser: 'fallback',
-			fallbackReadPassword: 'fallback-secret'
+			accessKey: destinationAccessKey,
+			viewAccessKey
 		});
 	});
 
@@ -780,18 +737,6 @@ describe('resolvePlanInputs', () => {
 		expect(
 			inputs.targets.every((entry) => entry.rootSuffix === target.rootSuffix)
 		).toBe(true);
-	});
-
-	it('preserves significant whitespace in both read credentials', () => {
-		const inputs = resolvePlanInputs(
-			{ ...baseOptions, readUser: ' alice ', readPassword: ' p w ' },
-			environment
-		);
-
-		expect({
-			readUser: inputs.readUser,
-			readPassword: inputs.readPassword
-		}).toStrictEqual({ readUser: ' alice ', readPassword: ' p w ' });
 	});
 
 	it('disables optimisation for a case-exact false', () => {
@@ -1469,11 +1414,9 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		rootPrefix: 'github:owner/repo/main',
 		ttl: '',
 		permanent: false,
-		readUser: '',
-		readPassword: '',
+		accessKey: '',
 		referenceSource: '',
-		fallbackReadUser: '',
-		fallbackReadPassword: '',
+		viewAccessKey: '',
 		audience: 'https://cupboard.example/t/acme',
 		cupboardPath: '/unused/cupboard',
 		planFile: '/unused/cupboard-publish-plan.json',
@@ -2660,6 +2603,97 @@ describe('cohort-matrix output', () => {
 			cohortCount: true
 		});
 	});
+
+	it.each([
+		{
+			name: 'the job OIDC token',
+			variables: {},
+			credential: { oidc: true, key: undefined }
+		},
+		{
+			name: 'the destination access key',
+			variables: { ACCESS_KEY: destinationAccessKey },
+			credential: { oidc: false, key: destinationAccessKey }
+		}
+	])(
+		'runs root ensure and root targets with $name',
+		async ({ variables, credential }) => {
+			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+			const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+			const evaluator: NixEvaluator = () =>
+				Promise.resolve({
+					stdout: JSON.stringify({
+						derivations: {
+							[targetRootDrvPath]: {
+								env: { out: appStorePath },
+								inputs: { drvs: {} },
+								outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+							}
+						}
+					})
+				});
+			const calls: {
+				readonly command: string;
+				readonly oidc: boolean;
+				readonly key: string | undefined;
+			}[] = [];
+			const runner: EnsureRunner = async (
+				_command,
+				arguments_,
+				_signal,
+				commandEnvironment
+			) => {
+				calls.push({
+					command: arguments_.includes('targets') ? 'targets' : 'ensure',
+					oidc: arguments_.includes('--github-oidc'),
+					key: commandEnvironment?.CUPBOARD_ACCESS_KEY
+				});
+
+				if (arguments_.includes('targets')) {
+					await writeFile(
+						resultFileArgument(arguments_),
+						rootTargetsResultLine([storePath(appStorePath)])
+					);
+
+					return { stdout: '', stderr: '' };
+				}
+
+				const root = rootCommandTarget(arguments_);
+				await writeFile(
+					resultFileArgument(arguments_),
+					retainedResultLine(root)
+				);
+
+				return { stdout: '', stderr: '' };
+			};
+
+			await planAction(
+				{ ...baseOptions, optimise: 'true', publish: 'outputs' },
+				{
+					GITHUB_RUN_ID: '12345',
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output'),
+					...variables
+				},
+				undefined,
+				{
+					evaluator,
+					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					inspectCommandOptions: completeTargetsOption,
+					fetcher: alwaysAvailableFetcher,
+					inspectVersion: () => Promise.resolve('v0.0.56'),
+					runner
+				}
+			);
+
+			expect(calls).toStrictEqual(
+				['ensure', 'targets', 'ensure'].map((command) => ({
+					command,
+					...credential
+				}))
+			);
+		}
+	);
 
 	it.each(['outputs', 'built'] as const)(
 		'prunes root-covered cohorts only with outputs publication, scope %s',
@@ -4101,8 +4135,7 @@ describe('plan-job reference publication', () => {
 				...resolvePlanInputs(baseOptions, { RUNNER_TEMP: directory }),
 				targets: [evaluation('app', outputPath).target],
 				referenceSource: 'https://cupboard.example/t/acme',
-				fallbackReadUser: '',
-				fallbackReadPassword: ''
+				viewAccessKey: ''
 			};
 			const calls: {
 				root: string | undefined;
@@ -4185,50 +4218,33 @@ describe('plan-job reference publication', () => {
 		}
 	);
 
-	const referenceInputs = {
-		fallbackReadUser: 'source-reader',
-		fallbackReadPassword: 'source-secret'
-	};
-	const referenceVariables = {
-		CUPBOARD_VIEW_READ_USER: 'source-reader',
-		CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
-	};
-
 	it.each([
 		{
-			source: 'the inputs',
-			credential: referenceInputs,
-			variables: {},
-			credentialArguments: ['--read-user', 'source-reader'],
-			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
+			source: 'the input',
+			variables: { VIEW_ACCESS_KEY: viewAccessKey },
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey }
 		},
 		{
-			source: 'environment variables',
-			credential: {},
-			variables: referenceVariables,
-			credentialArguments: ['--read-user', 'source-reader'],
-			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
+			source: 'the environment variable',
+			variables: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey },
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey }
 		},
 		{
-			source: 'the inputs over environment variables',
-			credential: referenceInputs,
+			source: 'the input over the environment variable',
 			variables: {
-				CUPBOARD_VIEW_READ_USER: 'ignored-reader',
-				CUPBOARD_VIEW_READ_PASSWORD: 'ignored-secret'
+				VIEW_ACCESS_KEY: viewAccessKey,
+				CUPBOARD_VIEW_ACCESS_KEY: destinationAccessKey
 			},
-			credentialArguments: ['--read-user', 'source-reader'],
-			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' }
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey }
 		},
 		{
-			source: 'neither the inputs nor environment variables',
-			credential: {},
+			source: 'neither the input nor the environment variable',
 			variables: {},
-			credentialArguments: [],
 			environment: {}
 		}
 	])(
-		'passes the reference credential from $source to push',
-		async ({ credential, variables, credentialArguments, environment }) => {
+		'passes the reference key from $source to push',
+		async ({ variables, environment }) => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-plan-reference-')
 			);
@@ -4237,8 +4253,7 @@ describe('plan-job reference publication', () => {
 				...resolvePlanInputs(
 					{
 						...baseOptions,
-						referenceSource: 'https://cupboard.example/t/acme',
-						...credential
+						referenceSource: 'https://cupboard.example/t/acme'
 					},
 					{ RUNNER_TEMP: directory, ...variables }
 				),
@@ -4305,8 +4320,7 @@ describe('plan-job reference publication', () => {
 							'https://cupboard.example/t/acme',
 							'--github-oidc',
 							'--root',
-							'github:owner/repo/main/app',
-							...credentialArguments
+							'github:owner/repo/main/app'
 						],
 						environment
 					}
@@ -4332,8 +4346,7 @@ describe('plan-job reference publication', () => {
 				...resolvePlanInputs(baseOptions, { RUNNER_TEMP: '/tmp' }),
 				targets: [evaluation('app', outputPath).target],
 				referenceSource: 'https://cupboard.example/t/acme',
-				fallbackReadUser: '',
-				fallbackReadPassword: '',
+				viewAccessKey: '',
 				build,
 				publish
 			};
@@ -4697,24 +4710,18 @@ it.each(['outputs', 'built'] as const)(
 it.each([
 	{
 		role: 'destination',
-		variables: {
-			CUPBOARD_READ_USER: 'reader',
-			CUPBOARD_READ_PASSWORD: 'secret'
-		},
-		destination: `Basic ${btoa('reader:secret')}`,
+		variables: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+		destination: accessKeyAuthorization(destinationAccessKey),
 		reference: undefined
 	},
 	{
 		role: 'reference source',
-		variables: {
-			CUPBOARD_VIEW_READ_USER: 'source-reader',
-			CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
-		},
+		variables: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey },
 		destination: undefined,
-		reference: `Basic ${btoa('source-reader:source-secret')}`
+		reference: accessKeyAuthorization(viewAccessKey)
 	}
 ])(
-	'sends the $role read credential set as environment variables with its availability probe',
+	'sends the $role access key set as an environment variable with its availability probe',
 	async ({ variables, destination, reference }) => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-plan-job-credential-')
@@ -4770,7 +4777,7 @@ it.each([
 					storeDirectory: storeDirectorySchema.parse('/nix/store'),
 					inspectCommandOptions: completeTargetsOption,
 					runner,
-					inspectVersion: () => Promise.resolve('v0.0.50'),
+					inspectVersion: () => Promise.resolve('v0.0.56'),
 					evaluator: () =>
 						Promise.resolve({
 							stdout: JSON.stringify({

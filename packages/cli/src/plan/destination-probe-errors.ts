@@ -28,7 +28,7 @@ export class DestinationProbeResponseError extends CliError {
 export class PrivateViewReadRefusedError extends CliError {
 	constructor(url: string, status: number) {
 		super(
-			`Could not read private reuse view at ${url}: HTTP ${String(status)}. Supply the tenant read credential with --view-read-user and --view-read-password, or use an OIDC read session with view:content-read authority.`
+			`Could not read private reuse view at ${url}: HTTP ${String(status)}. Supply an access key with view:content-read for the view with --view-access-key, or use an OIDC read session with view:content-read authority.`
 		);
 		this.name = 'PrivateViewReadRefusedError';
 	}

@@ -5,6 +5,7 @@ import {
 	type PredicateType,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	attestationInfoCapability,
 	type AttestationInfoEntry,
@@ -19,7 +20,7 @@ import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata
 import { type RandomSource } from '@cupboard/shared/backoff';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import { fetchWithProbeRetries, lookupInPages } from '@cupboard/shared/paging';
 import {
 	readResponseBytes,
@@ -30,6 +31,7 @@ import { type DeadlineTimer } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
+import { basicCredentialForAccessKey } from '../access-key-options.ts';
 import { cacheReadFetcher } from '../client/transport.ts';
 import { CliError, CliUsageError, CupboardHttpError } from '../errors.ts';
 
@@ -43,8 +45,7 @@ export interface AttestationDiscoveryOptions {
 	readonly cache: CacheScope;
 	readonly storePathHashes: readonly StorePathHash[];
 	readonly predicateTypes?: readonly PredicateType[];
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 	readonly netrcFile?: string;
 	readonly signal?: AbortSignal;
 	readonly onProgress?: (completed: number) => void;
@@ -114,12 +115,9 @@ export async function readAttestationInfo(
 	});
 	const base = cacheUrl(options.url, options.cache);
 	const headers =
-		options.readUser === undefined || options.readPassword === undefined
+		options.accessKey === undefined
 			? {}
-			: basicAuthHeader({
-					user: options.readUser,
-					password: options.readPassword
-				});
+			: basicAuthHeader(basicCredentialForAccessKey(options.accessKey));
 	const target = (path: string): string =>
 		`${base.href.replace(/\/$/u, '')}/${path}`;
 	const refuseUnexpected = async (

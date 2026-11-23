@@ -17,6 +17,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	type Cohort,
 	type CohortPreFilterDecision,
@@ -56,7 +57,6 @@ import {
 	waitForAbortableChildProcess
 } from '@cupboard/shared/child-process';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { type ReadUser } from '@cupboard/shared/http';
 import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import type { Command } from 'commander';
 import { z } from 'zod';
@@ -67,13 +67,15 @@ import {
 	cohortJobName
 } from '../build-location.ts';
 import {
+	accessKeyInvocation,
 	cupboardDebugArguments,
+	type CupboardInvocation,
 	inspectCommandOptions,
 	inspectCupboardVersion,
 	inspectDocumentVersions,
 	isReleaseVersion,
-	requireEnvironmentCredentialSupport,
-	resolveReadCredential
+	requireAccessKeySupport,
+	resolveAccessKey
 } from '../cupboard-run.ts';
 import {
 	BuildRebuildRemoteDispatchError,
@@ -88,8 +90,6 @@ import {
 	PublishRootTargetLimitError,
 	PublishTargetsJsonError,
 	PublishTargetsSchemaError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
 	ReferenceSourceInvalidError,
 	RemoteOutputPathUnknownDuringPlanningError,
 	RetentionChoiceConflictError,
@@ -103,11 +103,12 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
+	basicCredentialForAccessKey,
 	isEnabled,
 	provided,
+	providedAccessKey,
 	providedCacheSelection,
 	providedChoice,
-	providedReadUser,
 	providedUrl
 } from '../options.ts';
 import { packCohorts } from '../packing.ts';
@@ -166,6 +167,26 @@ class CapturedCommandError extends CommandFailedError {
 		});
 		this.name = 'CapturedCommandError';
 	}
+}
+
+/**
+The credential for a `root` command: the destination's access key in the
+command's environment when the run has one, and the job's OIDC token otherwise.
+*/
+function rootCommandCredential(
+	inputs: Pick<PlanInputs, 'accessKey' | 'audience'>
+): CupboardInvocation {
+	if (inputs.accessKey !== '') {
+		return accessKeyInvocation(inputs.accessKey);
+	}
+
+	return {
+		arguments: [
+			'--github-oidc',
+			...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+		],
+		environment: {}
+	};
 }
 
 const defaultEnsureRunner: EnsureRunner = async (
@@ -281,11 +302,7 @@ export interface PlanOptions {
 	readonly rootPrefix?: string;
 	readonly ttl?: string;
 	readonly permanent?: string;
-	readonly readUser?: string;
-	readonly readPassword?: string;
 	readonly referenceSource?: string;
-	readonly fallbackReadUser?: string;
-	readonly fallbackReadPassword?: string;
 	readonly audience?: string;
 	readonly cupboardPath?: string;
 	readonly planFile?: string;
@@ -308,11 +325,9 @@ export interface PlanInputs {
 	readonly rootPrefix: string;
 	readonly ttl: string;
 	readonly permanent: boolean;
-	readonly readUser: ReadUser | '';
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret | '';
 	readonly referenceSource: string;
-	readonly fallbackReadUser: ReadUser | '';
-	readonly fallbackReadPassword: string;
+	readonly viewAccessKey: AccessKeySecret | '';
 	readonly audience: string;
 	readonly cupboardPath: string;
 	readonly planFile: string;
@@ -403,16 +418,9 @@ export function registerPlanCommand(
 			'retain cached targets permanently: true or false',
 			'false'
 		)
-		.option('--read-user <user>', 'username for cache reads')
-		.option('--read-password <password>', 'password for cache reads')
 		.option(
 			'--reference-source <url>',
 			'cache URL to publish unchanged targets from'
-		)
-		.option('--fallback-read-user <user>', 'username for the reference source')
-		.option(
-			'--fallback-read-password <password>',
-			'password for the reference source'
 		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--plan-file <path>', 'destination for the detailed JSON plan')
@@ -518,42 +526,19 @@ export function resolvePlanInputs(
 
 	assertReleasePlatformSupported();
 
-	// Both credential halves are taken verbatim: surrounding whitespace is
-	// part of a credential, so only its complete absence means "not set".
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
-
-	if (readUser !== '' && readPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-
-	if (readPassword !== '' && readUser === '') {
-		throw new ReadUserRequiredError();
-	}
-
-	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
-	const fallbackReadPassword =
-		options.fallbackReadPassword ?? environment.FALLBACK_READ_PASSWORD ?? '';
-	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-	if (fallbackReadPassword !== '' && fallbackReadUser === '') {
-		throw new ReadUserRequiredError();
-	}
-
-	const destinationCredential = resolveReadCredential(
-		{ user: readUser, password: readPassword },
+	const accessKey = resolveAccessKey(
+		providedAccessKey('access-key', environment.ACCESS_KEY),
 		environment,
 		'cache'
 	);
-	const referenceCredential =
+	const inputViewAccessKey = providedAccessKey(
+		'view-access-key',
+		environment.VIEW_ACCESS_KEY
+	);
+	const viewAccessKey =
 		referenceSource === undefined
-			? { user: fallbackReadUser, password: fallbackReadPassword }
-			: resolveReadCredential(
-					{ user: fallbackReadUser, password: fallbackReadPassword },
-					environment,
-					'reference-source'
-				);
+			? inputViewAccessKey
+			: resolveAccessKey(inputViewAccessKey, environment, 'reference-source');
 
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
 	const isPackingEnabled = isEnabled(
@@ -576,12 +561,10 @@ export function resolvePlanInputs(
 		rootPrefix,
 		ttl,
 		permanent: isPermanent,
-		readUser: destinationCredential.user,
-		readPassword: destinationCredential.password,
+		accessKey,
 		referenceSource:
 			referenceSource === undefined ? '' : canonicalHref(referenceSource),
-		fallbackReadUser: referenceCredential.user,
-		fallbackReadPassword: referenceCredential.password,
+		viewAccessKey,
 		audience: provided(options.audience) ?? '',
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
@@ -746,11 +729,12 @@ export async function planAction(
 		throw new BuiltPublicationObservationUnsupportedError();
 	}
 	if (
-		inputs.optimise &&
-		isPublishingByReference(inputs) &&
-		inputs.fallbackReadUser !== ''
+		inputs.accessKey !== '' ||
+		(inputs.optimise &&
+			isPublishingByReference(inputs) &&
+			inputs.viewAccessKey !== '')
 	) {
-		await requireEnvironmentCredentialSupport(
+		await requireAccessKeySupport(
 			inputs.cupboardPath,
 			dependencies.inspectVersion ?? inspectCupboardVersion,
 			dependencies.signal
@@ -1254,11 +1238,9 @@ async function destinationServedPaths(
 	}
 
 	const credentials =
-		inputs.readUser === ''
+		inputs.accessKey === ''
 			? {}
-			: {
-					credentials: { user: inputs.readUser, password: inputs.readPassword }
-				};
+			: { credentials: basicCredentialForAccessKey(inputs.accessKey) };
 	const fetcher =
 		dependencies.fetcher === undefined ? {} : { fetcher: dependencies.fetcher };
 
@@ -1626,12 +1608,12 @@ async function ensureRootsFromPlan(
 				canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 				'--plan',
 				planFile,
-				'--github-oidc',
-				...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+				...rootCommandCredential(inputs).arguments,
 				...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
 				...(inputs.permanent ? ['--permanent'] : [])
 			],
-			signal
+			signal,
+			rootCommandCredential(inputs).environment
 		);
 	} catch (error) {
 		signal?.throwIfAborted();
@@ -1762,14 +1744,18 @@ async function ensureRoot(
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		root,
 		...storePaths,
-		'--github-oidc',
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...rootCommandCredential(inputs).arguments,
 		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
 		...(inputs.permanent ? ['--permanent'] : [])
 	];
 
 	try {
-		await runner(inputs.cupboardPath, arguments_, signal);
+		await runner(
+			inputs.cupboardPath,
+			arguments_,
+			signal,
+			rootCommandCredential(inputs).environment
+		);
 	} catch (error) {
 		signal?.throwIfAborted();
 
@@ -1854,12 +1840,16 @@ async function readRootTargets(
 		'targets',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		root,
-		'--github-oidc',
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+		...rootCommandCredential(inputs).arguments
 	];
 
 	try {
-		await runner(inputs.cupboardPath, arguments_, signal);
+		await runner(
+			inputs.cupboardPath,
+			arguments_,
+			signal,
+			rootCommandCredential(inputs).environment
+		);
 	} catch (error) {
 		signal?.throwIfAborted();
 
@@ -1962,10 +1952,10 @@ async function readRootTargetsFromPlan(
 				canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 				'--plan',
 				planFile,
-				'--github-oidc',
-				...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+				...rootCommandCredential(inputs).arguments
 			],
-			signal
+			signal,
+			rootCommandCredential(inputs).environment
 		);
 	} catch (error) {
 		signal?.throwIfAborted();

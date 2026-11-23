@@ -413,7 +413,7 @@ describe('attestation outputs', () => {
 });
 
 describe('secret inputs', () => {
-	const secretWord = String.raw`(?:password|token|secret|api[-_]key|credentials?)(?![\w-])`;
+	const secretWord = String.raw`(?:password|token|secret|api[-_]key|access[-_]keys?|credentials?)(?![\w-])`;
 	const commandLineSecret = new RegExp(
 		String.raw`--(?:[\w-]+-)?${secretWord}|\$\{\{[^}]*?(?:\bsecrets\.|\bgithub\.token\b|\b(?:inputs|env)\.[\w-]*?${secretWord})|\$\{?\w*?${secretWord}`,
 		'giu'
@@ -452,23 +452,20 @@ describe('secret inputs', () => {
 	}
 
 	it.each([
-		[
-			'cupboard plan --read-password "$PASSWORD"',
-			['--read-password', '$PASSWORD']
-		],
+		['cupboard plan --access-key "$PASSWORD"', ['--access-key', '$PASSWORD']],
 		['cupboard push --github-token "$TOKEN"', ['--github-token', '$TOKEN']],
-		['cupboard setup --cache-credentials "$JSON"', ['--cache-credentials']],
+		['cupboard setup --cache-access-keys "$JSON"', ['--cache-access-keys']],
 		['tool --client-secret "$SECRET"', ['--client-secret', '$SECRET']],
 		['tool --api-key "$KEY"', ['--api-key']],
-		['echo "${{ inputs.read-password }}"', ['${{ inputs.read-password']],
-		['echo "${{ secrets.read_password }}"', ['${{ secrets.']],
+		['echo "${{ inputs.access-key }}"', ['${{ inputs.access-key']],
+		['echo "${{ secrets.view_access_key }}"', ['${{ secrets.']],
 		['echo "${{ github.token }}"', ['${{ github.token']],
-		['echo "${{ env.READ_PASSWORD }}"', ['${{ env.READ_PASSWORD']],
-		['tool "$READ_PASSWORD"', ['$READ_PASSWORD']],
+		['echo "${{ env.VIEW_ACCESS_KEY }}"', ['${{ env.VIEW_ACCESS_KEY']],
+		['tool "$ACCESS_KEY"', ['$ACCESS_KEY']],
 		['tool --user reader ${GH_TOKEN}', ['${GH_TOKEN']],
-		['cupboard push --token-file "$FILE" --read-user "$USER"', []],
+		['cupboard push --token-file "$FILE" --reuse-view "$VIEW"', []],
 		['tool --token-file "$TOKEN_FILE"', []],
-		['echo "${{ inputs.read-user }}"', []]
+		['echo "${{ inputs.reuse-view }}"', []]
 	])('finds the secrets in %s', (script, expected) => {
 		expect(commandLineSecrets('step', script)).toStrictEqual(
 			expected.map((match) => `step: ${match}`)

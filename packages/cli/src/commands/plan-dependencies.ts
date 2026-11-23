@@ -13,6 +13,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import type { AccessKeySecret } from '@cupboard/protocol/access-keys';
 import type {
 	BuildInputsRecordEntry,
 	BuildInputsRecordResult
@@ -30,10 +31,16 @@ import {
 } from '@cupboard/protocol/reports';
 import type { UploadAttachRoot } from '@cupboard/protocol/upload';
 import { formatCount, type Reporter } from '@cupboard/reporter';
-import type { BasicCredential, ReadUser } from '@cupboard/shared/http';
+import type { BasicCredential } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
 import { isAbortError } from '../abort.ts';
+import {
+	accessKeyFor,
+	basicCredentialForAccessKey,
+	parseAccessKey,
+	sessionReplacingAccessKey
+} from '../access-key-options.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	buildInputsRecordAuthorizationDetails,
@@ -51,7 +58,7 @@ import {
 	recordBuildInputs
 } from '../client/build-inputs.ts';
 import { CupboardClient } from '../client/client.ts';
-import { type TokenProvider } from '../client/credentials.ts';
+import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { isRpcProcedureMissingError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -74,12 +81,10 @@ import { type PushClient, runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseReferenceManifest } from '../push/reference-manifest.ts';
 import { referenceSourceReadIntents } from '../push/reference-source-read.ts';
-import { parseReadUser } from '../read-user.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { cacheAccessFetcher } from './github.ts';
-import { readCredentials } from './read-credentials.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 
 /**
@@ -526,10 +531,8 @@ interface PlanDependenciesOptions {
 	readonly recordBuildInputs?: boolean;
 	readonly referenceSource?: URL;
 	readonly readCache: readonly URL[];
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
-	readonly viewReadUser?: ReadUser;
-	readonly viewReadPassword?: string;
+	readonly accessKey?: AccessKeySecret;
+	readonly viewAccessKey?: AccessKeySecret;
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -562,13 +565,13 @@ oRPC clients and pushes against the tenant; a test replaces them.
 export interface DependencyPassServiceDependencies {
 	readonly authenticate: (
 		authorizationDetails: AuthorizationDetails
-	) => Promise<TokenProvider>;
-	readonly tenantClients: (credential: TokenProvider) => {
+	) => Promise<AccessCredential>;
+	readonly tenantClients: (credential: AccessCredential) => {
 		readonly uploads: DependencyStatusClient;
 		readonly buildInputs: BuildInputsRecordClient;
 	};
 	readonly pushClient: (
-		credential: TokenProvider,
+		credential: AccessCredential,
 		buildInputs: BuildInputsDocument | undefined
 	) => PushClient;
 	readonly readReferences: typeof tenantDependencyReferences;
@@ -797,7 +800,7 @@ export async function dependencyPassService(
 			return copied;
 		},
 		record: async (entries) => {
-			let recordCredential: TokenProvider;
+			let recordCredential: AccessCredential;
 
 			try {
 				recordCredential = await dependencies.authenticate(
@@ -894,7 +897,7 @@ export function registerPlanDependenciesCommand(
 		)
 		.option(
 			'--reference-source <url>',
-			'cache URL or reuse view URL to copy absent dependency outputs from, read with the view read credential',
+			'cache URL or reuse view URL to copy absent dependency outputs from, read with the view access key',
 			parseWorkerUrl
 		)
 		.option(
@@ -907,22 +910,14 @@ export function registerPlanDependenciesCommand(
 			[]
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
-			parseReadUser
+			'--access-key <key>',
+			'access key for a private cache (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
-			'--read-password <password>',
-			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
-		)
-		.option(
-			'--view-read-user <user>',
-			'user name of the read credential for a private reference source (default: $CUPBOARD_VIEW_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--view-read-password <password>',
-			'password of the read credential for a private reference source (default: $CUPBOARD_VIEW_READ_PASSWORD)'
+			'--view-access-key <key>',
+			'access key for a private reference source (default: $CUPBOARD_VIEW_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--github-oidc',
@@ -954,12 +949,21 @@ export function registerPlanDependenciesCommand(
 				const document = parseDependencyGraphDocument(
 					await readFile(options.graphFile, 'utf8')
 				);
-				const destinationCredential = readCredentials(options);
-				const sourceCredential =
+				const reporter = commandUi(program, programOptions).reporter();
+				const accessKey = sessionReplacingAccessKey(options, reporter);
+				const sourceAccessKey =
 					options.referenceSource === undefined
 						? undefined
-						: readCredentials(options, 'view');
-				const reporter = commandUi(program, programOptions).reporter();
+						: accessKeyFor(options, 'view');
+
+				const destinationCredential =
+					accessKey === undefined
+						? undefined
+						: basicCredentialForAccessKey(accessKey);
+				const sourceCredential =
+					sourceAccessKey === undefined
+						? undefined
+						: basicCredentialForAccessKey(sourceAccessKey);
 				const signal = programOptions.signal;
 				const cache = target.cache;
 				const audience =
@@ -978,21 +982,22 @@ export function registerPlanDependenciesCommand(
 							destinationCredential
 						}),
 						buildInputs: buildInputsDocumentOf(document),
-						credentialKind:
-							options.githubOidc === true ? 'github-oidc' : 'cupboard-login',
+						credentialKind: dependencyCredentialKind(options, accessKey),
 						reporter,
 						...(signal !== undefined && { signal })
 					},
 					{
 						authenticate: (authorizationDetails) =>
-							authenticateForPush(
-								CupboardClient.fromUrl(target.tenantUrl, { cache, signal }),
-								{
-									githubOidc: options.githubOidc,
-									audience,
-									authorizationDetails
-								}
-							),
+							accessKey === undefined
+								? authenticateForPush(
+										CupboardClient.fromUrl(target.tenantUrl, { cache, signal }),
+										{
+											githubOidc: options.githubOidc,
+											audience,
+											authorizationDetails
+										}
+									)
+								: Promise.resolve(accessKey),
 						tenantClients: (credential) =>
 							tenantRpc(target.tenantUrl, { credential, signal }),
 						pushClient: (credential, buildInputs) =>
@@ -1020,4 +1025,15 @@ export function registerPlanDependenciesCommand(
 				);
 			}
 		);
+}
+
+function dependencyCredentialKind(
+	options: Pick<PlanDependenciesOptions, 'githubOidc'>,
+	accessKey: AccessKeySecret | undefined
+): PushCredential {
+	if (accessKey !== undefined) {
+		return 'access-key';
+	}
+
+	return options.githubOidc === true ? 'github-oidc' : 'cupboard-login';
 }

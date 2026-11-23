@@ -343,10 +343,10 @@ function validationError(error: unknown): string | undefined {
 		return `Invalid command input. ${validationIssues(error)}`;
 	}
 
-	if (error instanceof errors.InvalidCacheCredentialsError) {
+	if (error instanceof errors.InvalidCacheAccessKeysError) {
 		return error.cause instanceof z.ZodError
-			? `Invalid cache credentials. ${validationIssues(error.cause)}`
-			: 'Invalid cache credentials. Supply a JSON array with a cache scope, user and password for each selected cache.';
+			? `Invalid cache access keys. ${validationIssues(error.cause)}`
+			: 'Invalid cache access keys. Supply a JSON array with a cache scope and an access key for each selected cache.';
 	}
 
 	if (

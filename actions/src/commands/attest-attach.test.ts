@@ -7,12 +7,13 @@ import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import type { Reporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { destinationAccessKey } from '../access-key.test-support.ts';
 import {
+	AccessKeyInvalidError,
+	AccessKeyVersionError,
 	AttestationBundlesMissingError,
 	AttestationChecksumsMismatchError,
-	MissingInputError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError
+	MissingInputError
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
 
@@ -319,20 +320,15 @@ describe('resolveAttestAttachInputs', () => {
 	it('resolves the provided inputs', () => {
 		expect(
 			resolveAttestAttachInputs(
-				options({
-					cache: 'pr-1',
-					audience: 'https://audience.test',
-					readUser: 'reader',
-					readPassword: 'secret'
-				})
+				options({ cache: 'pr-1', audience: 'https://audience.test' }),
+				{ ACCESS_KEY: destinationAccessKey }
 			)
 		).toStrictEqual({
 			url: new URL('https://cache.example.workers.dev/t/acme'),
 			cupboardPath: '/opt/cupboard/cupboard',
 			cache: { kind: 'named', name: 'pr-1' },
 			audience: 'https://audience.test',
-			readUser: 'reader',
-			readPassword: 'secret',
+			accessKey: destinationAccessKey,
 			receiptFile: '/tmp/receipt.json',
 			checksumsFile: '/tmp/subjects.txt',
 			bundles: ['/tmp/bundle.sigstore.json'],
@@ -372,33 +368,20 @@ describe('resolveAttestAttachInputs', () => {
 		);
 	});
 
-	it.each([
-		{
-			name: 'read-user alone',
-			overrides: { readUser: 'reader' },
-			errorType: ReadPasswordRequiredError
-		},
-		{
-			name: 'read-password alone',
-			overrides: { readPassword: 'secret' },
-			errorType: ReadUserRequiredError
-		}
-	])('refuses $name', ({ overrides, errorType }) => {
-		expect(() => resolveAttestAttachInputs(options(overrides))).toThrow(
-			errorType
-		);
+	it('refuses an access token in place of an access key', () => {
+		expect(() =>
+			resolveAttestAttachInputs(options({}), {
+				ACCESS_KEY: 'eyJhbGciOiJFZERTQSJ9.e30.signature'
+			})
+		).toThrow(AccessKeyInvalidError);
 	});
 });
 
 describe('attestAttachInvocation', () => {
-	it('builds the attach argv for the receipt paths', () => {
+	it('attaches with the access key in place of GitHub OIDC', () => {
 		const inputs = resolveAttestAttachInputs(
-			options({
-				cache: 'pr-1',
-				audience: 'https://audience.test',
-				readUser: 'reader',
-				readPassword: 'secret'
-			})
+			options({ cache: 'pr-1', audience: 'https://audience.test' }),
+			{ ACCESS_KEY: destinationAccessKey }
 		);
 
 		expect(
@@ -411,15 +394,10 @@ describe('attestAttachInvocation', () => {
 				'https://cache.example.workers.dev/t/acme/cache/pr-1',
 				appPath,
 				runtimePath,
-				'--github-oidc',
-				'--audience',
-				'https://audience.test',
-				'--read-user',
-				'reader',
 				'--attestation',
 				'/tmp/bundle.sigstore.json'
 			],
-			environment: { CUPBOARD_READ_PASSWORD: 'secret' }
+			environment: { CUPBOARD_ACCESS_KEY: destinationAccessKey }
 		});
 	});
 
@@ -490,57 +468,90 @@ describe('attestAttachInvocation', () => {
 });
 
 describe('attestAttachAction', () => {
-	it('passes the job environment credential when the read-user input is empty', async () => {
-		const fixture = await writeReceipt([appPath]);
-		const jobEnvironment = {
-			CUPBOARD_READ_USER: 'job-reader',
-			CUPBOARD_READ_PASSWORD: 'job-secret'
-		};
-		const calls: {
-			readonly readUserOption: boolean;
-			readonly credentials: Readonly<Record<string, string | undefined>>;
-		}[] = [];
+	it.each([
+		{ version: 'v0.0.56', refused: false },
+		{ version: 'v0.0.55', refused: true }
+	])(
+		'attaches with the job environment key and no OIDC when the access-key input is empty, CLI $version',
+		async ({ version, refused }) => {
+			const fixture = await writeReceipt([appPath]);
+			const calls: {
+				readonly arguments_: readonly string[];
+				readonly accessKey: string | undefined;
+			}[] = [];
 
-		try {
-			const manifest = await writeBundleManifest(fixture, [
-				{ predicateType: buildOriginPredicateType, paths: [appPath] }
-			]);
+			try {
+				const manifest = await writeBundleManifest(fixture, [
+					{ predicateType: buildOriginPredicateType, paths: [appPath] }
+				]);
+				let error: unknown;
 
-			await attestAttachAction(
-				options({
-					...fixture,
-					bundle: [],
-					bundlesFile: manifest.bundlesFile,
-					readUser: ''
-				}),
-				jobEnvironment,
-				recordingReporter([]),
-				{
-					inspectCommandOptions: () =>
-						Promise.resolve(new Set(['--paths-file', '--attestations-file'])),
-					runCupboard: async (_binaryPath, arguments_, environment) => {
-						calls.push({
-							readUserOption: arguments_.includes('--read-user'),
-							credentials: {
-								CUPBOARD_READ_USER: environment.CUPBOARD_READ_USER,
-								CUPBOARD_READ_PASSWORD: environment.CUPBOARD_READ_PASSWORD
+				try {
+					await attestAttachAction(
+						options({
+							...fixture,
+							bundle: [],
+							bundlesFile: manifest.bundlesFile
+						}),
+						{ CUPBOARD_ACCESS_KEY: destinationAccessKey },
+						recordingReporter([]),
+						{
+							inspectCommandOptions: () =>
+								Promise.resolve(
+									new Set(['--paths-file', '--attestations-file'])
+								),
+							inspectVersion: () => Promise.resolve(version),
+							runCupboard: async (_binaryPath, arguments_, environment) => {
+								calls.push({
+									arguments_: arguments_.map((argument, index) =>
+										arguments_[index - 1] === '--paths-file' ||
+										arguments_[index - 1] === '--attestations-file'
+											? '<file>'
+											: argument
+									),
+									accessKey: environment.CUPBOARD_ACCESS_KEY
+								});
+								return attachedResults(
+									await pathsFromAttachArguments(arguments_)
+								);
 							}
-						});
-						return attachedResults(await pathsFromAttachArguments(arguments_));
-					}
+						}
+					);
+				} catch (error_) {
+					error = error_;
 				}
-			);
 
-			expect(calls).toStrictEqual([
-				{ readUserOption: false, credentials: jobEnvironment }
-			]);
-		} finally {
-			await rm(path.dirname(fixture.receiptFile), {
-				recursive: true,
-				force: true
-			});
+				expect({
+					refused: error instanceof AccessKeyVersionError,
+					calls
+				}).toStrictEqual({
+					refused,
+					calls: refused
+						? []
+						: [
+								{
+									arguments_: [
+										'--no-colour',
+										'attest',
+										'attach',
+										'https://cache.example.workers.dev/t/acme',
+										'--paths-file',
+										'<file>',
+										'--attestations-file',
+										'<file>'
+									],
+									accessKey: destinationAccessKey
+								}
+							]
+				});
+			} finally {
+				await rm(path.dirname(fixture.receiptFile), {
+					recursive: true,
+					force: true
+				});
+			}
 		}
-	});
+	);
 
 	it('attaches overlapping SLSA and explicit custom predicate subjects in one manifest batch', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);
@@ -685,9 +696,7 @@ describe('attestAttachAction', () => {
 					bundle: [],
 					bundlesFile: manifest.bundlesFile,
 					cache: 'pr-1',
-					audience: 'https://audience.test',
-					readUser: 'reader',
-					readPassword: 'secret'
+					audience: 'https://audience.test'
 				}),
 				{},
 				recordingReporter([]),
@@ -725,8 +734,6 @@ describe('attestAttachAction', () => {
 						'https://audience.test',
 						'--cache',
 						'pr-1',
-						'--read-user',
-						'reader',
 						'--attestations-file'
 					],
 					paths: [appPath]
@@ -975,11 +982,12 @@ describe('attestAttachAction', () => {
 		}[] = [];
 
 		await attestAttachAction(
-			options({ ...fixture, readUser: 'reader' }),
-			{ READ_PASSWORD: 'secret' },
+			options(fixture),
+			{ ACCESS_KEY: destinationAccessKey },
 			recordingReporter([]),
 			{
 				inspectCommandOptions: fileCapableCommandOptions,
+				inspectVersion: () => Promise.resolve('v0.0.56'),
 				runCupboard: async (
 					binaryPath,
 					arguments_,
@@ -1009,15 +1017,12 @@ describe('attestAttachAction', () => {
 					'https://cache.example.workers.dev/t/acme',
 					appPath,
 					runtimePath,
-					'--github-oidc',
-					'--read-user',
-					'reader',
 					'--attestation',
 					'/tmp/bundle.sigstore.json'
 				],
 				environment: {
-					READ_PASSWORD: 'secret',
-					CUPBOARD_READ_PASSWORD: 'secret'
+					ACCESS_KEY: destinationAccessKey,
+					CUPBOARD_ACCESS_KEY: destinationAccessKey
 				},
 				dependencies: { signal: controller.signal }
 			}

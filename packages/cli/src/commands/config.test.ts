@@ -1,6 +1,6 @@
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import type { CacheCredentials } from '@cupboard/protocol/cache-credentials';
+import type { CacheAccessKeys } from '@cupboard/protocol/cache-access-keys';
 import type { Reporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
@@ -8,14 +8,15 @@ import { describe, expect, it } from 'vitest';
 import { cacheTargetFromUrl } from '../cache-target.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
-	InvalidCacheCredentialsError,
-	UnknownCacheCredentialError
+	InvalidCacheAccessKeysError,
+	UnknownCacheAccessKeyError
 } from '../errors.ts';
+import { destinationAccessKey, sourceAccessKey } from '../test-support.ts';
 
 import {
 	cacheSubstituterUrl,
 	type ConfigInput,
-	parseCacheCredentials,
+	parseCacheAccessKeys,
 	resolveConfigSubstituters,
 	runConfig,
 	selectConfigCaches
@@ -35,9 +36,7 @@ const releaseCache: CacheScope = {
 	name: cacheNameSchema.parse('release')
 };
 const alice = readUserInputSchema.parse('alice');
-const ci = readUserInputSchema.parse('ci');
-const correctHorse = 'correct-horse-battery-staple';
-const readPassword = 'A'.repeat(43);
+const cupboard = readUserInputSchema.parse('cupboard');
 const publishedPublicKey =
 	'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 
@@ -158,7 +157,7 @@ describe('runConfig', () => {
 					{ cache: buildsCache },
 					{
 						cache: releaseCache,
-						credential: { user: ci, password: readPassword }
+						credential: { user: cupboard, password: destinationAccessKey }
 					}
 				]
 			})
@@ -167,26 +166,26 @@ describe('runConfig', () => {
 				[
 					'extra-substituters = ' +
 						'https://cupboard.example.workers.dev/t/acme/cache/builds ' +
-						`https://ci:${readPassword}@cupboard.example.workers.dev/t/acme/cache/release`,
+						`https://cupboard:${destinationAccessKey}@cupboard.example.workers.dev/t/acme/cache/release`,
 					`extra-trusted-public-keys = ${publishedPublicKey}`
 				].join('\n')
 			],
 			infos: [
 				[
-					'# A substituter URL above contains a cache-specific read credential.',
-					'# Keep this snippet as secret as the credential itself.'
+					'# A substituter URL above contains a cache-specific access key.',
+					'# Keep this snippet as secret as the access key itself.'
 				].join('\n')
 			]
 		});
 	});
 
-	it('prints a shared read credential as netrc guidance', () => {
+	it('prints a shared access key as netrc guidance', () => {
 		expect(
 			captureConfig({
 				url: new URL('https://cupboard.example.workers.dev/t/acme'),
 				publicKey: publishedPublicKey,
 				substituters: [{ cache: defaultCache }],
-				netrcCredential: { user: alice, password: correctHorse }
+				netrcCredential: { user: cupboard, password: destinationAccessKey }
 			})
 		).toStrictEqual({
 			data: [
@@ -199,39 +198,27 @@ describe('runConfig', () => {
 				[
 					"# Add this line to the file configured by Nix's netrc-file setting:",
 					'# Check its path with: nix config show netrc-file',
-					`machine cupboard.example.workers.dev login alice password ${correctHorse}`
+					`machine cupboard.example.workers.dev login cupboard password ${destinationAccessKey}`
 				].join('\n')
 			]
 		});
 	});
 });
 
-describe('parseCacheCredentials', () => {
-	it.each([undefined, '  '])('reads %j as no credentials', (value) => {
-		expect(parseCacheCredentials(value)).toStrictEqual([]);
+describe('parseCacheAccessKeys', () => {
+	it.each([undefined, '  '])('reads %j as no access keys', (value) => {
+		expect(parseCacheAccessKeys(value)).toStrictEqual([]);
 	});
 
 	it('reads explicit default and named cache scopes', () => {
 		const document = JSON.stringify([
-			{
-				cache: defaultCache,
-				credential: { user: 'alice', password: readPassword }
-			},
-			{
-				cache: releaseCache,
-				credential: { user: 'ci', password: readPassword }
-			}
+			{ cache: defaultCache, accessKey: destinationAccessKey },
+			{ cache: releaseCache, accessKey: sourceAccessKey }
 		]);
 
-		expect(parseCacheCredentials(document)).toStrictEqual([
-			{
-				cache: defaultCache,
-				credential: { user: alice, password: readPassword }
-			},
-			{
-				cache: releaseCache,
-				credential: { user: ci, password: readPassword }
-			}
+		expect(parseCacheAccessKeys(document)).toStrictEqual([
+			{ cache: defaultCache, accessKey: destinationAccessKey },
+			{ cache: releaseCache, accessKey: sourceAccessKey }
 		]);
 	});
 
@@ -239,46 +226,50 @@ describe('parseCacheCredentials', () => {
 		'not json',
 		'{}',
 		JSON.stringify([
-			{ cache: { kind: 'default' }, credential: { user: 'ci' } }
+			{
+				cache: { kind: 'default' },
+				credential: { user: 'ci', password: 'A'.repeat(43) }
+			}
 		]),
 		JSON.stringify([
 			{
 				cache: { kind: 'named', name: 'Bad!' },
-				credential: { user: 'ci', password: readPassword }
+				accessKey: destinationAccessKey
 			}
 		])
 	])('refuses the invalid document %j', (value) => {
-		expect(() => parseCacheCredentials(value)).toThrow(
-			InvalidCacheCredentialsError
+		expect(() => parseCacheAccessKeys(value)).toThrow(
+			InvalidCacheAccessKeysError
 		);
 	});
 });
 
 describe('resolveConfigSubstituters', () => {
-	const releaseCredential: CacheCredentials[number] = {
+	const releaseKey: CacheAccessKeys[number] = {
 		cache: releaseCache,
-		credential: { user: ci, password: readPassword }
+		accessKey: destinationAccessKey
 	};
 
-	it('preserves selected order and attaches matching credentials', () => {
+	it('preserves selected order and attaches matching access keys', () => {
 		expect(
 			resolveConfigSubstituters(
 				[defaultCache, releaseCache, buildsCache],
-				[releaseCredential]
+				[releaseKey]
 			)
 		).toStrictEqual([
 			{ cache: defaultCache },
-			{ cache: releaseCache, credential: releaseCredential.credential },
+			{
+				cache: releaseCache,
+				credential: { user: cupboard, password: destinationAccessKey }
+			},
 			{ cache: buildsCache }
 		]);
 	});
 
-	it('refuses a credential for an unselected cache', () => {
-		const credentials: CacheCredentials = [releaseCredential];
-
-		expect(() => resolveConfigSubstituters([buildsCache], credentials)).toThrow(
-			UnknownCacheCredentialError
-		);
+	it('refuses an access key for an unselected cache', () => {
+		expect(() =>
+			resolveConfigSubstituters([buildsCache], [releaseKey])
+		).toThrow(UnknownCacheAccessKeyError);
 	});
 });
 

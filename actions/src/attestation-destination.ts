@@ -3,14 +3,11 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import type { CacheScope, StorePathString } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import type { Reporter } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import {
-	basicAuthHeader,
-	type BasicCredential,
-	type ReadUser
-} from '@cupboard/shared/http';
+import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import {
 	fetchWithProbeRetries,
 	type ProbeFetchOptions
@@ -18,18 +15,18 @@ import {
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 
+import { resolveAccessKey } from './cupboard-run.ts';
 import {
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
 	MissingInputError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
 	SubjectNarHashMovedError
 } from './errors.ts';
 import type { Environment } from './inputs.ts';
 import {
+	accessKeyCredential,
+	providedAccessKey,
 	providedCacheSelection,
-	providedReadUser,
 	providedUrl
 } from './options.ts';
 import { cacheUrlFor } from './substituters.ts';
@@ -37,15 +34,12 @@ import { cacheUrlFor } from './substituters.ts';
 export interface AttestationDestinationOptions {
 	readonly url?: string;
 	readonly cache?: string;
-	readonly readUser?: string;
-	readonly readPassword?: string;
 }
 
 export interface AttestationDestination {
 	readonly url: URL;
 	readonly cache: CacheScope;
-	readonly readUser: ReadUser | '';
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret | '';
 }
 
 export interface AttestationDestinationDependencies {
@@ -66,22 +60,14 @@ export function resolveAttestationDestination(
 		throw new MissingInputError('url');
 	}
 
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
-
-	if (readUser !== '' && readPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-
-	if (readPassword !== '' && readUser === '') {
-		throw new ReadUserRequiredError();
-	}
-
 	return {
 		url,
 		cache: providedCacheSelection(options.cache),
-		readUser,
-		readPassword
+		accessKey: resolveAccessKey(
+			providedAccessKey('access-key', environment.ACCESS_KEY),
+			environment,
+			'cache'
+		)
 	};
 }
 
@@ -122,7 +108,7 @@ export async function requirePublishedSubjects(
 		{ trustedOrigin: destination.url.origin }
 	);
 	const base = canonicalHref(cacheUrlFor(destination.url, destination.cache));
-	const credential = readCredential(destination);
+	const credential = accessKeyCredential(destination.accessKey);
 
 	await reporter.progress(
 		'Checking published attestation subjects',
@@ -153,14 +139,6 @@ export async function requirePublishedSubjects(
 				}
 			)
 	);
-}
-
-function readCredential(
-	destination: AttestationDestination
-): BasicCredential | undefined {
-	return destination.readUser === ''
-		? undefined
-		: { user: destination.readUser, password: destination.readPassword };
 }
 
 async function fetchCommittedNarInfo(

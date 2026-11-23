@@ -7,6 +7,7 @@ import { discoverNixStoreConfig, Nix } from '@cupboard/nix';
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	type BuildReceiptV3,
 	buildReceiptV3Schema
@@ -25,6 +26,7 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	assertAccessKeySupport,
 	type CacheSelectionSyntax,
 	cacheSelectionSyntax,
 	type CommandOptions,
@@ -33,6 +35,7 @@ import {
 	detectCupboardResultProtocol,
 	inspectCommandOptions,
 	inspectCupboardVersion,
+	resolveAccessKey,
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
 import {
@@ -138,6 +141,12 @@ export interface PushInputs {
 	readonly closure?: boolean;
 	readonly buildReceiptFile: string;
 	readonly publicationReceiptFile: string;
+	readonly accessKey: AccessKeySecret | '';
+	/**
+	The key for the reference source, from `CUPBOARD_VIEW_ACCESS_KEY`. It is empty
+	without a reference source.
+	*/
+	readonly viewAccessKey: AccessKeySecret | '';
 	readonly audience: string;
 	readonly root: string;
 	readonly ttl: string;
@@ -195,6 +204,7 @@ interface PushArgumentsOptions {
 	readonly url: URL;
 	readonly paths: readonly string[];
 	readonly pathsFile?: string;
+	readonly accessKey: AccessKeySecret | '';
 	readonly audience: string;
 	readonly root: string;
 	readonly cache: CacheScope;
@@ -214,6 +224,19 @@ interface PushArgumentsOptions {
 	readonly runRoot: string;
 	readonly runRootTtl: string;
 	readonly runRootPermanent: boolean;
+}
+
+/**
+Refuses a CLI at `version` that cannot read the destination key or the
+reference source key from its environment, when the push passes either.
+*/
+export function requirePushAccessKeySupport(
+	inputs: Pick<PushInputs, 'accessKey' | 'viewAccessKey'>,
+	version: string
+): void {
+	if (inputs.accessKey !== '' || inputs.viewAccessKey !== '') {
+		assertAccessKeySupport(version);
+	}
 }
 
 export function registerPushCommand(
@@ -483,6 +506,11 @@ export function resolvePushInputs(
 			requireEnvironment(environment, 'RUNNER_TEMP'),
 			'cupboard-push-receipt.json'
 		),
+		accessKey: resolveAccessKey('', environment, 'cache'),
+		viewAccessKey:
+			referenceSource === undefined
+				? ''
+				: resolveAccessKey('', environment, 'view'),
 		audience: provided(options.audience) ?? '',
 		root: isRetained
 			? (explicitRoot ??
@@ -551,6 +579,8 @@ export async function pushAction(
 		dependencies.signal
 	);
 	dependencies.signal?.throwIfAborted();
+
+	requirePushAccessKeySupport(inputs, installedCupboard.version);
 
 	const nix = Nix.open();
 	const pushes: readonly PushInvocation[] =
@@ -1021,10 +1051,16 @@ export function buildPushArguments(
 		...(options.pathsFile === undefined
 			? []
 			: ['--paths-file', options.pathsFile]),
-		'--github-oidc',
-		// Let the CLI derive the default audience from its canonical Worker URL so
-		// canonicalisation and defaulting happen in one place.
-		...(options.audience === '' ? [] : ['--audience', options.audience]),
+		// The CLI reads an inherited CUPBOARD_ACCESS_KEY itself, and refuses it
+		// together with --github-oidc.
+		...(options.accessKey === ''
+			? [
+					'--github-oidc',
+					// Let the CLI derive the default audience from its canonical Worker
+					// URL so canonicalisation and defaulting happen in one place.
+					...(options.audience === '' ? [] : ['--audience', options.audience])
+				]
+			: []),
 		...(options.root === '' ? [] : ['--root', options.root]),
 		...(options.cacheSyntax === 'flag' && options.cache.kind === 'named'
 			? ['--cache', options.cache.name]
@@ -1077,6 +1113,7 @@ export function pushArgumentsForInvocations(
 		PushInputs,
 		| 'url'
 		| 'pathsFile'
+		| 'accessKey'
 		| 'audience'
 		| 'cache'
 		| 'store'
@@ -1110,6 +1147,7 @@ export function pushArgumentsForInvocations(
 			url: inputs.url,
 			paths: push.paths,
 			...(inputs.pathsFile !== undefined && { pathsFile: inputs.pathsFile }),
+			accessKey: inputs.accessKey,
 			audience: inputs.audience,
 			root: push.root,
 			cache: inputs.cache,

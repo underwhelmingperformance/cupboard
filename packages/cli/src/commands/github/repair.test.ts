@@ -817,8 +817,7 @@ jobs:
       url: https://cupboard.supply/t/laney
       cache: packages
     secrets:
-      destination_read_user: \${{ secrets.CACHE_USER }}
-      destination_read_password: \${{ secrets.CACHE_PASSWORD }}
+      access_key: \${{ secrets.CACHE_USER }}
 `;
 	const { ui, added, client, dependencies, check } = await fixture(
 		{ interactive: true, confirm: 'yes' },
@@ -854,8 +853,8 @@ jobs:
       root-prefix: builds
       reuse-view: shared
     secrets:
-      read_user: \${{ secrets.READ_USER }}
-      read_password: \${{ secrets.READ_PASSWORD }}
+      access_key: \${{ secrets.READ_USER }}
+      view_access_key: \${{ secrets.VIEW_ACCESS_KEY }}
 `;
 	const view = reuseViewSummarySchema.parse({
 		name: 'shared',
@@ -5152,7 +5151,7 @@ jobs:
 it.each([false, true])(
 	'repairs private trusted-source reads with static metadata credentials %s',
 	async (configured) => {
-		const workflow = `on:\n  push:\n    branches: [main]\npermissions:\n  pull-requests: read\njobs:\n  build:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${url.href}\n      preset: pull-request-and-branch\n${configured ? '    secrets:\n      read_user: ${{ secrets.READ_USER }}\n      read_password: ${{ secrets.READ_PASSWORD }}\n' : ''}`;
+		const workflow = `on:\n  push:\n    branches: [main]\npermissions:\n  pull-requests: read\njobs:\n  build:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${url.href}\n      preset: pull-request-and-branch\n${configured ? '    secrets:\n      access_key: ${{ secrets.READ_USER }}\n      view_access_key: ${{ secrets.VIEW_ACCESS_KEY }}\n' : ''}`;
 		const { ui, added, client, dependencies, check } = await fixture(
 			undefined,
 			workflow,
@@ -5201,8 +5200,8 @@ jobs:
       url: ${url.href}
       preset: pull-request-and-branch
     secrets:
-      read_user: \${{ secrets.READ_USER }}
-      read_password: \${{ secrets.READ_PASSWORD }}
+      access_key: \${{ secrets.READ_USER }}
+      view_access_key: \${{ secrets.VIEW_ACCESS_KEY }}
 `;
 	const { ui, added, client, dependencies, check } = await fixture(
 		undefined,
@@ -5286,7 +5285,7 @@ it.each(
 )(
 	'repairs $label PR-family authority with a public default and static metadata $configured',
 	async ({ existing, requiresFamilyRead, laterPage, configured }) => {
-		const workflow = `on:\n  push:\n    branches: [main]\npermissions:\n  pull-requests: read\njobs:\n  build:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${url.href}\n      preset: pull-request-and-branch\n${configured ? '    secrets:\n      read_user: ${{ secrets.READ_USER }}\n      read_password: ${{ secrets.READ_PASSWORD }}\n' : ''}`;
+		const workflow = `on:\n  push:\n    branches: [main]\npermissions:\n  pull-requests: read\njobs:\n  build:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${url.href}\n      preset: pull-request-and-branch\n${configured ? '    secrets:\n      access_key: ${{ secrets.READ_USER }}\n      view_access_key: ${{ secrets.VIEW_ACCESS_KEY }}\n' : ''}`;
 		const { ui, added, client, dependencies } = await fixture(
 			undefined,
 			workflow

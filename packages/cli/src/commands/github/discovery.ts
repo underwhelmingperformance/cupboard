@@ -35,8 +35,7 @@ import { ReferencePattern } from './reference-pattern.ts';
 
 type WorkflowInput = string | number | boolean;
 type WorkflowInputs = Readonly<Record<string, WorkflowInput>>;
-export type ReadCredentialWiring =
-	'none' | 'configured' | 'incomplete' | 'unknown';
+export type AccessKeyWiring = 'none' | 'configured' | 'unknown';
 
 export interface WorkflowSource {
 	resolveWorkflowReference?(
@@ -111,9 +110,9 @@ export interface DiscoveredPublishingJob {
 		readonly expression: string;
 		readonly inputs: WorkflowInputs;
 	};
-	readonly readCredentialWiring?: {
-		readonly cache: ReadCredentialWiring;
-		readonly view: ReadCredentialWiring;
+	readonly accessKeyWiring?: {
+		readonly cache: AccessKeyWiring;
+		readonly view: AccessKeyWiring;
 	};
 	readonly privateSubstitutersWiring?: 'configured' | 'unknown';
 	readonly triggers: readonly WorkflowTrigger[];
@@ -832,49 +831,19 @@ function secretKeys(
 	return new Set(Object.keys(secrets));
 }
 
-function readCredentialWiring(
+function accessKeyWiring(
 	keys: ReadonlySet<string> | 'unknown'
-): DiscoveredPublishingJob['readCredentialWiring'] {
+): DiscoveredPublishingJob['accessKeyWiring'] {
 	if (keys === 'unknown') {
 		return { cache: 'unknown', view: 'unknown' };
 	}
 
-	const pair = (user: string, password: string): ReadCredentialWiring => {
-		const hasUser = keys.has(user);
-		const hasPassword = keys.has(password);
+	const cache: AccessKeyWiring = keys.has('access_key') ? 'configured' : 'none';
+	const view: AccessKeyWiring = keys.has('view_access_key')
+		? 'configured'
+		: 'none';
 
-		if (hasUser !== hasPassword) {
-			return 'incomplete';
-		}
-
-		return hasUser ? 'configured' : 'none';
-	};
-	const current = pair('read_user', 'read_password');
-	const legacy = pair('fallback_read_user', 'fallback_read_password');
-	const destination = pair(
-		'destination_read_user',
-		'destination_read_password'
-	);
-	const defaultCredential: ReadCredentialWiring =
-		current === 'incomplete' || legacy === 'incomplete'
-			? 'incomplete'
-			: current === 'configured' && legacy === 'configured'
-				? 'unknown'
-				: current === 'configured' || legacy === 'configured'
-					? 'configured'
-					: 'none';
-	const cache: ReadCredentialWiring =
-		defaultCredential === 'incomplete' || destination === 'incomplete'
-			? 'incomplete'
-			: defaultCredential === 'unknown'
-				? 'unknown'
-				: defaultCredential === 'configured' || destination === 'configured'
-					? 'configured'
-					: 'none';
-
-	return cache === 'none' && defaultCredential === 'none'
-		? undefined
-		: { cache, view: defaultCredential };
+	return cache === 'none' && view === 'none' ? undefined : { cache, view };
 }
 
 export async function discoverPublishingJobs(
@@ -1384,7 +1353,7 @@ export async function discoverPublishingJobs(
 					: 'does-not-record';
 
 			const keys = secretKeys(job.secrets, context.secretKeys);
-			const readSecrets = readCredentialWiring(keys);
+			const readSecrets = accessKeyWiring(keys);
 
 			jobs.push({
 				caller,
@@ -1412,7 +1381,7 @@ export async function discoverPublishingJobs(
 					: keys.has('private_substituters')
 						? { privateSubstitutersWiring: 'configured' as const }
 						: {}),
-				...(readSecrets !== undefined && { readCredentialWiring: readSecrets }),
+				...(readSecrets !== undefined && { accessKeyWiring: readSecrets }),
 				triggers,
 				...(excludedPullRequestTrigger !== undefined && {
 					excludedPullRequestTrigger: {

@@ -24,6 +24,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	type AccessKeySecret,
+	accessKeySecretSchema
+} from '@cupboard/protocol/access-keys';
+import {
 	type CacheSummary,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
@@ -49,7 +53,6 @@ import { workflowCommands } from '@cupboard/shared/github-actions';
 import {
 	basicAuthHeader,
 	type BasicCredential,
-	type ReadUser,
 	readUserInputSchema
 } from '@cupboard/shared/http';
 import { fetchWithProbeRetries } from '@cupboard/shared/paging';
@@ -68,9 +71,11 @@ import {
 import {
 	cupboardDebugArguments,
 	inspectCommandOptions,
+	resolveAccessKey,
 	runCupboard
 } from '../cupboard-run.ts';
 import {
+	AccessKeyRejectedError,
 	CacheAccessProbeError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
@@ -78,21 +83,14 @@ import {
 	CachePublicKeyRequestFailedError,
 	CommandFailedError,
 	CupboardReleaseSelectionConflictError,
-	DestinationReadCredentialCacheCountError,
-	DestinationReadCredentialConflictError,
-	DestinationReadPasswordRequiredError,
-	DestinationReadUserRequiredError,
 	PrivateSubstitutersCacheUrlRequiredError,
 	ProvisionCacheResultError,
 	ProvisionCacheUrlRequiredError,
 	ReadCachesInvalidError,
 	ReadConfigurationFailedError,
 	ReadConfigurationUnavailableError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
 	ReferenceSourceInvalidError,
-	ReuseViewPriorityError,
-	StaticReadCredentialRejectedError
+	ReuseViewPriorityError
 } from '../errors.ts';
 import {
 	appendEnvironmentFile,
@@ -102,12 +100,14 @@ import {
 	setOutput
 } from '../inputs.ts';
 import {
+	accessKeyCredential,
+	basicCredentialForAccessKey,
 	isEnabled,
 	provided,
-	providedCacheCredentials,
+	providedAccessKey,
+	providedCacheAccessKeys,
 	providedCaches,
 	providedPrivateSubstituters,
-	providedReadUser,
 	providedUrl
 } from '../options.ts';
 import {
@@ -139,17 +139,13 @@ export interface SetupOptions {
 	readonly cacheAccessMode?: string;
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
-	readonly cacheCredentials?: string;
+	readonly cacheAccessKeys?: string;
 	readonly privateSubstituters?: string;
 	readonly readCaches?: string;
 	readonly referenceSource?: string;
-	readonly destinationReadUser?: string;
-	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
 	readonly audience?: string;
 	readonly trustedPublicKey?: string;
-	readonly readUser?: string;
-	readonly readPassword?: string;
 	readonly nixConfigFile?: string;
 	readonly checkoutDir?: string;
 }
@@ -182,8 +178,7 @@ export interface SetupInputs {
 	readonly reuseView: string;
 	readonly audience: string;
 	readonly trustedPublicKey: string;
-	readonly readUser: ReadUser | '';
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret | '';
 	readonly nixConfigFile: string;
 	readonly checkoutDirectory: string;
 }
@@ -213,8 +208,7 @@ interface ConfigureNixInputs extends Pick<
 	| 'reuseView'
 	| 'audience'
 	| 'trustedPublicKey'
-	| 'readUser'
-	| 'readPassword'
+	| 'accessKey'
 	| 'nixConfigFile'
 	| 'cacheAccessMode'
 	| 'provisionCache'
@@ -238,8 +232,7 @@ const sessionResultSchema = z.object({
 
 interface WriteNetrcOptions {
 	readonly cacheUrl: URL;
-	readonly readUser: ReadUser;
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret;
 	readonly runnerTemporaryDirectory: string;
 }
 
@@ -294,12 +287,12 @@ export function registerSetupCommand(
 		)
 		.option('--audience <audience>', 'audience of the GitHub OIDC token')
 		.option(
-			'--cache-credentials <json>',
-			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
+			'--cache-access-keys <json>',
+			'Supply cache-specific access keys as a JSON array of cache scopes and access keys.'
 		)
 		.option(
 			'--reference-source <url>',
-			'Same-tenant reference cache, using the default read credential or OIDC.'
+			'Same-tenant reference cache, read with the access key or OIDC.'
 		)
 		.option(
 			'--read-caches <urls>',
@@ -312,14 +305,6 @@ export function registerSetupCommand(
 		.option(
 			'--include-default-cache <boolean>',
 			"Also configure the tenant's default cache, alongside any named caches."
-		)
-		.option(
-			'--destination-read-user <user>',
-			'Username accepted by the single selected destination cache.'
-		)
-		.option(
-			'--destination-read-password <password>',
-			'Password accepted by the single selected destination cache.'
 		)
 		.option(
 			'--provision-cache <name>',
@@ -342,8 +327,6 @@ export function registerSetupCommand(
 			'--trusted-public-key <key>',
 			'Nix signing key to trust for cache reads'
 		)
-		.option('--read-user <user>', 'username for cache reads')
-		.option('--read-password <password>', 'password for cache reads')
 		.option(
 			'--nix-config-file <path>',
 			'existing Nix config file to append generated settings to'
@@ -373,33 +356,11 @@ export function resolveSetupInputs(
 	options: SetupOptions,
 	environment: Environment
 ): SetupInputs {
-	// Both credential halves are taken verbatim: surrounding whitespace is
-	// part of a credential, so only its complete absence means "not set".
-	const readUser = providedReadUser(options.readUser ?? environment.READ_USER);
-	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
-	const destinationReadUser = providedReadUser(
-		options.destinationReadUser ?? environment.DESTINATION_READ_USER
+	const accessKey = resolveAccessKey(
+		providedAccessKey('access-key', environment.ACCESS_KEY),
+		environment,
+		'cache'
 	);
-	const destinationReadPassword =
-		options.destinationReadPassword ??
-		environment.DESTINATION_READ_PASSWORD ??
-		'';
-
-	if (destinationReadUser !== '' && destinationReadPassword === '') {
-		throw new DestinationReadPasswordRequiredError();
-	}
-
-	if (destinationReadPassword !== '' && destinationReadUser === '') {
-		throw new DestinationReadUserRequiredError();
-	}
-
-	if (readUser !== '' && readPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-
-	if (readPassword !== '' && readUser === '') {
-		throw new ReadUserRequiredError();
-	}
 
 	const configuredCacheUrl = providedUrl('cache-url', options.cacheUrl);
 	const readTarget =
@@ -436,29 +397,20 @@ export function resolveSetupInputs(
 	}
 	const provisionCache = resolveProvisionCache(options, cacheUrl);
 
-	const caches = resolveCaches(
-		{
-			...options,
-			cache:
-				readTarget?.cache.kind === 'named' &&
-				provided(options.cache) === undefined
-					? readTarget.cache.name
-					: options.cache,
-			cacheCredentials:
-				options.cacheCredentials ?? environment.CACHE_CREDENTIALS
-		},
-		destinationReadUser === ''
-			? undefined
-			: {
-					user: destinationReadUser,
-					password: destinationReadPassword
-				}
-	);
+	const caches = resolveCaches({
+		...options,
+		cache:
+			readTarget?.cache.kind === 'named' &&
+			provided(options.cache) === undefined
+				? readTarget.cache.name
+				: options.cache,
+		cacheAccessKeys: options.cacheAccessKeys ?? environment.CACHE_ACCESS_KEYS
+	});
 	const readCaches = resolveReadCaches(
 		options,
 		cacheUrl,
 		caches,
-		readUser,
+		accessKey,
 		privateSubstituters
 	);
 
@@ -516,8 +468,7 @@ export function resolveSetupInputs(
 		reuseView: provided(options.reuseView) ?? '',
 		audience: provided(options.audience) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
-		readUser,
-		readPassword,
+		accessKey,
 		nixConfigFile: provided(options.nixConfigFile) ?? '',
 		checkoutDirectory:
 			provided(options.checkoutDir) ??
@@ -534,16 +485,16 @@ function resolveReadCaches(
 	options: SetupOptions,
 	tenantUrl: URL | undefined,
 	caches: readonly CacheSelection[],
-	readUser: ReadUser | '',
+	accessKey: AccessKeySecret | '',
 	privateSubstituters: readonly URL[]
 ): readonly CacheScope[] {
 	const entries = parseLines(options.readCaches ?? '');
 	if (entries.length === 0) {
 		return [];
 	}
-	if (tenantUrl === undefined || readUser !== '') {
+	if (tenantUrl === undefined || accessKey !== '') {
 		throw new ReadCachesInvalidError(
-			'Supply cache-url and omit the default static read credential.'
+			'Supply cache-url, and omit access-key and the job-level CUPBOARD_ACCESS_KEY: read caches use OIDC reads.'
 		);
 	}
 	const extra: CacheScope[] = [];
@@ -570,7 +521,7 @@ function resolveReadCaches(
 				})
 			) {
 				throw new ReadCachesInvalidError(
-					'Do not request OIDC reads for a cache with an explicit static credential.'
+					'Do not request OIDC reads for a cache that has its own access key.'
 				);
 			}
 			if (
@@ -667,13 +618,10 @@ function resolveCacheAccessMode(
 }
 
 /**
-Resolves the caches to configure and attaches cache-specific credentials.
+Resolves the caches to configure and attaches cache-specific access keys.
 If the cache input is empty, the run configures the default cache.
 */
-function resolveCaches(
-	options: SetupOptions,
-	destinationCredential: BasicCredential | undefined
-): readonly CacheSelection[] {
+function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
 	const hasDefaultCache = isEnabled(
 		'include-default-cache',
@@ -681,43 +629,30 @@ function resolveCaches(
 		false
 	);
 
-	if (
-		destinationCredential !== undefined &&
-		provided(options.cacheCredentials) !== undefined
-	) {
-		throw new DestinationReadCredentialConflictError();
-	}
-
 	const defaultCache: CacheScope = { kind: 'default' };
 	const requested = caches.length === 0 ? [defaultCache] : caches;
 	const selected = hasDefaultCache
 		? [defaultCache, ...requested.filter((cache) => cache.kind !== 'default')]
 		: requested;
 
-	if (destinationCredential !== undefined && selected.length !== 1) {
-		throw new DestinationReadCredentialCacheCountError(selected.length);
-	}
-
-	const credentials = providedCacheCredentials(
-		options.cacheCredentials,
-		selected
-	);
+	const accessKeys = providedCacheAccessKeys(options.cacheAccessKeys, selected);
 
 	return selected.map((cache) => {
-		const credential =
-			destinationCredential ??
-			credentials.find((entry) => isSameCacheScope(entry.cache, cache))
-				?.credential;
+		const accessKey = accessKeys.find((entry) =>
+			isSameCacheScope(entry.cache, cache)
+		)?.accessKey;
 
 		return {
 			cache,
-			...(credential !== undefined && { credential })
+			...(accessKey !== undefined && {
+				credential: basicCredentialForAccessKey(accessKey)
+			})
 		};
 	});
 }
 
 /**
-Registers every cache-specific password and credential-bearing URL as a run
+Registers every cache-specific access key and key-bearing URL as a run
 secret. The runner replaces each exact value with `***` in the log.
 
 Percent-encoding can change a password when the URL places it in userinfo, so
@@ -834,13 +769,10 @@ export async function setupAction(
 	}
 	const cacheUrl = inputs.cacheUrl;
 	parseTenantCacheUrl(cacheUrl);
-	const staticCredential: BasicCredential | undefined =
-		inputs.readUser === ''
-			? undefined
-			: { user: inputs.readUser, password: inputs.readPassword };
+	const accessKeyBasicCredential = accessKeyCredential(inputs.accessKey);
 	const metadataDestinations = await Promise.all(
 		inputs.caches.map(async (selection) => {
-			const credential = selection.credential ?? staticCredential;
+			const credential = selection.credential ?? accessKeyBasicCredential;
 
 			if (credential === undefined) {
 				return;
@@ -859,7 +791,7 @@ export async function setupAction(
 			const defaults = await probeCacheAccessState(
 				cacheUrlFor(cacheUrl, { kind: 'default' }),
 				dependencies,
-				staticCredential
+				accessKeyBasicCredential
 			);
 
 			return defaults === 'challenge' ? selection : undefined;
@@ -879,9 +811,11 @@ export async function setupAction(
 	const selectedCaches = allReadCaches(inputs);
 	const readDestinations = selectedCaches.filter(
 		(selection) =>
-			selection.credential === undefined && staticCredential === undefined
+			selection.credential === undefined &&
+			accessKeyBasicCredential === undefined
 	);
-	const isOidcView = inputs.reuseView !== '' && staticCredential === undefined;
+	const isOidcView =
+		inputs.reuseView !== '' && accessKeyBasicCredential === undefined;
 	const destinationStates = await Promise.all(
 		readDestinations.map(async (selection) => ({
 			selection,
@@ -1121,10 +1055,7 @@ async function performSetupConfiguration(
 	dependencies: SetupActionDependencies
 ): Promise<void> {
 	const { cacheUrl, environment } = inputs;
-	const staticCredential =
-		inputs.readUser === ''
-			? undefined
-			: { user: inputs.readUser, password: inputs.readPassword };
+	const accessKeyBasicCredential = accessKeyCredential(inputs.accessKey);
 	const factsFile = environment[readAccessFileEnvironment];
 	const facts =
 		factsFile === undefined
@@ -1217,7 +1148,7 @@ async function performSetupConfiguration(
 					cacheUrl,
 					inputs.reuseView,
 					dependencies,
-					staticCredential
+					accessKeyBasicCredential
 				);
 
 	await resolveSubstituters({ ...inputs, readFacts: facts }, dependencies);
@@ -1230,7 +1161,7 @@ async function performSetupConfiguration(
 		const targetCredential =
 			inputs.caches.find((selection) =>
 				isSameCacheScope(selection.cache, provisionScope)
-			)?.credential ?? staticCredential;
+			)?.credential ?? accessKeyBasicCredential;
 		const targetAccess = await accessFor(provisionScope, targetCredential);
 		const pendingFact = factForCache(provisionScope);
 		const firstWriteAccess =
@@ -1246,7 +1177,7 @@ async function performSetupConfiguration(
 				cacheUrlFor(cacheUrl, { kind: 'default' }),
 				dependencies,
 				false,
-				staticCredential
+				accessKeyBasicCredential
 			));
 		if (viewAccess !== undefined && requestedAccess !== viewAccess) {
 			throw new ProvisionCacheResultError(
@@ -1318,7 +1249,7 @@ async function performSetupConfiguration(
 	await Promise.all(
 		inputs.caches.map(async (selection) => {
 			const destination = cacheUrlFor(cacheUrl, selection.cache);
-			const credential = selection.credential ?? staticCredential;
+			const credential = selection.credential ?? accessKeyBasicCredential;
 			const observed = await accessFor(selection.cache, credential);
 			const fact = factForCache(selection.cache);
 			const firstWriteAccess =
@@ -1332,7 +1263,7 @@ async function performSetupConfiguration(
 					cacheUrlFor(cacheUrl, { kind: 'default' }),
 					dependencies,
 					false,
-					staticCredential
+					accessKeyBasicCredential
 				));
 
 			if (
@@ -1361,7 +1292,7 @@ async function performSetupConfiguration(
 			(withheld) => !isSameCacheScope(withheld, referenceCache)
 		)
 	) {
-		await accessFor(referenceCache, staticCredential);
+		await accessFor(referenceCache, accessKeyBasicCredential);
 	}
 	await configureNix({ ...inputs, readFacts: facts }, reporter, {
 		...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
@@ -1413,8 +1344,7 @@ const configureNixPayloadSchema = z.object({
 	referenceCache: cacheScopeSchema.optional(),
 	reuseView: z.string(),
 	trustedPublicKey: z.string(),
-	readUser: z.union([z.literal(''), readUserInputSchema]),
-	readPassword: z.string(),
+	accessKey: z.union([z.literal(''), accessKeySecretSchema]),
 	nixConfigFile: z.string(),
 	cacheAccessMode: cacheAccessModeSchema.optional(),
 	provisionCache: z
@@ -1492,8 +1422,7 @@ async function configureWithReadAccess(
 			),
 			reuseView: inputs.reuseView,
 			trustedPublicKey: inputs.trustedPublicKey,
-			readUser: inputs.readUser,
-			readPassword: inputs.readPassword,
+			accessKey: inputs.accessKey,
 			nixConfigFile: inputs.nixConfigFile,
 			cacheAccessMode: inputs.cacheAccessMode,
 			provisionCache: inputs.provisionCache,
@@ -1654,7 +1583,7 @@ async function probeCacheAccessState(
 	);
 
 	if (authenticated === 'challenge' && credential !== undefined) {
-		throw new StaticReadCredentialRejectedError(cacheUrl);
+		throw new AccessKeyRejectedError(cacheUrl);
 	}
 
 	return authenticated;
@@ -1854,8 +1783,7 @@ export interface ResolveSubstitutersOptions {
 	readonly cacheUrl: URL;
 	readonly caches: readonly CacheSelection[];
 	readonly reuseView: string;
-	readonly readUser: ReadUser | '';
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret | '';
 	readonly readFacts?: readonly ReadResourceState[];
 }
 
@@ -1888,12 +1816,9 @@ export async function resolveSubstituters(
 		{ trustedOrigin: options.cacheUrl.origin }
 	);
 	const tenantHeaders =
-		options.readUser === ''
+		options.accessKey === ''
 			? undefined
-			: basicAuthHeader({
-					user: options.readUser,
-					password: options.readPassword
-				});
+			: basicAuthHeader(basicCredentialForAccessKey(options.accessKey));
 	const viewFact = options.readFacts?.find(
 		(fact) => fact.type === 'cupboard_view' && fact.view === options.reuseView
 	);
@@ -1971,8 +1896,7 @@ async function configureNix(
 			cacheUrl: inputs.cacheUrl,
 			caches: inputs.caches,
 			reuseView: inputs.reuseView,
-			readUser: inputs.readUser,
-			readPassword: inputs.readPassword,
+			accessKey: inputs.accessKey,
 			readFacts: inputs.readFacts
 		},
 		dependencies
@@ -1996,12 +1920,11 @@ async function configureNix(
 		'RUNNER_TEMP'
 	);
 	const netrcFile =
-		inputs.readUser === ''
+		inputs.accessKey === ''
 			? undefined
 			: await writeNetrc({
 					cacheUrl: inputs.cacheUrl,
-					readUser: inputs.readUser,
-					readPassword: inputs.readPassword,
+					accessKey: inputs.accessKey,
 					runnerTemporaryDirectory
 				});
 	const nixConfig = new NixConfig(
@@ -2120,7 +2043,11 @@ export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 
 	await writeFile(
 		netrcFile,
-		renderNetrc(options.cacheUrl, options.readUser, options.readPassword),
+		renderNetrc(
+			options.cacheUrl,
+			basicCredentialForAccessKey(options.accessKey).user,
+			options.accessKey
+		),
 		{ mode: 0o600 }
 	);
 	await chmod(netrcFile, 0o600);

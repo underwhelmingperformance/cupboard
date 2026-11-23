@@ -31,22 +31,23 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { runWithReadAccess } from '../../../packages/cli/src/commands/run.ts';
 import {
+	accessKeyAuthorization,
+	destinationAccessKey,
+	viewAccessKey
+} from '../access-key.test-support.ts';
+import {
+	AccessKeyInvalidError,
+	AccessKeyRejectedError,
 	BooleanInputInvalidError,
 	CacheAccessProbeError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
-	DestinationReadCredentialCacheCountError,
-	DestinationReadCredentialConflictError,
-	DestinationReadPasswordRequiredError,
-	DestinationReadUserRequiredError,
 	PrivateSubstitutersCacheUrlRequiredError,
 	ProbeTimeoutError,
 	ProvisionCacheUrlRequiredError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
+	ReadCachesInvalidError,
 	ReuseViewPriorityError,
-	StaticReadCredentialRejectedError,
 	UrlInputInsecureError,
 	UrlInputInvalidError
 } from '../errors.ts';
@@ -72,7 +73,6 @@ const namedCache = (value: string): CacheScope => ({
 	kind: 'named',
 	name: cacheName(value)
 });
-const readPassword = 'A'.repeat(43);
 
 async function isPathPresent(candidate: string): Promise<boolean> {
 	try {
@@ -269,8 +269,7 @@ describe('writeNetrc', () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-netrc-'));
 		const netrcFile = await writeNetrc({
 			cacheUrl: new URL('https://cache.example.test/t/acme'),
-			readUser: readUserInputSchema.parse('ci'),
-			readPassword: 'secret',
+			accessKey: destinationAccessKey,
 			runnerTemporaryDirectory: directory
 		});
 		const stats = await stat(netrcFile);
@@ -279,7 +278,7 @@ describe('writeNetrc', () => {
 			contents: await readFile(netrcFile, 'utf8'),
 			mode: stats.mode & 0o777
 		}).toStrictEqual({
-			contents: 'machine cache.example.test login ci password secret\n',
+			contents: `machine cache.example.test login cupboard password ${destinationAccessKey}\n`,
 			mode: 0o600
 		});
 	});
@@ -311,8 +310,7 @@ describe('resolveSetupInputs', () => {
 		reuseView: '',
 		audience: '',
 		trustedPublicKey: '',
-		readUser: '',
-		readPassword: '',
+		accessKey: '',
 		nixConfigFile: '',
 		checkoutDirectory: ''
 	};
@@ -399,12 +397,10 @@ describe('resolveSetupInputs', () => {
 			{
 				...baseOptions,
 				cache: 'builds, docs, release, staging',
-				readUser: 'alice',
-				readPassword: 'secret',
-				cacheCredentials: JSON.stringify([
+				cacheAccessKeys: JSON.stringify([
 					{
 						cache: staging,
-						credential: { user: 'ci', password: readPassword }
+						accessKey: viewAccessKey
 					}
 				])
 			},
@@ -418,8 +414,8 @@ describe('resolveSetupInputs', () => {
 			{
 				cache: staging,
 				credential: {
-					user: readUserInputSchema.parse('ci'),
-					password: readPassword
+					user: readUserInputSchema.parse('cupboard'),
+					password: viewAccessKey
 				}
 			}
 		]);
@@ -539,16 +535,6 @@ describe('resolveSetupInputs', () => {
 
 	it.each([
 		[
-			'read-user is supplied without read-password',
-			{ ...baseOptions, readUser: 'ci' },
-			ReadPasswordRequiredError
-		],
-		[
-			'read-password is supplied without read-user',
-			{ ...baseOptions, readPassword: 'secret' },
-			ReadUserRequiredError
-		],
-		[
 			'cache-url is not an http(s) URL',
 			{ ...baseOptions, cacheUrl: 'not a url' },
 			UrlInputInvalidError
@@ -612,8 +598,7 @@ describe('resolveSubstituters', () => {
 	const baseOptions: Omit<ResolveSubstitutersOptions, 'reuseView'> = {
 		cacheUrl: new URL('https://cache.example.test'),
 		caches: [{ cache: defaultCache }],
-		readUser: '',
-		readPassword: ''
+		accessKey: ''
 	};
 	it.each(
 		[30, 40, 50].flatMap((viewPriority) => [
@@ -949,14 +934,13 @@ describe('resolveSubstituters', () => {
 					{
 						cache: namedCache('release'),
 						credential: {
-							user: readUserInputSchema.parse('ci'),
-							password: readPassword
+							user: readUserInputSchema.parse('cupboard'),
+							password: viewAccessKey
 						}
 					}
 				],
 				reuseView: 'reuse',
-				readUser: alice,
-				readPassword: 'secret'
+				accessKey: destinationAccessKey
 			},
 			{ fetch: fetcher }
 		);
@@ -966,15 +950,15 @@ describe('resolveSubstituters', () => {
 		).toStrictEqual([
 			{
 				url: 'https://cache.example.test/cache/builds/nix-cache-info',
-				authorization: `Basic ${Buffer.from('alice:secret').toString('base64')}`
+				authorization: accessKeyAuthorization(destinationAccessKey)
 			},
 			{
 				url: 'https://cache.example.test/cache/release/nix-cache-info',
-				authorization: `Basic ${Buffer.from(`ci:${readPassword}`).toString('base64')}`
+				authorization: accessKeyAuthorization(viewAccessKey)
 			},
 			{
 				url: 'https://cache.example.test/reuse/reuse/nix-cache-info',
-				authorization: `Basic ${Buffer.from('alice:secret').toString('base64')}`
+				authorization: accessKeyAuthorization(destinationAccessKey)
 			}
 		]);
 	});
@@ -1026,14 +1010,13 @@ describe('resolveSubstituters', () => {
 	it.each([
 		[
 			'configured',
-			alice,
-			'secret',
-			`Basic ${Buffer.from('alice:secret').toString('base64')}`
+			destinationAccessKey,
+			accessKeyAuthorization(destinationAccessKey)
 		],
-		['not configured', '', '', undefined]
+		['not configured', '', undefined]
 	] as const)(
-		'sends the authorization header only when a read credential is %s',
-		async (_label, readUser, readPassword, expectedAuthorization) => {
+		'sends the authorization header only when an access key is %s',
+		async (_label, accessKey, expectedAuthorization) => {
 			const authorizations: (string | undefined)[] = [];
 			const fetcher = stubFetch(
 				(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 40),
@@ -1041,7 +1024,7 @@ describe('resolveSubstituters', () => {
 			);
 
 			await resolveSubstituters(
-				{ ...baseOptions, reuseView: 'reuse', readUser, readPassword },
+				{ ...baseOptions, reuseView: 'reuse', accessKey },
 				{ fetch: fetcher }
 			);
 
@@ -1143,7 +1126,7 @@ describe('setupAction cache-credential masking', () => {
 		const environmentFile = path.join(directory, 'github-env');
 		const outputFile = path.join(directory, 'github-output');
 		const netrcFile = path.join(directory, 'cupboard-netrc');
-		const archivePassword = 'B'.repeat(43);
+		const archiveKey = destinationAccessKey;
 		const falconUrl =
 			'https://cupboard:falcon%2Fsecret@cache.example.test/t/acme/cache/falcon';
 		const otherUrl = 'https://builder:other-secret@other.example.test/cache';
@@ -1156,17 +1139,14 @@ describe('setupAction cache-credential masking', () => {
 				addToPath: 'false',
 				cacheUrl: 'https://cache.example.test/t/acme',
 				cache: 'release, archive',
-				cacheCredentials: JSON.stringify([
+				cacheAccessKeys: JSON.stringify([
 					{
 						cache: namedCache('release'),
-						credential: { user: 'ci', password: readPassword }
+						accessKey: viewAccessKey
 					},
 					{
 						cache: namedCache('archive'),
-						credential: {
-							user: 'alice smith',
-							password: archivePassword
-						}
+						accessKey: archiveKey
 					}
 				]),
 				privateSubstituters: `${falconUrl}\n${otherUrl}`,
@@ -1194,7 +1174,7 @@ describe('setupAction cache-credential masking', () => {
 					)(input, init);
 				},
 				// The written state is read synchronously, so each record describes
-				// the run at the moment the mask was registered.
+				// the run when setup registered the mask.
 				mask: (value) => {
 					masked.push({
 						value,
@@ -1216,16 +1196,16 @@ describe('setupAction cache-credential masking', () => {
 			throw new Error('setup did not output the generated Nix config path');
 		}
 
-		const releaseUrl = `https://ci:${readPassword}@cache.example.test/t/acme/cache/release`;
-		const archiveUrl = `https://alice%20smith:${archivePassword}@cache.example.test/t/acme/cache/archive`;
+		const releaseUrl = `https://cupboard:${viewAccessKey}@cache.example.test/t/acme/cache/release`;
+		const archiveUrl = `https://cupboard:${archiveKey}@cache.example.test/t/acme/cache/archive`;
 		const nixConfig = await readFile(generatedConfigFile, 'utf8');
 		const [substituters] = nixConfig.split('\n', 1);
 
 		expect({ masked, substituters }).toStrictEqual({
 			masked: [
-				readPassword,
+				viewAccessKey,
 				releaseUrl,
-				archivePassword,
+				archiveKey,
 				archiveUrl,
 				'falcon/secret',
 				'falcon%2Fsecret',
@@ -1274,10 +1254,10 @@ describe('setupAction Nix configuration', () => {
 							addToPath: 'false',
 							cacheUrl: tenant.href,
 							cache: 'fresh,archive,builds',
-							cacheCredentials: JSON.stringify(
+							cacheAccessKeys: JSON.stringify(
 								['fresh', 'archive'].map((cache) => ({
 									cache: namedCache(cache),
-									credential: { user: 'alice', password: readPassword }
+									accessKey: viewAccessKey
 								}))
 							),
 							trustedPublicKey: 'acme:AAAA'
@@ -1503,13 +1483,13 @@ describe('setupAction Nix configuration', () => {
 						cacheUrl: 'https://cache.example.test/t/acme',
 						cache: caches,
 						reuseView: view,
-						cacheCredentials: JSON.stringify(
+						cacheAccessKeys: JSON.stringify(
 							caches
 								.split(',')
 								.filter((cache) => cache !== 'builds')
 								.map((cache) => ({
 									cache: namedCache(cache),
-									credential: { user: 'alice', password: readPassword }
+									accessKey: viewAccessKey
 								}))
 						),
 						trustedPublicKey: 'acme:AAAA'
@@ -1586,10 +1566,10 @@ describe('setupAction Nix configuration', () => {
 						cache: 'builds,releases',
 						reuseView: mode === 'content' ? 'prior' : '',
 						...(mode === 'metadata' && {
-							cacheCredentials: JSON.stringify(
+							cacheAccessKeys: JSON.stringify(
 								['builds', 'releases'].map((cache) => ({
 									cache: namedCache(cache),
-									credential: { user: 'alice', password: readPassword }
+									accessKey: viewAccessKey
 								}))
 							)
 						}),
@@ -1936,7 +1916,7 @@ describe('setupAction Nix configuration', () => {
 		const callerConfigFile = path.join(directory, 'caller-nix.conf');
 		const environmentFile = path.join(directory, 'github-env');
 		const outputFile = path.join(directory, 'github-output');
-		const credential = { user: 'ci', password: readPassword };
+		const accessKey = viewAccessKey;
 		const privateUrl =
 			'https://cupboard:falcon-secret@cache.example.test/t/acme/cache/falcon';
 
@@ -1946,8 +1926,8 @@ describe('setupAction Nix configuration', () => {
 				addToPath: 'false',
 				cacheUrl: 'https://cache.example.test/t/acme',
 				cache: 'release',
-				cacheCredentials: JSON.stringify([
-					{ cache: namedCache('release'), credential }
+				cacheAccessKeys: JSON.stringify([
+					{ cache: namedCache('release'), accessKey }
 				]),
 				privateSubstituters: privateUrl,
 				trustedPublicKey: 'acme:AAAA',
@@ -1977,7 +1957,7 @@ describe('setupAction Nix configuration', () => {
 			throw new Error('setup did not output the generated Nix config path');
 		}
 
-		const credentialUrl = `https://${credential.user}:${credential.password}@cache.example.test/t/acme/cache/release`;
+		const credentialUrl = `https://cupboard:${accessKey}@cache.example.test/t/acme/cache/release`;
 		const generatedConfig = await readFile(generatedConfigFile, 'utf8');
 		const environmentConfig = await readEnvironmentValue(environmentFile);
 		const callerConfig = await readFile(callerConfigFile, 'utf8');
@@ -2136,7 +2116,7 @@ describe('setupAction Nix configuration', () => {
 		}
 	});
 
-	it('refuses a read credential that the cache rejects', async () => {
+	it('refuses an access key that the cache rejects', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-config-')
 		);
@@ -2149,12 +2129,11 @@ describe('setupAction Nix configuration', () => {
 						addToPath: 'false',
 						cacheUrl: 'https://cache.example.test/t/acme',
 						cache: 'fresh',
-						readUser: 'alice',
-						readPassword: 'wrong',
 						trustedPublicKey: 'acme:AAAA',
 						nixConfigFile: path.join(directory, 'caller-nix.conf')
 					},
 					{
+						ACCESS_KEY: destinationAccessKey,
 						RUNNER_TEMP: directory,
 						GITHUB_ENV: path.join(directory, 'github-env'),
 						GITHUB_OUTPUT: path.join(directory, 'github-output')
@@ -2172,7 +2151,7 @@ describe('setupAction Nix configuration', () => {
 						})
 					}
 				)
-			).rejects.toBeInstanceOf(StaticReadCredentialRejectedError);
+			).rejects.toBeInstanceOf(AccessKeyRejectedError);
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
@@ -2473,21 +2452,18 @@ describe('additional runner read caches', () => {
 		{ readCaches: 'https://cache.example.test/t/acme/reuse/prior' },
 		{ readCaches: 'https://cache.example.test/t/acme/cache/falcon?x=y' },
 		{
-			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
-			readUser: 'alice',
-			readPassword
-		},
-		{
 			readCaches: 'https://cache.example.test/t/acme/cache/builds',
 			cache: 'builds',
-			destinationReadUser: 'alice',
-			destinationReadPassword: readPassword
+			cacheAccessKeys: JSON.stringify([
+				{ cache: { kind: 'named', name: 'builds' }, accessKey: viewAccessKey }
+			])
 		},
 		{
 			cacheUrl: 'https://cache.example.test/t/acme/cache/builds',
 			readCaches: 'https://cache.example.test/t/acme/cache/builds',
-			destinationReadUser: 'alice',
-			destinationReadPassword: readPassword
+			cacheAccessKeys: JSON.stringify([
+				{ cache: { kind: 'named', name: 'builds' }, accessKey: viewAccessKey }
+			])
 		},
 		{
 			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
@@ -2537,6 +2513,27 @@ describe('additional runner read caches', () => {
 		}
 	);
 
+	it.each([
+		{
+			name: 'the access-key input',
+			keys: { ACCESS_KEY: destinationAccessKey }
+		},
+		{
+			name: 'a job-level CUPBOARD_ACCESS_KEY',
+			keys: { CUPBOARD_ACCESS_KEY: destinationAccessKey }
+		}
+	])('rejects read caches alongside $name', ({ keys }) => {
+		expect(() =>
+			resolveSetupInputs(
+				{
+					cacheUrl: 'https://cache.example.test/t/acme',
+					readCaches: 'https://cache.example.test/t/acme/cache/falcon'
+				},
+				{ RUNNER_TEMP: '/unused', ...keys }
+			)
+		).toThrow(ReadCachesInvalidError);
+	});
+
 	it('accepts sixteen resources after deduplicating additional URLs', () => {
 		const names = Array.from(
 			{ length: 15 },
@@ -2584,7 +2581,12 @@ describe('cross-tenant setup', () => {
 			);
 			const environment = {
 				RUNNER_TEMP: directory,
-				GITHUB_OUTPUT: path.join(directory, 'output')
+				GITHUB_OUTPUT: path.join(directory, 'output'),
+				...(mode === 'metadata' && {
+					CACHE_ACCESS_KEYS: JSON.stringify([
+						{ cache: namedCache('builds'), accessKey: viewAccessKey }
+					])
+				})
 			};
 			const partner =
 				'https://cupboard:partner%2Fsecret@cache.example.test/t/partner/cache/deps';
@@ -2608,15 +2610,7 @@ describe('cross-tenant setup', () => {
 					'--private-substituters',
 					partner,
 					'--trusted-public-key',
-					'acme:AAAA',
-					...(mode === 'metadata'
-						? [
-								'--destination-read-user',
-								'alice',
-								'--destination-read-password',
-								readPassword
-							]
-						: [])
+					'acme:AAAA'
 				]);
 				await setupAction(
 					setup.opts<SetupOptions>(),
@@ -2695,7 +2689,7 @@ describe('cross-tenant setup', () => {
 							]
 						}
 					],
-					config: `extra-substituters = https://${mode === 'metadata' ? `alice:${readPassword}@` : ''}cache.example.test/t/acme/cache/builds ${partner}\nextra-trusted-public-keys = acme:AAAA\n`,
+					config: `extra-substituters = https://${mode === 'metadata' ? `cupboard:${viewAccessKey}@` : ''}cache.example.test/t/acme/cache/builds ${partner}\nextra-trusted-public-keys = acme:AAAA\n`,
 					target:
 						mode === 'metadata'
 							? ''
@@ -2732,22 +2726,35 @@ describe('cross-tenant setup', () => {
 	);
 });
 
-describe('resolveSetupInputs read credentials', () => {
-	it('preserves significant whitespace in both read credentials', () => {
+describe('resolveSetupInputs access key', () => {
+	it.each([
+		{
+			name: 'the access-key input',
+			keys: { ACCESS_KEY: destinationAccessKey }
+		},
+		{
+			name: 'the job environment key',
+			keys: { CUPBOARD_ACCESS_KEY: destinationAccessKey }
+		}
+	])('reads the access key from $name', ({ keys }) => {
 		const inputs = resolveSetupInputs(
-			{
-				...baseOptions,
-				readUser: ' alice ',
-				readPassword: ' p w ',
-				installDir: '/opt/cupboard'
-			},
-			{ GITHUB_ACTION_REPOSITORY: 'owner/cupboard' }
+			{ ...baseOptions, installDir: '/opt/cupboard' },
+			{ GITHUB_ACTION_REPOSITORY: 'owner/cupboard', ...keys }
 		);
 
-		expect({
-			readUser: inputs.readUser,
-			readPassword: inputs.readPassword
-		}).toStrictEqual({ readUser: ' alice ', readPassword: ' p w ' });
+		expect(inputs.accessKey).toBe(destinationAccessKey);
+	});
+
+	it('refuses an access token in place of an access key', () => {
+		expect(() =>
+			resolveSetupInputs(
+				{ ...baseOptions, installDir: '/opt/cupboard' },
+				{
+					GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+					ACCESS_KEY: 'eyJhbGciOiJFZERTQSJ9.e30.signature'
+				}
+			)
+		).toThrow(AccessKeyInvalidError);
 	});
 });
 
@@ -2775,11 +2782,8 @@ async function runSetup(options: {
 	readonly existingAccess?: 'public' | 'private';
 	readonly defaultAccess?: 'public' | 'private';
 	readonly defaultStatus?: number;
-	readonly readUser?: string;
-	readonly readPassword?: string;
-	readonly destinationReadUser?: string;
-	readonly destinationReadPassword?: string;
-	readonly cacheCredentials?: string;
+	readonly accessKey?: string;
+	readonly cacheAccessKeys?: string;
 	readonly reuseView?: string;
 	readonly viewAccess?: 'public' | 'private';
 	readonly viewStatus?: number;
@@ -2847,7 +2851,10 @@ async function runSetup(options: {
 			{
 				RUNNER_TEMP: directory,
 				GITHUB_ENV: path.join(directory, 'github-env'),
-				GITHUB_OUTPUT: path.join(directory, 'github-output')
+				GITHUB_OUTPUT: path.join(directory, 'github-output'),
+				...(options.accessKey !== undefined && {
+					ACCESS_KEY: options.accessKey
+				})
 			},
 			createGithubReporter(),
 			{
@@ -2881,7 +2888,7 @@ async function runSetup(options: {
 						...inputs.caches
 							.filter(
 								(selection) =>
-									selection.credential === undefined && inputs.readUser === ''
+									selection.credential === undefined && inputs.accessKey === ''
 							)
 							.map((selection) => ({
 								type: 'cupboard_cache',
@@ -2902,7 +2909,7 @@ async function runSetup(options: {
 												priority: 40
 											}
 							})),
-						...(inputs.reuseView !== '' && inputs.readUser === ''
+						...(inputs.reuseView !== '' && inputs.accessKey === ''
 							? [
 									{
 										type: 'cupboard_view',
@@ -2954,7 +2961,7 @@ async function runSetup(options: {
 
 											if (
 												authorization === undefined &&
-												options.destinationReadUser !== undefined &&
+												options.cacheAccessKeys !== undefined &&
 												options.existingAccess === 'private'
 											) {
 												return 401;
@@ -3035,104 +3042,36 @@ async function runSetup(options: {
 	}
 }
 
-describe('destination read credentials', () => {
+describe('setup access keys', () => {
 	it('reads secret inputs from the action environment without arguments', () => {
 		const inputs = resolveSetupInputs(
 			{ cache: 'builds' },
 			{
 				RUNNER_TEMP: '/runner/temp',
 				GH_TOKEN: 'github-secret',
-				READ_USER: 'tenant',
-				READ_PASSWORD: ' tenant-secret ',
-				DESTINATION_READ_USER: 'ci',
-				DESTINATION_READ_PASSWORD: ' destination-secret '
+				ACCESS_KEY: destinationAccessKey,
+				CACHE_ACCESS_KEYS: JSON.stringify([
+					{ cache: namedCache('builds'), accessKey: viewAccessKey }
+				])
 			}
 		);
 		expect({
 			githubToken: inputs.githubToken,
-			readUser: inputs.readUser,
-			readPassword: inputs.readPassword,
+			accessKey: inputs.accessKey,
 			caches: inputs.caches
 		}).toStrictEqual({
 			githubToken: 'github-secret',
-			readUser: 'tenant',
-			readPassword: ' tenant-secret ',
+			accessKey: destinationAccessKey,
 			caches: [
 				{
 					cache: namedCache('builds'),
-					credential: { user: 'ci', password: ' destination-secret ' }
+					credential: {
+						user: readUserInputSchema.parse('cupboard'),
+						password: viewAccessKey
+					}
 				}
 			]
 		});
-	});
-
-	const environment = { RUNNER_TEMP: '/runner/temp' };
-
-	it('attaches the destination credential to the single selected cache', () => {
-		const inputs = resolveSetupInputs(
-			{
-				cache: 'builds',
-				destinationReadUser: 'ci',
-				destinationReadPassword: readPassword,
-				readUser: 'tenant',
-				readPassword: 'tenant-secret'
-			},
-			environment
-		);
-
-		expect({
-			caches: inputs.caches,
-			fallbackUser: inputs.readUser,
-			fallbackPassword: inputs.readPassword
-		}).toStrictEqual({
-			caches: [
-				{
-					cache: namedCache('builds'),
-					credential: { user: 'ci', password: readPassword }
-				}
-			],
-			fallbackUser: 'tenant',
-			fallbackPassword: 'tenant-secret'
-		});
-	});
-
-	it.each([
-		[
-			'its password is absent',
-			{ destinationReadUser: 'ci' },
-			DestinationReadPasswordRequiredError
-		],
-		[
-			'its user is absent',
-			{ destinationReadPassword: readPassword },
-			DestinationReadUserRequiredError
-		],
-		[
-			'both credential inputs are supplied',
-			{
-				cache: 'builds',
-				destinationReadUser: 'ci',
-				destinationReadPassword: readPassword,
-				cacheCredentials: JSON.stringify([
-					{
-						cache: namedCache('builds'),
-						credential: { user: 'other', password: readPassword }
-					}
-				])
-			},
-			DestinationReadCredentialConflictError
-		],
-		[
-			'several caches are selected',
-			{
-				cache: 'builds, archive',
-				destinationReadUser: 'ci',
-				destinationReadPassword: readPassword
-			},
-			DestinationReadCredentialCacheCountError
-		]
-	])('refuses a destination credential when %s', (_name, options, error) => {
-		expect(() => resolveSetupInputs(options, environment)).toThrow(error);
 	});
 });
 
@@ -3189,32 +3128,18 @@ describe('setupAction cache provisioning', () => {
 		}
 	});
 
-	it.each(['destination-read', 'cache-credentials'] as const)(
-		'uses %s ahead of a distinct tenant credential during provisioning',
-		async (kind) => {
+	it.each(['cache-access-keys'] as const)(
+		'uses %s ahead of a distinct tenant access key during provisioning',
+		async () => {
 			const result = await runSetup({
 				provisionCache: 'pr-1',
 				existingAccess: 'private',
 				cacheAccessMode: 'private',
-				readUser: 'tenant',
-				readPassword: 'tenant-secret',
-				...(kind === 'destination-read'
-					? {
-							destinationReadUser: 'destination',
-							destinationReadPassword: readPassword
-						}
-					: {
-							cacheCredentials: JSON.stringify([
-								{
-									cache: namedCache('pr-1'),
-									credential: {
-										user: 'destination',
-										password: readPassword
-									}
-								}
-							])
-						}),
-				expectedDestinationAuthorization: `Basic ${Buffer.from(`destination:${readPassword}`).toString('base64')}`
+				accessKey: destinationAccessKey,
+				cacheAccessKeys: JSON.stringify([
+					{ cache: namedCache('pr-1'), accessKey: viewAccessKey }
+				]),
+				expectedDestinationAuthorization: accessKeyAuthorization(viewAccessKey)
 			});
 
 			expect(result).toStrictEqual({
@@ -3358,15 +3283,18 @@ describe('setupAction cache provisioning', () => {
 		});
 	});
 
-	it('starts a view-only read session when the destination uses a static credential', async () => {
+	it('starts a view-only read session when the destination has its own access key', async () => {
+		const cacheAccessKeys = JSON.stringify([
+			{ cache: namedCache('pr-1'), accessKey: viewAccessKey }
+		]);
+
 		expect(
 			await runSetup({
 				existingAccess: 'private',
 				reuseView: 'prior',
 				viewAccess: 'private',
 				captureReadConfiguration: true,
-				destinationReadUser: 'alice',
-				destinationReadPassword: readPassword
+				cacheAccessKeys
 			})
 		).toStrictEqual({
 			invocations: [],
@@ -3430,12 +3358,11 @@ describe('setupAction cache provisioning', () => {
 		});
 	});
 
-	it('inherits the default cache access even with a static read credential', async () => {
+	it('inherits the default cache access even with an access key', async () => {
 		expect(
 			await runSetup({
 				provisionCache: 'pr-1',
-				readUser: 'alice',
-				readPassword
+				accessKey: destinationAccessKey
 			})
 		).toStrictEqual({
 			invocations: [
@@ -3582,40 +3509,28 @@ describe('including the default cache', () => {
 		}
 	);
 
-	it('rejects a single destination credential when the default adds another cache', () => {
-		expect(() =>
-			resolveSetupInputs(
-				{
-					cache: 'builds',
-					includeDefaultCache: 'true',
-					destinationReadUser: 'ci',
-					destinationReadPassword: readPassword
-				},
-				{ RUNNER_TEMP: '/runner/temp' }
-			)
-		).toThrow(DestinationReadCredentialCacheCountError);
-	});
-
-	it('attaches separate credentials to default and named default caches', () => {
-		const credentials = [
-			{
-				cache: defaultCache,
-				credential: { user: 'tenant-default', password: readPassword }
-			},
-			{
-				cache: namedCache('default'),
-				credential: { user: 'named-default', password: 'B'.repeat(43) }
-			}
-		];
+	it('attaches separate access keys to default and named default caches', () => {
 		const inputs = resolveSetupInputs(
 			{
 				cache: 'default',
 				includeDefaultCache: 'true',
-				cacheCredentials: JSON.stringify(credentials)
+				cacheAccessKeys: JSON.stringify([
+					{ cache: defaultCache, accessKey: destinationAccessKey },
+					{ cache: namedCache('default'), accessKey: viewAccessKey }
+				])
 			},
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
-		expect(inputs.caches).toStrictEqual(credentials);
+		expect(inputs.caches).toStrictEqual([
+			{
+				cache: defaultCache,
+				credential: { user: 'cupboard', password: destinationAccessKey }
+			},
+			{
+				cache: namedCache('default'),
+				credential: { user: 'cupboard', password: viewAccessKey }
+			}
+		]);
 	});
 });
 
@@ -3669,20 +3584,16 @@ it.each([
 	}
 );
 
-it.each([undefined, 'reader'])(
-	'keeps an automatic reference cache separate from destination setup with credential %s',
-	(reader) => {
+it.each([{}, { ACCESS_KEY: destinationAccessKey }])(
+	'keeps an automatic reference cache separate from destination setup with environment %o',
+	(variables) => {
 		const inputs = resolveSetupInputs(
 			{
 				cacheUrl: 'https://cache.example.test/t/acme',
 				cache: 'pr',
-				referenceSource: 'https://cache.example.test/t/acme',
-				...(reader !== undefined && {
-					readUser: reader,
-					readPassword: 'secret'
-				})
+				referenceSource: 'https://cache.example.test/t/acme'
 			},
-			{ RUNNER_TEMP: '/tmp' }
+			{ RUNNER_TEMP: '/tmp', ...variables }
 		);
 		expect({
 			caches: inputs.caches,
@@ -3697,14 +3608,14 @@ it.each([undefined, 'reader'])(
 );
 
 it.each([
-	{ status: 200, reader: undefined, session: false },
-	{ status: 401, reader: undefined, session: true },
-	{ status: 404, reader: undefined, session: false },
-	{ status: 200, reader: 'reader', session: false },
-	{ status: 404, reader: 'reader', session: false }
+	{ status: 200, accessKey: false, session: false },
+	{ status: 401, accessKey: false, session: true },
+	{ status: 404, accessKey: false, session: false },
+	{ status: 200, accessKey: true, session: false },
+	{ status: 404, accessKey: true, session: false }
 ])(
-	'configures reference source access $status with credential $reader',
-	async ({ status, reader, session }) => {
+	'configures reference source access $status with an access key: $accessKey',
+	async ({ status, accessKey, session }) => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-reference-setup-')
 		);
@@ -3715,16 +3626,13 @@ it.each([
 				addToPath: 'false',
 				cacheUrl: 'https://cache.example.test/t/acme',
 				referenceSource: 'https://cache.example.test/t/acme/cache/source',
-				trustedPublicKey: 'acme:AAAA',
-				...(reader !== undefined && {
-					readUser: reader,
-					readPassword: 'secret'
-				})
+				trustedPublicKey: 'acme:AAAA'
 			},
 			{
 				RUNNER_TEMP: directory,
 				GITHUB_ENV: path.join(directory, 'env'),
-				GITHUB_OUTPUT: path.join(directory, 'output')
+				GITHUB_OUTPUT: path.join(directory, 'output'),
+				...(accessKey && { ACCESS_KEY: destinationAccessKey })
 			},
 			createGithubReporter(),
 			{
@@ -4187,11 +4095,10 @@ it.each([401, 403])(
 					addToPath: 'false',
 					cacheUrl: 'https://cache.example.test/t/acme',
 					referenceSource: 'https://cache.example.test/t/acme/cache/source',
-					trustedPublicKey: 'acme:AAAA',
-					readUser: 'reader',
-					readPassword: 'secret'
+					trustedPublicKey: 'acme:AAAA'
 				},
 				{
+					ACCESS_KEY: destinationAccessKey,
 					RUNNER_TEMP: directory,
 					GITHUB_ENV: path.join(directory, 'env'),
 					GITHUB_OUTPUT: path.join(directory, 'output')

@@ -2,22 +2,19 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { type StorePathHash } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import { type UploadPathMetadataFields } from '@cupboard/protocol/upload';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 
+import { basicCredentialForAccessKey } from '../access-key-options.ts';
 import { cacheReadFetcher } from '../client/transport.ts';
-import {
-	NarInfoUnavailableError,
-	NarInfoUnparsableError,
-	ReadCredentialPairError
-} from '../errors.ts';
+import { NarInfoUnavailableError, NarInfoUnparsableError } from '../errors.ts';
 
 export interface ReferenceSource {
 	readonly url: URL;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 }
 
 export interface ReferenceFetchDependencies {
@@ -99,19 +96,13 @@ function referenceMetadata(narInfo: NarInfo): UploadPathMetadataFields {
 function referenceAuthHeaders(source: ReferenceSource): Headers {
 	const headers = new Headers();
 
-	if (source.readUser === undefined && source.readPassword === undefined) {
-		return headers;
+	if (source.accessKey !== undefined) {
+		headers.set(
+			'authorization',
+			basicAuthHeader(basicCredentialForAccessKey(source.accessKey))
+				.authorization
+		);
 	}
-
-	if (source.readUser === undefined || source.readPassword === undefined) {
-		throw new ReadCredentialPairError();
-	}
-
-	headers.set(
-		'authorization',
-		basicAuthHeader({ user: source.readUser, password: source.readPassword })
-			.authorization
-	);
 
 	return headers;
 }

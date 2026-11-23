@@ -1,14 +1,17 @@
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
 import {
+	destinationAccessKey,
+	viewAccessKey
+} from './access-key.test-support.ts';
+import {
+	AccessKeyInvalidError,
 	BooleanInputInvalidError,
-	CacheCredentialsInvalidError,
+	CacheAccessKeysInvalidError,
 	CacheNameInvalidError,
 	PrivateSubstituterInvalidError,
-	ReadUserInvalidError,
-	UnknownCacheCredentialError,
+	UnknownCacheAccessKeyError,
 	UrlInputInsecureError,
 	UrlInputInvalidError
 } from './errors.ts';
@@ -16,12 +19,12 @@ import {
 	collectLines,
 	isEnabled,
 	provided,
+	providedAccessKey,
 	providedCache,
-	providedCacheCredentials,
+	providedCacheAccessKeys,
 	providedCaches,
 	providedCacheSelection,
 	providedPrivateSubstituters,
-	providedReadUser,
 	providedUrl
 } from './options.ts';
 
@@ -31,7 +34,6 @@ const namedCache = (value: string): CacheScope => ({
 	kind: 'named',
 	name: cacheName(value)
 });
-const readPassword = 'A'.repeat(43);
 
 describe('provided', () => {
 	it.each([
@@ -231,74 +233,58 @@ describe('providedCaches', () => {
 	});
 });
 
-describe('providedCacheCredentials', () => {
+describe('providedCacheAccessKeys', () => {
 	it.each([
 		{ name: 'an absent input', value: undefined },
 		{ name: 'a blank input', value: '  ' }
-	])('reads $name as no credential', ({ value }) => {
+	])('reads $name as no access key', ({ value }) => {
 		expect(
-			providedCacheCredentials(value, [namedCache('release')])
+			providedCacheAccessKeys(value, [namedCache('release')])
 		).toStrictEqual([]);
 	});
 
-	it('reads a credential for each named cache', () => {
+	it('reads an access key for each named cache', () => {
 		const release = namedCache('release');
 
 		expect(
-			providedCacheCredentials(
-				JSON.stringify([
-					{
-						cache: release,
-						credential: { user: 'ci', password: readPassword }
-					}
-				]),
+			providedCacheAccessKeys(
+				JSON.stringify([{ cache: release, accessKey: destinationAccessKey }]),
 				[release]
 			)
-		).toStrictEqual([
-			{
-				cache: release,
-				credential: {
-					user: readUserInputSchema.parse('ci'),
-					password: readPassword
-				}
-			}
-		]);
+		).toStrictEqual([{ cache: release, accessKey: destinationAccessKey }]);
 	});
 
 	it.each([
 		{ name: 'is not JSON', value: 'not json' },
 		{ name: 'is not an array', value: '"release"' },
 		{
-			name: 'omits the password',
+			name: 'gives a user and password',
 			value:
-				'[{"cache":{"kind":"named","name":"release"},"credential":{"user":"ci"}}]'
+				'[{"cache":{"kind":"named","name":"release"},"credential":{"user":"ci","password":"secret"}}]'
 		},
 		{
-			name: 'carries a password of the wrong shape',
+			name: 'gives an access token in place of a key',
 			value:
-				'[{"cache":{"kind":"named","name":"release"},"credential":{"user":"ci","password":"short"}}]'
+				'[{"cache":{"kind":"named","name":"release"},"accessKey":"eyJhbGciOiJFZERTQSJ9.e30.signature"}]'
 		},
 		{
-			name: 'names a cache the name schema refuses',
-			value: `[{"cache":{"kind":"named","name":"Not A Cache"},"credential":{"user":"ci","password":"${readPassword}"}}]`
+			name: 'names a cache that the name schema refuses',
+			value: `[{"cache":{"kind":"named","name":"Not A Cache"},"accessKey":"${destinationAccessKey}"}]`
 		}
 	])('refuses an input that $name', ({ value }) => {
 		expect(() =>
-			providedCacheCredentials(value, [namedCache('release')])
-		).toThrow(CacheCredentialsInvalidError);
+			providedCacheAccessKeys(value, [namedCache('release')])
+		).toThrow(CacheAccessKeysInvalidError);
 	});
 
-	it('refuses a credential for a cache the run does not configure', () => {
-		const credentials = JSON.stringify([
-			{
-				cache: namedCache('staging'),
-				credential: { user: 'ci', password: readPassword }
-			}
+	it('refuses an access key for a cache that the run does not configure', () => {
+		const keys = JSON.stringify([
+			{ cache: namedCache('staging'), accessKey: destinationAccessKey }
 		]);
 
 		expect(() =>
-			providedCacheCredentials(credentials, [namedCache('release')])
-		).toThrow(UnknownCacheCredentialError);
+			providedCacheAccessKeys(keys, [namedCache('release')])
+		).toThrow(UnknownCacheAccessKeyError);
 	});
 });
 
@@ -329,17 +315,23 @@ describe('providedCacheSelection', () => {
 	});
 });
 
-describe('providedReadUser', () => {
+describe('providedAccessKey', () => {
 	it.each([
-		['keeps a supplied name verbatim', ' alice ', ' alice '],
-		['reads a blank value as no read user', '', ''],
-		['reads an absent value as no read user', undefined, '']
-	])('%s', (_name, value, expected) => {
-		expect(providedReadUser(value)).toBe(expected);
+		{
+			name: 'an access key',
+			value: ` ${viewAccessKey} `,
+			expected: viewAccessKey
+		},
+		{ name: 'a blank value as no key', value: '  ', expected: '' },
+		{ name: 'an absent value as no key', value: undefined, expected: '' }
+	])('reads $name', ({ value, expected }) => {
+		expect(providedAccessKey('access-key', value)).toBe(expected);
 	});
 
-	it('rejects a colon because Basic authentication uses it as a separator', () => {
-		expect(() => providedReadUser('rea:der')).toThrow(ReadUserInvalidError);
+	it('refuses an access token', () => {
+		expect(() =>
+			providedAccessKey('access-key', 'eyJhbGciOiJFZERTQSJ9.e30.signature')
+		).toThrow(AccessKeyInvalidError);
 	});
 });
 

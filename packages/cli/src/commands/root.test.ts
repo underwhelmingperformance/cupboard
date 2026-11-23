@@ -46,6 +46,7 @@ import {
 } from '../client/cache-scoped.test-support.ts';
 import { type CallOptions } from '../client/orpc.ts';
 import { separateRootRequestConcurrency } from '../client/root-batches.ts';
+import { destinationAccessKey } from '../test-support.ts';
 
 import {
 	describeExpiry,
@@ -1177,3 +1178,102 @@ function removeClient(response: RootRemoveResponse): RootClient & {
 const unexpectedEnsure = recordingCacheScopedClient((_input: RootBody) =>
 	Promise.reject(new Error('the batched request covers every root'))
 );
+
+// Runs a root command against a server that records the Authorization header
+// of each request and refuses it.
+async function runRootCommand(
+	arguments_: readonly string[],
+	environment: Readonly<Record<string, string | undefined>>
+): Promise<{
+	readonly failure: string | undefined;
+	readonly authorizations: readonly (string | null)[];
+}> {
+	const authorizations: (string | null)[] = [];
+	const server = setupServer(
+		http.all('*', ({ request }) => {
+			authorizations.push(request.headers.get('authorization'));
+
+			return HttpResponse.json({}, { status: 403 });
+		})
+	);
+	const program = new Command().exitOverride();
+	registerRootCommands(program);
+	server.listen({ onUnhandledFrame: 'error' });
+	onTestFinished(() => {
+		server.close();
+		vi.unstubAllEnvs();
+	});
+
+	for (const [name, value] of Object.entries(environment)) {
+		vi.stubEnv(name, value);
+	}
+
+	let failure: unknown;
+
+	try {
+		await program.parseAsync(['root', ...arguments_], { from: 'user' });
+	} catch (error) {
+		failure = error;
+	}
+
+	return {
+		failure: failure instanceof Error ? failure.name : undefined,
+		authorizations
+	};
+}
+
+describe('root commands with an access key', () => {
+	const tenantUrl = 'https://cupboard.example.workers.dev/t/acme';
+	const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+
+	it.each([
+		{
+			name: 'root ensure with --access-key',
+			arguments_: [
+				'ensure',
+				tenantUrl,
+				'main',
+				storePath,
+				'--access-key',
+				destinationAccessKey
+			],
+			environment: {}
+		},
+		{
+			name: 'root targets with CUPBOARD_ACCESS_KEY',
+			arguments_: ['targets', tenantUrl, 'main'],
+			environment: { CUPBOARD_ACCESS_KEY: destinationAccessKey }
+		},
+		{
+			name: 'root list with --access-key',
+			arguments_: ['list', tenantUrl, '--access-key', destinationAccessKey],
+			environment: {}
+		}
+	])(
+		'sends the key as the Bearer credential for $name',
+		async ({ arguments_, environment }) => {
+			const outcome = await runRootCommand(arguments_, environment);
+
+			expect(outcome.authorizations).toStrictEqual([
+				`Bearer ${destinationAccessKey}`
+			]);
+		}
+	);
+
+	it.each([
+		{ command: 'ensure', arguments_: [tenantUrl, 'main', storePath] },
+		{ command: 'targets', arguments_: [tenantUrl, 'main'] }
+	])(
+		'refuses a key from CUPBOARD_ACCESS_KEY together with --github-oidc for root $command',
+		async ({ command, arguments_ }) => {
+			expect(
+				await runRootCommand([command, ...arguments_, '--github-oidc'], {
+					CUPBOARD_ACCESS_KEY: destinationAccessKey
+				})
+			).toStrictEqual({
+				failure: 'AccessKeyWithGithubOidcError',
+				authorizations: []
+			});
+		}
+	);
+});

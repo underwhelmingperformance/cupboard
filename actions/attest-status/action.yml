@@ -37,11 +37,12 @@ inputs:
   read-session-view:
     description: Setup output for an additional reuse view.
     required: false
-  read-user:
-    description: Destination cache read user.
-    required: false
-  read-password:
-    description: Destination cache read password.
+  access-key:
+    description:
+      Access key for a private destination cache, as `cupboard access-key
+      create` prints it. With it, the action reads the cache with the key
+      instead of the job's OIDC token. Leave it empty to use the
+      CUPBOARD_ACCESS_KEY environment variable.
     required: false
 runs:
   using: composite
@@ -85,8 +86,7 @@ runs:
         READ_SESSION_AUDIENCE: ${{ inputs.audience }}
         READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
-        READ_USER: ${{ inputs.read-user }}
-        READ_PASSWORD: ${{ inputs.read-password }}
+        ACCESS_KEY: ${{ inputs.access-key }}
       run: |
         source "$GITHUB_ACTION_PATH/../read-session.sh"
         run_with_read_session \
@@ -99,4 +99,3 @@ runs:
             --cupboard-path "$CUPBOARD_PATH" \
             --receipt-file "$RECEIPT_FILE" \
             --bundles-file "$BUNDLES_FILE" \
-            --read-user "$READ_USER"

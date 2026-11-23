@@ -11,6 +11,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import type {
 	AttestationAttachResponseInput,
 	AttestationDecisionInput,
@@ -35,7 +36,6 @@ import {
 } from '@cupboard/reporter';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import type { ReadUser } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
 import { z } from 'zod';
 
@@ -153,8 +153,7 @@ const bundleConcurrency = 6;
 export interface CommittedAttestationSource {
 	readonly url: URL;
 	readonly cache: CacheScope;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 }
 
 export interface CommittedAttestationReadDependencies extends ReferenceFetchDependencies {
@@ -175,10 +174,7 @@ export async function readCommittedAttestationPathInfos(
 	let completed = 0;
 	const reference = {
 		url: cacheUrl(source.url, source.cache),
-		...(source.readUser !== undefined && { readUser: source.readUser }),
-		...(source.readPassword !== undefined && {
-			readPassword: source.readPassword
-		})
+		...(source.accessKey !== undefined && { accessKey: source.accessKey })
 	};
 
 	return mapWithConcurrency(paths, bundleConcurrency, async (storePath) => {

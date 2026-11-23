@@ -906,18 +906,18 @@ function jobReadCaches(
 				'read-caches is supported by the flake publishing workflow; remove it from the installable workflow.'
 		};
 	}
-	if ((job.readCredentialWiring?.view ?? 'none') !== 'none') {
+	if ((job.accessKeyWiring?.view ?? 'none') !== 'none') {
 		return {
 			outcome: 'unresolved',
 			reason:
-				'read-caches requires OIDC reads; omit the default static read credential and provide complete destination credentials separately.'
+				'read-caches requires OIDC reads; omit the view_access_key secret.'
 		};
 	}
 	if (job.privateSubstitutersWiring !== undefined) {
 		return {
 			outcome: 'unresolved',
 			reason:
-				'The check cannot compare read-caches with secret private_substituters; verify that the same cache does not also use a static credential before repairing.'
+				'The check cannot compare read-caches with secret private_substituters; verify that the same cache is not also read with a credential in private_substituters before repairing.'
 		};
 	}
 	const caches: CacheScope[] = [];
@@ -940,12 +940,12 @@ function jobReadCaches(
 		}
 		if (
 			isSameCacheScope(cache, target.cache) &&
-			(job.readCredentialWiring?.cache ?? 'none') !== 'none'
+			(job.accessKeyWiring?.cache ?? 'none') !== 'none'
 		) {
 			return {
 				outcome: 'unresolved',
 				reason:
-					'Do not request OIDC reads for a destination with an explicit static credential.'
+					'Do not request OIDC reads for a destination that the access_key secret reads.'
 			};
 		}
 		if (caches.every((selected) => !isSameCacheScope(selected, target.cache))) {

@@ -20,30 +20,6 @@ case "${PUSH}" in
   false) PUBLISH=none ;;
   *) echo '::error::push must be true or false'; exit 1 ;;
 esac
-for pair in READ FALLBACK_READ DESTINATION_READ; do
-  user="${pair}_USER"
-  password="${pair}_PASSWORD"
-  if [ -n "${!user}" ] && [ -n "${!password}" ]; then
-    continue
-  fi
-  if [ -n "${!user}${!password}" ]; then
-    label="$(printf '%s' "${pair}" | tr '[:upper:]' '[:lower:]')"
-    echo "::error::${label}_user and ${label}_password must be supplied together"
-    exit 1
-  fi
-done
-if [ -n "${READ_USER}" ] && [ -n "${FALLBACK_READ_USER}" ] &&
-   { [ "${READ_USER}" != "${FALLBACK_READ_USER}" ] ||
-     [ "${READ_PASSWORD}" != "${FALLBACK_READ_PASSWORD}" ]; }; then
-  echo '::error::read_user/read_password and fallback_read_user/fallback_read_password must match when both are supplied'
-  exit 1
-fi
-if [ -n "${FALLBACK_READ_USER}" ]; then
-  echo '::warning::fallback_read_user is deprecated. Use read_user.'
-fi
-if [ -n "${FALLBACK_READ_PASSWORD}" ]; then
-  echo '::warning::fallback_read_password is deprecated. Use read_password.'
-fi
 for name in URL PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do
   if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
     echo "::error::${name} must not contain line breaks"

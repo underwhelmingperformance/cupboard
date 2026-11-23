@@ -58,9 +58,7 @@ on:
       cache:
         description:
           Named cache to publish to. Leave empty to publish to the default
-          cache. If this cache needs a different static read credential from
-          read_user and read_password, supply destination_read_user and
-          destination_read_password.
+          cache.
         required: false
         default: ''
         type: string
@@ -104,9 +102,10 @@ on:
         description:
           Additional canonical cache URLs from the selected tenant, one per
           line. Adds runner substituters and OIDC read resources without
-          changing the destination cache. Cannot use credentials for these
-          caches or a default static read credential. Remote builders need their
-          own read credentials.
+          changing the destination cache. The workflow refuses this input
+          together with the access_key secret, and refuses a URL that contains a
+          user name or password or that private_substituters also lists. Remote
+          builders need their own credentials.
         required: false
         default: ''
         type: string
@@ -131,8 +130,8 @@ on:
         description:
           An exact cupboard release tag to install, or latest. If empty, the
           workflow installs the release that was published from its own commit.
-          If there is no such release, it builds cupboard from that commit.
-          Static read credentials need v0.0.50 or later.
+          If there is no such release, it builds cupboard from that commit. An
+          access key needs v0.0.56 or later.
         required: false
         type: string
       maximise-space:
@@ -393,32 +392,16 @@ on:
           SSH private key for fetching private flake inputs. Requires
           input-known-hosts.
         required: false
-      destination_read_user:
+      access_key:
         description:
-          User name of a credential to read the destination cache when its
-          credential differs from read_user and read_password.
+          Access key for the destination cache, as `cupboard access-key create`
+          prints it. Supplying it replaces OIDC publishing. The jobs read the
+          cache and the reuse view and publish with the key, so the key needs
+          the publication grants that the job's trust rule would otherwise give.
+          A job that can use OIDC should not supply it.
         required: false
-      destination_read_password:
-        description:
-          Password of the destination cache's distinct read credential.
-        required: false
-      read_user:
-        description:
-          User name of the default static read credential for the selected cache
-          and reference source.
-        required: false
-      read_password:
-        description: Password of the default static read credential.
-        required: false
-      fallback_read_user:
-        description:
-          Deprecated alias of read_user. Supply it with fallback_read_password.
-          The workflow warns when this secret is supplied.
-        required: false
-      fallback_read_password:
-        description:
-          Deprecated alias of read_password. Supply it with fallback_read_user.
-          The workflow warns when this secret is supplied.
+      view_access_key:
+        description: Access key for a private reuse view or reference source.
         required: false
       private_substituters:
         description:
@@ -505,10 +488,6 @@ jobs:
       store_ssh_key: ${{ secrets.store_ssh_key }}
       store_ssh_config: ${{ secrets.store_ssh_config }}
       input_ssh_key: ${{ secrets.input_ssh_key }}
-      destination_read_user: ${{ secrets.destination_read_user }}
-      destination_read_password: ${{ secrets.destination_read_password }}
-      read_user: ${{ secrets.read_user }}
-      read_password: ${{ secrets.read_password }}
-      fallback_read_user: ${{ secrets.fallback_read_user }}
-      fallback_read_password: ${{ secrets.fallback_read_password }}
+      access_key: ${{ secrets.access_key }}
+      view_access_key: ${{ secrets.view_access_key }}
       private_substituters: ${{ secrets.private_substituters }}

@@ -20,19 +20,10 @@ inputs:
     description:
       Same-tenant cache URL from which to publish available paths by reference.
     required: false
-  fallback-read-user:
+  view-access-key:
     description:
-      User name of a read credential for the reference source. Leave
-      fallback-read-user and fallback-read-password empty to use the
-      CUPBOARD_VIEW_READ_USER and CUPBOARD_VIEW_READ_PASSWORD environment
-      variables.
-    required: false
-  fallback-read-password:
-    description:
-      Password of a read credential for the reference source. Leave
-      fallback-read-user and fallback-read-password empty to use the
-      CUPBOARD_VIEW_READ_USER and CUPBOARD_VIEW_READ_PASSWORD environment
-      variables.
+      Access key for a private reference source. Leave it empty to use the
+      CUPBOARD_VIEW_ACCESS_KEY environment variable.
     required: false
   read-session-target:
     description:
@@ -64,17 +55,13 @@ inputs:
       Keep the root of a target that the cache already has permanently.
     required: false
     default: 'false'
-  read-user:
+  access-key:
     description:
-      User name of a read credential for a private destination cache. Leave
-      read-user and read-password empty to use the CUPBOARD_READ_USER and
-      CUPBOARD_READ_PASSWORD environment variables.
-    required: false
-  read-password:
-    description:
-      Password of a read credential for a private destination cache. Leave
-      read-user and read-password empty to use the CUPBOARD_READ_USER and
-      CUPBOARD_READ_PASSWORD environment variables.
+      Access key for a private destination cache, as `cupboard access-key
+      create` prints it. Supplying it replaces OIDC publishing. The action reads
+      the cache and ensures roots with the key, so the key needs the publication
+      grants. A job that can use OIDC should not supply it. When the input is
+      empty, the action uses the CUPBOARD_ACCESS_KEY environment variable.
     required: false
   audience:
     description:
@@ -234,8 +221,7 @@ runs:
         URL: ${{ inputs.url }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         REFERENCE_SOURCE: ${{ inputs.reference-source }}
-        FALLBACK_READ_USER: ${{ inputs.fallback-read-user }}
-        FALLBACK_READ_PASSWORD: ${{ inputs.fallback-read-password }}
+        VIEW_ACCESS_KEY: ${{ inputs.view-access-key }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
         READ_SESSION_AUDIENCE: ${{ inputs.audience }}
         READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
@@ -244,8 +230,7 @@ runs:
         CACHE: ${{ inputs.cache }}
         TTL: ${{ inputs.ttl }}
         PERMANENT: ${{ inputs.permanent }}
-        READ_USER: ${{ inputs.read-user }}
-        READ_PASSWORD: ${{ inputs.read-password }}
+        ACCESS_KEY: ${{ inputs.access-key }}
         AUDIENCE: ${{ inputs.audience }}
         PLAN_FILE: ${{ inputs.plan-file }}
         OPTIMISE: ${{ inputs.optimise }}
@@ -268,8 +253,6 @@ runs:
           --ttl "$TTL"
           --permanent "$PERMANENT"
           --reference-source "$REFERENCE_SOURCE"
-          --fallback-read-user "$FALLBACK_READ_USER"
-          --read-user "$READ_USER"
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"

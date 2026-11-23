@@ -506,11 +506,7 @@ describe('cupboard acquisition', () => {
 				cache: '${{ needs.configure.outputs.cache }}',
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
-				'destination-read-user': '${{ secrets.destination_read_user }}',
-				'destination-read-password': '${{ secrets.destination_read_password }}',
-				'read-user': '${{ secrets.read_user || secrets.fallback_read_user }}',
-				'read-password':
-					'${{ secrets.read_password || secrets.fallback_read_password }}',
+				'access-key': '${{ secrets.access_key }}',
 				'private-substituters': '${{ secrets.private_substituters }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				'checkout-dir': sourceCheckoutDirectory
@@ -808,12 +804,8 @@ describe('SSH credential isolation', () => {
 				'store_ssh_key',
 				'store_ssh_config',
 				'input_ssh_key',
-				'destination_read_user',
-				'destination_read_password',
-				'read_user',
-				'read_password',
-				'fallback_read_user',
-				'fallback_read_password',
+				'access_key',
+				'view_access_key',
 				'private_substituters'
 			]
 		);
@@ -875,10 +867,7 @@ describe('cohort planning and publication', () => {
 				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
 				audience: '${{ steps.setup.outputs.read-session-audience }}',
 				'reference-source': '${{ steps.setup.outputs.reference-source }}',
-				'fallback-read-user':
-					'${{ secrets.read_user || secrets.fallback_read_user }}',
-				'fallback-read-password':
-					'${{ secrets.read_password || secrets.fallback_read_password }}',
+				'view-access-key': '${{ secrets.view_access_key }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
@@ -887,10 +876,7 @@ describe('cohort planning and publication', () => {
 				publish: '${{ needs.configure.outputs.publish }}',
 				build: '${{ inputs.build }}',
 				substituter: '${{ inputs.substituter }}',
-				'read-user':
-					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
-				'read-password':
-					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
+				'access-key': '${{ secrets.access_key }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				'maximise-space': '${{ inputs.maximise-space }}',
@@ -1067,14 +1053,8 @@ describe('cohort planning and publication', () => {
 				'reference-source': '${{ steps.setup.outputs.reference-source }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				'read-user':
-					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
-				'read-password':
-					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
-				'fallback-read-user':
-					'${{ secrets.read_user || secrets.fallback_read_user }}',
-				'fallback-read-password':
-					'${{ secrets.read_password || secrets.fallback_read_password }}',
+				'access-key': '${{ secrets.access_key }}',
+				'view-access-key': '${{ secrets.view_access_key }}',
 				// No `max-jobs`. Passing 0 would send every derivation to the builders,
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
@@ -1229,8 +1209,8 @@ ${sign.run}`
 			sign: {
 				verifiedFile: sign?.env?.VERIFIED_CHECKSUMS_FILE,
 				inReadSession: sign?.run?.includes('run_with_read_session'),
-				readCredentials: Object.keys(sign?.env ?? {}).filter((key) =>
-					key.startsWith('READ_')
+				credentials: Object.keys(sign?.env ?? {}).filter((key) =>
+					/^READ_|ACCESS_KEY/u.test(key)
 				)
 			}
 		}).toStrictEqual({
@@ -1244,7 +1224,7 @@ ${sign.run}`
 			sign: {
 				verifiedFile: '${{ steps.check.outputs.verified-checksums-file }}',
 				inReadSession: false,
-				readCredentials: []
+				credentials: []
 			}
 		});
 	});
@@ -1466,10 +1446,7 @@ ${sign.run}`
 					'read-session-caches':
 						'${{ steps.setup.outputs.read-session-caches }}',
 					audience: '${{ steps.setup.outputs.read-session-audience }}',
-					'read-user':
-						'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
-					'read-password':
-						'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}'
+					'access-key': '${{ secrets.access_key }}'
 				}
 			],
 			publish: [
@@ -1515,10 +1492,7 @@ ${sign.run}`
 						'${{ steps.setup.outputs.read-session-caches }}',
 					audience: '${{ steps.setup.outputs.read-session-audience }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user':
-						'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
-					'read-password':
-						'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
+					'access-key': '${{ secrets.access_key }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					'bundles-file': '${{ steps.attest.outputs.bundles-file }}'
@@ -2409,7 +2383,6 @@ async function resolvePublicationEvent(event: {
 	readonly reuseView?: string;
 	readonly publish?: 'none' | 'outputs' | 'closure';
 	readonly push?: boolean;
-	readonly credentials?: Readonly<Record<string, string | undefined>>;
 	readonly onOutput?: (stdout: string) => void;
 }): Promise<Record<string, string>> {
 	const workflow = await loadWorkflow(flakeWorkflow);
@@ -2459,7 +2432,6 @@ async function resolvePublicationEvent(event: {
 						? 'refs/heads/main'
 						: 'refs/pull/7/merge',
 				BRANCH: 'main',
-				...event.credentials,
 				GITHUB_OUTPUT: output
 			}
 		});
@@ -2578,99 +2550,6 @@ describe('pull-request cache lifecycle', () => {
 				'provision-cache-ttl': selection.ttl,
 				'close-cache': ''
 			});
-		}
-	);
-
-	it.each([
-		{ credentials: {}, warned: false },
-		{
-			credentials: { READ_USER: 'reader', READ_PASSWORD: 'secret' },
-			warned: false
-		},
-		{
-			credentials: {
-				FALLBACK_READ_USER: 'reader',
-				FALLBACK_READ_PASSWORD: 'secret'
-			},
-			warned: true
-		},
-		{
-			credentials: {
-				READ_USER: 'reader',
-				READ_PASSWORD: 'secret',
-				FALLBACK_READ_USER: 'reader',
-				FALLBACK_READ_PASSWORD: 'secret'
-			},
-			warned: true
-		}
-	])(
-		'warns for deprecated static read aliases without revealing values: %j',
-		async ({ credentials, warned }) => {
-			let diagnostics = '';
-			const outputs = await resolvePublicationEvent({
-				action: 'opened',
-				merged: false,
-				credentials,
-				onOutput: (stdout) => {
-					diagnostics = stdout;
-				}
-			});
-			expect({ outputs, diagnostics }).toStrictEqual({
-				outputs: {
-					publish: 'built',
-					cache: 'gh-1234-pr-7',
-					'cache-access-mode': '',
-					'root-prefix': 'github:acme/infra/pr-7',
-					ttl: '14d',
-					permanent: 'false',
-					'reuse-view': '',
-					'reference-source': 'https://cupboard.example.workers.dev/t/acme',
-					'provision-cache': 'gh-1234-pr-7',
-					'provision-cache-ttl': '14d',
-					'close-cache': ''
-				},
-				diagnostics: warned
-					? '::warning::fallback_read_user is deprecated. Use read_user.\n::warning::fallback_read_password is deprecated. Use read_password.\n'
-					: ''
-			});
-		}
-	);
-	it.each([
-		{
-			credentials: { READ_USER: 'reader' },
-			message: '::error::read_user and read_password must be supplied together'
-		},
-		{
-			credentials: {
-				READ_USER: 'reader',
-				READ_PASSWORD: 'one',
-				FALLBACK_READ_USER: 'other',
-				FALLBACK_READ_PASSWORD: 'two'
-			},
-			message:
-				'::error::read_user/read_password and fallback_read_user/fallback_read_password must match when both are supplied'
-		}
-	])(
-		'rejects incomplete or conflicting static read pairs',
-		async ({ credentials, message }) => {
-			try {
-				await resolvePublicationEvent({
-					action: 'opened',
-					merged: false,
-					credentials
-				});
-			} catch (error) {
-				if (
-					!(error instanceof Error) ||
-					!('stdout' in error) ||
-					typeof error.stdout !== 'string'
-				) {
-					throw error;
-				}
-				expect(error.stdout.trim()).toBe(message);
-				return;
-			}
-			throw new Error('Expected the workflow to reject the static read pair');
 		}
 	);
 

@@ -6,6 +6,7 @@ import { env } from 'node:process';
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import { buildReceiptSchema } from '@cupboard/protocol/build';
 import {
 	attestationAttachSummaryResultKind,
@@ -15,12 +16,15 @@ import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import {
+	accessKeyInvocation,
 	type CacheSelectionSyntax,
 	cacheSelectionSyntax,
 	type CupboardInvocation,
 	detectCacheSelectionSyntax,
 	inspectCommandOptions,
-	readCredentialInvocation,
+	inspectCupboardVersion,
+	requireAccessKeySupport,
+	resolveAccessKey,
 	runCupboard as defaultRunCupboard
 } from '../cupboard-run.ts';
 import {
@@ -29,16 +33,14 @@ import {
 	AttestationAttachmentResultError,
 	AttestationBundlesMissingError,
 	AttestationChecksumsMismatchError,
-	MissingInputError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError
+	MissingInputError
 } from '../errors.ts';
 import { type Environment, parseLines } from '../inputs.ts';
 import {
 	collectLines,
 	provided,
+	providedAccessKey,
 	providedCacheSelection,
-	providedReadUser,
 	providedUrl
 } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
@@ -50,8 +52,6 @@ export interface AttestAttachOptions {
 	readonly cupboardPath?: string;
 	readonly cache?: string;
 	readonly audience?: string;
-	readonly readUser?: string;
-	readonly readPassword?: string;
 	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
 	readonly bundle: readonly string[];
@@ -63,8 +63,7 @@ export interface AttestAttachInputs {
 	readonly cupboardPath: string;
 	readonly cache: CacheScope;
 	readonly audience: string;
-	readonly readUser: string;
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret | '';
 	readonly receiptFile: string;
 	readonly checksumsFile: string;
 	readonly bundles: readonly string[];
@@ -74,6 +73,7 @@ export interface AttestAttachInputs {
 export interface AttestAttachDependencies {
 	readonly detectCacheSelectionSyntax?: typeof detectCacheSelectionSyntax;
 	readonly inspectCommandOptions?: typeof inspectCommandOptions;
+	readonly inspectVersion?: typeof inspectCupboardVersion;
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly signal?: AbortSignal;
 }
@@ -100,11 +100,6 @@ export function registerAttestAttachCommand(
 		)
 		.option('--cache <name>', 'named cache that received the paths')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
-		.option('--read-user <user>', 'username for destination-cache reads')
-		.option(
-			'--read-password <password>',
-			'password for destination-cache reads'
-		)
 		.requiredOption(
 			'--receipt-file <path>',
 			'receipt for paths published by this run'
@@ -131,7 +126,8 @@ export function registerAttestAttachCommand(
 }
 
 export function resolveAttestAttachInputs(
-	options: AttestAttachOptions
+	options: AttestAttachOptions,
+	environment: Environment = {}
 ): AttestAttachInputs {
 	const url = providedUrl('url', options.url);
 
@@ -164,24 +160,16 @@ export function resolveAttestAttachInputs(
 		throw new AttestationBundlesMissingError();
 	}
 
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
-
-	if (readUser !== '' && readPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-
-	if (readPassword !== '' && readUser === '') {
-		throw new ReadUserRequiredError();
-	}
-
 	return {
 		url,
 		cupboardPath,
 		cache: providedCacheSelection(options.cache),
 		audience: provided(options.audience) ?? '',
-		readUser,
-		readPassword,
+		accessKey: resolveAccessKey(
+			providedAccessKey('access-key', environment.ACCESS_KEY),
+			environment,
+			'cache'
+		),
 		receiptFile,
 		checksumsFile,
 		bundles: options.bundle,
@@ -190,8 +178,9 @@ export function resolveAttestAttachInputs(
 }
 
 /**
-Attaching uses GitHub OIDC and operates on paths already published by the
-run. The command must not include upload or retention flags.
+Attaching uses the access key when the action has one, and GitHub OIDC
+otherwise. It operates on paths already published by the run, so the command
+must not include upload or retention flags.
 */
 export function attestAttachInvocation(
 	inputs: AttestAttachInputs,
@@ -199,10 +188,7 @@ export function attestAttachInvocation(
 	cacheSyntax: CacheSelectionSyntax,
 	manifests?: AttestationManifests
 ): CupboardInvocation {
-	const credential = readCredentialInvocation(
-		inputs.readUser,
-		inputs.readPassword
-	);
+	const credential = accessKeyInvocation(inputs.accessKey);
 	const arguments_ = [
 		'--no-colour',
 		'attest',
@@ -215,8 +201,12 @@ export function attestAttachInvocation(
 		...(manifests === undefined
 			? paths
 			: ['--paths-file', manifests.pathsFile]),
-		'--github-oidc',
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(inputs.accessKey === ''
+			? [
+					'--github-oidc',
+					...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+				]
+			: []),
 		...(cacheSyntax === 'flag' && inputs.cache.kind === 'named'
 			? ['--cache', inputs.cache.name]
 			: []),
@@ -273,10 +263,16 @@ export async function attestAttachAction(
 ): Promise<void> {
 	dependencies.signal?.throwIfAborted();
 
-	const inputs = resolveAttestAttachInputs({
-		...options,
-		readPassword: options.readPassword ?? environment.READ_PASSWORD
-	});
+	const inputs = resolveAttestAttachInputs(options, environment);
+
+	if (inputs.accessKey !== '') {
+		await requireAccessKeySupport(
+			inputs.cupboardPath,
+			dependencies.inspectVersion ?? inspectCupboardVersion,
+			dependencies.signal
+		);
+	}
+
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);

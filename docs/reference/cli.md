@@ -483,25 +483,23 @@ Discover stored attestation metadata for published paths. Use attest verify to
 verify bundles.
 
 Arguments:
-  url                         tenant URL (e.g.
-                              https://cupboard.example.workers.dev/t/<slug>)
-  paths                       published store paths to inspect
+  url                     tenant URL (e.g.
+                          https://cupboard.example.workers.dev/t/<slug>)
+  paths                   published store paths to inspect
 
 Options:
-  --paths-file <path>         read additional store paths from this file, one
-                              per line
-  --predicate-type <uri>      match this exact predicate type (repeatable;
-                              omitted means all types) (default: [])
-  --require-all               exit one when any requested path has no matching
-                              evidence
-  --read-user <user>          private cache read user (default:
-                              $CUPBOARD_READ_USER)
-  --read-password <password>  private cache read password (default:
-                              $CUPBOARD_READ_PASSWORD)
-  --github-oidc               acquire private cache read access with GitHub
-                              Actions OIDC
-  --audience <audience>       OIDC audience (default: the tenant URL)
-  -h, --help                  display help for command
+  --paths-file <path>     read additional store paths from this file, one per
+                          line
+  --predicate-type <uri>  match this exact predicate type (repeatable; omitted
+                          means all types) (default: [])
+  --require-all           exit one when any requested path has no matching
+                          evidence
+  --access-key <key>      access key for a private cache (default:
+                          $CUPBOARD_ACCESS_KEY)
+  --github-oidc           acquire private cache read access with GitHub Actions
+                          OIDC
+  --audience <audience>   OIDC audience (default: the tenant URL)
+  -h, --help              display help for command
 ```
 
 #### cupboard attest attach
@@ -520,8 +518,7 @@ Options:
   --paths-file <path>                         read additional published store paths from this file, one per line
   --github-oidc                               sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session
   --audience <audience>                       OIDC audience to request with --github-oidc (default: the tenant URL)
-  --read-user <user>                          user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>                  password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)
+  --access-key <key>                          access key that attaches attestations and reads the cache, in place of the login session (default: $CUPBOARD_ACCESS_KEY)
   --bundle, --attestation <bundle>            a Sigstore bundle file to attach (repeatable; both option names are equivalent). Every in-toto subject in the bundle must match one of the given store paths. (default: [])
   --bundles-file, --attestations-file <path>  read additional Sigstore bundle paths from this file, one per line (one manifest; both option names are equivalent)
   -h, --help                                  display help for command
@@ -547,8 +544,7 @@ Options:
   --url <url>                              tenant or cache URL to fetch the bundles from, such as https://cupboard.example.workers.dev/t/<slug> (use with --store-path-hash)
   --store-path-hash <hash>                 hash part of the store path whose bundles to fetch (use with --url)
   --bundle-digest <digest>                 verify only the bundle with this digest (needed when the cache has several bundles with the predicate type)
-  --read-user <user>                       user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>               password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)
+  --access-key <key>                       access key for a private cache (default: $CUPBOARD_ACCESS_KEY)
   --trusted-public-key <key>               require the store path's narinfo to be signed with this public key (cannot be used with --trust-cache-pubkey)
   --trust-cache-pubkey                     require the store path's narinfo to be signed with a key from the cache's /pubkey (cannot be used with --trusted-public-key)
   --predicate-type <type>                  in-toto predicate type that every bundle must have
@@ -603,6 +599,9 @@ Options:
   --github-oidc                     sign in with the job's GitHub Actions OIDC
                                     token instead of your saved `cupboard login`
                                     session
+  --access-key <key>                publish with this access key instead of your
+                                    saved `cupboard login` session (default:
+                                    $CUPBOARD_ACCESS_KEY)
   --audience <audience>             OIDC audience to request with --github-oidc
                                     (default: the tenant URL)
   --root <name>                     retain the pushed paths under this named
@@ -637,12 +636,8 @@ Options:
   --reference-source <url>          source cache URL for the paths in
                                     --reference-paths-file (required with
                                     --reference-paths-file)
-  --read-user <user>                user name of the read credential for a
-                                    private --reference-source (default:
-                                    $CUPBOARD_VIEW_READ_USER)
-  --read-password <password>        password of the read credential for a
-                                    private --reference-source (default:
-                                    $CUPBOARD_VIEW_READ_PASSWORD)
+  --view-access-key <key>           access key for a private --reference-source
+                                    (default: $CUPBOARD_VIEW_ACCESS_KEY)
   --run-root <name>                 also add each pushed path to this run root
                                     as soon as the cache accepts it. This works
                                     independently of --root, and also with
@@ -749,6 +744,9 @@ Options:
   --github-oidc                     sign in with the job's GitHub Actions OIDC
                                     token instead of your saved `cupboard login`
                                     session
+  --access-key <key>                publish with this access key instead of your
+                                    saved `cupboard login` session (default:
+                                    $CUPBOARD_ACCESS_KEY)
   --audience <audience>             OIDC audience to request with --github-oidc
                                     (default: the tenant URL)
   --root <name>                     when the build succeeds and the cache has
@@ -870,7 +868,7 @@ Arguments:
   command                                command to run after --
 
 Options:
-  --github-oidc                          use temporary GitHub Actions read access even if the cache is public or saved read credentials are present; requires id-token: write
+  --github-oidc                          use temporary GitHub Actions read access even if the cache is public or an access key is configured for it; requires id-token: write
   --audience <audience>                  OIDC audience (default: the tenant URL)
   --cache-metadata                       request access to cache configuration while using an existing credential to download paths
   --read-cache <cache-url>               additional cache in this tenant to include in the OIDC read session (repeatable) (default: [])
@@ -900,13 +898,12 @@ Arguments:
 Options:
   --include-default-cache     also add the tenant's default cache when you name
                               caches
-  --read-user <user>          user name of the tenant read credential, for a
-                              private cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>  password of the tenant read credential, for a
-                              private cache (default: $CUPBOARD_READ_PASSWORD)
-  --cache-credentials <json>  cache read credentials, as a JSON array of caches
-                              and their credentials (default:
-                              $CUPBOARD_CACHE_CREDENTIALS)
+  --access-key <key>          access key for private caches, printed as a netrc
+                              line (default: $CUPBOARD_ACCESS_KEY)
+  --cache-access-keys <json>  an access key for each of several caches, as a
+                              JSON array of caches and keys, written into the
+                              substituter URLs (default:
+                              $CUPBOARD_CACHE_ACCESS_KEYS)
   -h, --help                  display help for command
 ```
 
@@ -1068,6 +1065,9 @@ Options:
   --permanent            keep the root permanently
   --github-oidc          sign in with the job's GitHub Actions OIDC token
                          instead of your saved `cupboard login` session
+  --access-key <key>     sign in with this access key instead of your saved
+                         `cupboard login` session (default:
+                         $CUPBOARD_ACCESS_KEY)
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -1115,6 +1115,9 @@ Arguments:
 Options:
   --github-oidc          sign in with the job's GitHub Actions OIDC token
                          instead of your saved `cupboard login` session
+  --access-key <key>     sign in with this access key instead of your saved
+                         `cupboard login` session (default:
+                         $CUPBOARD_ACCESS_KEY)
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -1138,6 +1141,9 @@ Options:
                          step writes, instead of one named root
   --github-oidc          sign in with the job's GitHub Actions OIDC token
                          instead of your saved `cupboard login` session
+  --access-key <key>     sign in with this access key instead of your saved
+                         `cupboard login` session (default:
+                         $CUPBOARD_ACCESS_KEY)
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -1430,11 +1436,12 @@ Options:
 Commands:
   create [options] <url>       Create an access key and print its secret once.
                                Its grants must be a subset of yours.
-  list <url>                   List the access keys whose grants you can see,
+  list [options] <url>         List the access keys whose grants you can see,
                                with their grants and expiry.
   delete [options] <url> <id>  Delete an access key and every key created below
-                               it. The read routes can accept a deleted key for
-                               up to five minutes.
+                               it. Reads can accept a deleted key for up to five
+                               minutes, and work that it started can continue
+                               for up to 15 minutes.
   help [command]               display help for command
 ```
 
@@ -1467,6 +1474,8 @@ Options:
   --no-expiry              create a key that does not expire; a credential that
                            expires needs access-key:create for every resource in
                            the grants
+  --access-key <key>       authenticate with this access key instead of your
+                           saved `cupboard login` session
   -h, --help               display help for command
 
 Example:
@@ -1483,10 +1492,13 @@ Usage: cupboard access-key list [options] <url>
 List the access keys whose grants you can see, with their grants and expiry.
 
 Arguments:
-  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+  url                 tenant URL (e.g.
+                      https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  -h, --help  display help for command
+  --access-key <key>  authenticate with this access key instead of your saved
+                      `cupboard login` session
+  -h, --help          display help for command
 ```
 
 #### cupboard access-key delete
@@ -1494,16 +1506,20 @@ Options:
 ```text
 Usage: cupboard access-key delete [options] <url> <id>
 
-Delete an access key and every key created below it. The read routes can accept
-a deleted key for up to five minutes.
+Delete an access key and every key created below it. Reads can accept a deleted
+key for up to five minutes, and work that it started can continue for up to 15
+minutes.
 
 Arguments:
-  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  id          access key ID, as `cupboard access-key list` shows it
+  url                 tenant URL (e.g.
+                      https://cupboard.example.workers.dev/t/<slug>)
+  id                  access key ID, as `cupboard access-key list` shows it
 
 Options:
-  -y, --yes   delete without the confirmation prompt
-  -h, --help  display help for command
+  -y, --yes           delete without the confirmation prompt
+  --access-key <key>  authenticate with this access key instead of your saved
+                      `cupboard login` session
+  -h, --help          display help for command
 ```
 
 ### cupboard control-key
@@ -2628,8 +2644,7 @@ Options:
   --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. An exact refs/heads/<branch> reference requires --allow-branch-workflow and accepts future workflow edits. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.
   --allow-branch-workflow                                   also accept an exact refs/heads/<branch> workflow reference; trust rules will accept future edits to that branch workflow
   -y, --yes                                                 remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.
-  --read-user <user>                                        user name of a read credential for checking private cache information
-  --read-password <password>                                password of the read credential
+  --access-key <key>                                        access key for reading private cache and view metadata; it does not select access mode or workflow grants (default: $CUPBOARD_ACCESS_KEY)
   --trusted-contributor-reuse                               allow branch runs to reuse only the merged PR cache; requires the trusted workflow and pull-requests: read
   --access, --cache-access-mode <mode>                      read access for new pull-request caches: public or private (default: the tenant default cache access); does not change the default cache
   -h, --help                                                display help for command
@@ -2656,8 +2671,7 @@ Options:
   --trust-scope <scope>                                     which cupboard workflow references the repair's new trust rules accept: exact (the references that the workflows use now) or tag-pattern (release tags that match --tag-pattern) (choices: "exact", "tag-pattern")
   --tag-pattern <glob>                                      release tag pattern that new trust rules accept, such as v* (without refs/tags/); github setup instead includes refs/tags/v* in --workflow-ref
   --root-prefix <value>                                     the root-prefix value that the repository's workflow passes
-  --read-user <user>                                        user name of a read credential for checking private cache and view metadata; it does not select access mode or workflow grants
-  --read-password <password>                                password of the read credential
+  --access-key <key>                                        access key for reading private cache and view metadata; it does not select access mode or workflow grants (default: $CUPBOARD_ACCESS_KEY)
   -h, --help                                                display help for command
 
 Exits 1 if any check failed, and 69 if no check failed but at least one
@@ -2740,10 +2754,8 @@ Options:
   --targets-file <path>                         JSON file that describes the cohort's targets
   --reference-source <url>                      cache URL to query for publication by reference
   --reuse-view <name>                           reuse view to query for store paths that other caches already have
-  --read-user <user>                            user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>                    password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)
-  --view-read-user <user>                       user name of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_USER)
-  --view-read-password <password>               password of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_PASSWORD)
+  --access-key <key>                            access key that reads the cache and, when the plan publishes, sets its roots, in place of the login session (default: $CUPBOARD_ACCESS_KEY)
+  --view-access-key <key>                       access key for a private reuse view or reference source (default: $CUPBOARD_VIEW_ACCESS_KEY)
   --ttl <duration>                              TTL for the roots that the plan sets for targets that the cache already has
   --permanent                                   keep those roots permanently
   --github-oidc                                 sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session
@@ -2776,45 +2788,38 @@ cache of the tenant has, record the build inputs of the ones that the cache has,
 and attach the ones whose build inputs cannot be recorded to the run root.
 
 Arguments:
-  url                              tenant URL (e.g.
-                                   https://cupboard.example.workers.dev/t/<slug>)
-  cache                            cache name, if the URL is a tenant URL
+  url                        tenant URL (e.g.
+                             https://cupboard.example.workers.dev/t/<slug>)
+  cache                      cache name, if the URL is a tenant URL
 
 Options:
-  --graph-file <path>              JSON dependency graph document, version 1, as
-                                   dependencyGraphDocumentSchema in
-                                   @cupboard/protocol defines it
-  --run-root <name>                run root for the copied paths and for the
-                                   paths whose build inputs cannot be recorded
-  --run-root-ttl <duration>        expire the run root after this duration (e.g.
-                                   7d, 12h)
-  --run-root-permanent             keep the run root permanently
-  --record-build-inputs            record build inputs on the paths that the
-                                   cache already has, which needs the
-                                   build-inputs:record grant. Without this
-                                   option, the run root keeps those paths.
-  --reference-source <url>         cache URL or reuse view URL to copy absent
-                                   dependency outputs from, read with the view
-                                   read credential
-  --read-cache <url>               another cache of the tenant to copy absent
-                                   dependency outputs from, read with the run's
-                                   read session (repeatable) (default: [])
-  --read-user <user>               user name of the read credential for a
-                                   private cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>       password of the read credential for a private
-                                   cache (default: $CUPBOARD_READ_PASSWORD)
-  --view-read-user <user>          user name of the read credential for a
-                                   private reference source (default:
-                                   $CUPBOARD_VIEW_READ_USER)
-  --view-read-password <password>  password of the read credential for a private
-                                   reference source (default:
-                                   $CUPBOARD_VIEW_READ_PASSWORD)
-  --github-oidc                    sign in with the job's GitHub Actions OIDC
-                                   token instead of your saved `cupboard login`
-                                   session
-  --audience <audience>            OIDC audience to request with --github-oidc
-                                   (default: the tenant URL)
-  -h, --help                       display help for command
+  --graph-file <path>        JSON dependency graph document, version 1, as
+                             dependencyGraphDocumentSchema in @cupboard/protocol
+                             defines it
+  --run-root <name>          run root for the copied paths and for the paths
+                             whose build inputs cannot be recorded
+  --run-root-ttl <duration>  expire the run root after this duration (e.g. 7d,
+                             12h)
+  --run-root-permanent       keep the run root permanently
+  --record-build-inputs      record build inputs on the paths that the cache
+                             already has, which needs the build-inputs:record
+                             grant. Without this option, the run root keeps
+                             those paths.
+  --reference-source <url>   cache URL or reuse view URL to copy absent
+                             dependency outputs from, read with the view access
+                             key
+  --read-cache <url>         another cache of the tenant to copy absent
+                             dependency outputs from, read with the run's read
+                             session (repeatable) (default: [])
+  --access-key <key>         access key for a private cache (default:
+                             $CUPBOARD_ACCESS_KEY)
+  --view-access-key <key>    access key for a private reference source (default:
+                             $CUPBOARD_VIEW_ACCESS_KEY)
+  --github-oidc              sign in with the job's GitHub Actions OIDC token
+                             instead of your saved `cupboard login` session
+  --audience <audience>      OIDC audience to request with --github-oidc
+                             (default: the tenant URL)
+  -h, --help                 display help for command
 ```
 
 #### cupboard plan measure
@@ -2842,28 +2847,20 @@ Automation helper for the flake publish workflow. Just before the build starts,
 check which planned targets still need to be built.
 
 Arguments:
-  url                              tenant URL (e.g.
-                                   https://cupboard.example.workers.dev/t/<slug>)
-  cache                            cache name, if the URL is a tenant URL
+  url                       tenant URL (e.g.
+                            https://cupboard.example.workers.dev/t/<slug>)
+  cache                     cache name, if the URL is a tenant URL
 
 Options:
-  --targets-file <path>            JSON file that describes the targets to be
-                                   built
-  --reference-source <url>         cache URL to query for publication by
-                                   reference
-  --reuse-view <name>              reuse view to query for store paths that
-                                   other caches already have
-  --read-user <user>               user name of the read credential for a
-                                   private cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>       password of the read credential for a private
-                                   cache (default: $CUPBOARD_READ_PASSWORD)
-  --view-read-user <user>          user name of the read credential for a
-                                   private reuse view (default:
-                                   $CUPBOARD_VIEW_READ_USER)
-  --view-read-password <password>  password of the read credential for a private
-                                   reuse view (default:
-                                   $CUPBOARD_VIEW_READ_PASSWORD)
-  -h, --help                       display help for command
+  --targets-file <path>     JSON file that describes the targets to be built
+  --reference-source <url>  cache URL to query for publication by reference
+  --reuse-view <name>       reuse view to query for store paths that other
+                            caches already have
+  --access-key <key>        access key for a private cache (default:
+                            $CUPBOARD_ACCESS_KEY)
+  --view-access-key <key>   access key for a private reuse view or reference
+                            source (default: $CUPBOARD_VIEW_ACCESS_KEY)
+  -h, --help                display help for command
 ```
 
 ### cupboard document-versions

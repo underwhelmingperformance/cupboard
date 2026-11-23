@@ -21,8 +21,8 @@ import {
 	pullRequestViewName
 } from './convention.ts';
 import {
-	type DiscoveredPublishingJob,
-	type ReadCredentialWiring
+	type AccessKeyWiring,
+	type DiscoveredPublishingJob
 } from './discovery.ts';
 import {
 	isPresetJob,
@@ -43,9 +43,9 @@ export interface PublicationReadAuthority {
 	}[];
 	readonly viewAccess?: CacheAccessMode;
 	readonly selectedViewAccess?: CacheAccessMode;
-	readonly cacheWiring: ReadCredentialWiring;
-	readonly viewWiring: ReadCredentialWiring;
-	readonly referenceWiring?: ReadCredentialWiring;
+	readonly cacheWiring: AccessKeyWiring;
+	readonly viewWiring: AccessKeyWiring;
+	readonly referenceWiring?: AccessKeyWiring;
 	readonly referenceAccess?: CacheAccessMode;
 }
 
@@ -122,8 +122,8 @@ export async function publicationReadAuthority(
 		cacheAccess = await fetchCacheAccess(cacheUrl(tenant, cache));
 	}
 	const view = publication.reuseView;
-	const cacheWiring = job.readCredentialWiring?.cache ?? 'none';
-	const viewWiring = job.readCredentialWiring?.view ?? 'none';
+	const cacheWiring = job.accessKeyWiring?.cache ?? 'none';
+	const viewWiring = job.accessKeyWiring?.view ?? 'none';
 	let viewAccess: CacheAccessMode | undefined;
 	let viewPriority = cachePrioritySchema.parse(50);
 

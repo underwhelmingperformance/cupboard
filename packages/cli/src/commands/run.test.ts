@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { abortable } from '../abort.ts';
 import { audienceSchema } from '../audience.ts';
 import { formatHumanError } from '../human-errors.ts';
+import { destinationAccessKey } from '../test-support.ts';
 
 import {
 	RunCommandFailedError,
@@ -133,48 +134,60 @@ describe('cupboard run', () => {
 		expect(waits).toStrictEqual([600_000]);
 	});
 
-	it('keeps a static netrc credential while acquiring metadata-only configuration facts', async () => {
-		const intents: unknown[] = [];
-		let netrc: string | undefined;
+	it.each([
+		{
+			name: 'an access key',
+			existing: `machine cupboard.example.workers.dev login cupboard password ${destinationAccessKey}\n`,
+			written: `machine cupboard.example.workers.dev login cupboard password ${destinationAccessKey}\n`
+		},
+		{
+			name: 'a password that is not an access key',
+			existing:
+				'machine cupboard.example.workers.dev login static password secret\n',
+			written:
+				'machine cupboard.example.workers.dev login cupboard-oidc password cupboard-access+jwt:example\n'
+		}
+	])(
+		'gives the child the read token or a configured access key for metadata-only facts: $name',
+		async ({ existing, written }) => {
+			const intents: unknown[] = [];
+			let netrc: string | undefined;
 
-		await runWithReadAccess(
-			target,
-			['nix', 'build'],
-			{ githubOidc: true, cacheMetadata: true },
-			{
-				storeConfig: configuration,
-				readFile: () =>
-					Promise.resolve(
-						'machine cupboard.example.workers.dev login static password secret\n'
-					),
-				issue: (input) => {
-					intents.push(input.resources);
-					return Promise.resolve(lease);
-				},
-				runChild: async ({ environment }) => {
-					const file = /netrc-file = ([^\n]+)/u.exec(
-						environment.NIX_CONFIG ?? ''
-					)?.[1];
+			await runWithReadAccess(
+				target,
+				['nix', 'build'],
+				{ githubOidc: true, cacheMetadata: true },
+				{
+					storeConfig: configuration,
+					readFile: () => Promise.resolve(existing),
+					issue: (input) => {
+						intents.push(input.resources);
+						return Promise.resolve(lease);
+					},
+					runChild: async ({ environment }) => {
+						const file = /netrc-file = ([^\n]+)/u.exec(
+							environment.NIX_CONFIG ?? ''
+						)?.[1];
 
-					if (file === undefined) {
-						throw new Error('The child must receive its static netrc');
+						if (file === undefined) {
+							throw new Error('The child must receive a netrc');
+						}
+
+						netrc = await readFile(file, 'utf8');
+
+						return { status: 0, signal: undefined };
 					}
-
-					netrc = await readFile(file, 'utf8');
-
-					return { status: 0, signal: undefined };
 				}
-			}
-		);
+			);
 
-		expect({ intents, netrc }).toStrictEqual({
-			intents: [
-				[{ type: 'cupboard_cache', cache: target.cache, mode: 'metadata' }]
-			],
-			netrc:
-				'machine cupboard.example.workers.dev login static password secret\nmachine cupboard.example.workers.dev login static password secret\n'
-		});
-	});
+			expect({ intents, netrc }).toStrictEqual({
+				intents: [
+					[{ type: 'cupboard_cache', cache: target.cache, mode: 'metadata' }]
+				],
+				netrc: `${written}${existing}`
+			});
+		}
+	);
 
 	it.each(['cache', 'view'] as const)(
 		'replaces incidental netrc credentials for a metadata primary and OIDC %s',

@@ -5,7 +5,6 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import {
 	AttestationPredicateTypeMismatchError,
 	AttestationSubjectMismatchError,
@@ -20,6 +19,10 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { cliExitCode } from '../cli.ts';
+import {
+	accessKeyAuthorization,
+	destinationAccessKey
+} from '../test-support.ts';
 
 import {
 	RemoteAttestationBundleDigestMismatchError,
@@ -657,8 +660,7 @@ describe('remote attestation verification', () => {
 				url: new URL('https://cupboard.test/t/acme'),
 				cache: { kind: 'named', name: cacheNameSchema.parse('builds') },
 				storePathHash,
-				readUser: readUserInputSchema.parse('reader'),
-				readPassword: 'secret',
+				accessKey: destinationAccessKey,
 				trustCachePubkey: true,
 				predicateType,
 				trustedRoot,
@@ -699,7 +701,7 @@ describe('remote attestation verification', () => {
 		expect(recordedCalls).toStrictEqual([
 			{
 				url: 'https://cupboard.test/t/acme/cache/builds/0123456789abcdfghijklmnpqrsvwxyz.narinfo',
-				authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+				authorisation: accessKeyAuthorization(destinationAccessKey)
 			},
 			{
 				url: 'https://cupboard.test/t/acme/pubkey',
@@ -707,11 +709,11 @@ describe('remote attestation verification', () => {
 			},
 			{
 				url: 'https://cupboard.test/t/acme/cache/builds/attestations/0123456789abcdfghijklmnpqrsvwxyz',
-				authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+				authorisation: accessKeyAuthorization(destinationAccessKey)
 			},
 			{
 				url: `https://cupboard.test/t/acme/cache/builds/attestation-bundles/${bundleDigest}`,
-				authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+				authorisation: accessKeyAuthorization(destinationAccessKey)
 			}
 		]);
 	});
@@ -758,8 +760,7 @@ describe('remote attestation verification', () => {
 				url: new URL('https://cupboard.test/t/acme'),
 				cache: { kind: 'named', name: cacheNameSchema.parse('ci') },
 				storePathHash,
-				readUser: readUserInputSchema.parse('reader'),
-				readPassword: 'secret',
+				accessKey: destinationAccessKey,
 				trustedPublicKey: narInfo.publicKey,
 				predicateType,
 				trustedRoot,
@@ -787,15 +788,15 @@ describe('remote attestation verification', () => {
 			calls: [
 				{
 					url: `${base}/${storePathHash}.narinfo`,
-					authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+					authorisation: accessKeyAuthorization(destinationAccessKey)
 				},
 				{
 					url: `${base}/attestations/${storePathHash}`,
-					authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+					authorisation: accessKeyAuthorization(destinationAccessKey)
 				},
 				{
 					url: `${base}/attestation-bundles/${bundleDigest}`,
-					authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+					authorisation: accessKeyAuthorization(destinationAccessKey)
 				}
 			],
 			withUserinfo: []

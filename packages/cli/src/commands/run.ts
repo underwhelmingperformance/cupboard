@@ -11,6 +11,10 @@ import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import { isSameCacheScope } from '@cupboard/nix-store/scalars';
 import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
 import {
+	type AccessKeySecret,
+	accessKeySecretSchema
+} from '@cupboard/protocol/access-keys';
+import {
 	readAccessFileEnvironment,
 	type ReadResource,
 	readResourcesSchema
@@ -23,6 +27,7 @@ import { type BasicCredential, readUserSchema } from '@cupboard/shared/http';
 import { type Command, InvalidArgumentError } from 'commander';
 
 import { throwIfAborted } from '../abort.ts';
+import { basicCredentialForAccessKey } from '../access-key-options.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	issueGithubReadCredential,
@@ -249,13 +254,15 @@ export async function runWithReadAccess(
 		);
 	}
 
-	const cacheCredential =
+	const cacheAccessKey =
 		targetUrl === undefined
 			? undefined
-			: staticCredentialFor(
-					targetUrl,
-					storeConfig.substitution.substituters,
-					configuredNetrc
+			: accessKeyOf(
+					configuredCredentialFor(
+						targetUrl,
+						storeConfig.substitution.substituters,
+						configuredNetrc
+					)
 				);
 	const requiresCacheOidc = targetUrl !== undefined;
 	const requiresViewOidc = viewUrl !== undefined;
@@ -318,7 +325,7 @@ export async function runWithReadAccess(
 				? cacheUrl(target.tenantUrl, resource.cache)
 				: reuseViewUrl(target.tenantUrl, resource.view);
 		if (
-			staticCredentialFor(
+			configuredCredentialFor(
 				resourceUrl,
 				storeConfig.substitution.substituters,
 				undefined
@@ -351,7 +358,7 @@ export async function runWithReadAccess(
 				});
 
 				if (
-					cacheCredential !== undefined &&
+					cacheAccessKey !== undefined &&
 					resources.every(
 						(resource) =>
 							resource.type === 'cupboard_cache' && resource.mode === 'metadata'
@@ -359,8 +366,7 @@ export async function runWithReadAccess(
 				) {
 					return {
 						...credential,
-						user: cacheCredential.user,
-						password: cacheCredential.password
+						...basicCredentialForAccessKey(cacheAccessKey)
 					};
 				}
 
@@ -442,7 +448,19 @@ async function readConfiguredNetrc(
 	}
 }
 
-function staticCredentialFor(
+/**
+Returns the access key in a configured credential, or undefined when there is
+no credential or its password is not an access key.
+*/
+function accessKeyOf(
+	credential: BasicCredential | undefined
+): AccessKeySecret | undefined {
+	const parsed = accessKeySecretSchema.safeParse(credential?.password);
+
+	return parsed.success ? parsed.data : undefined;
+}
+
+function configuredCredentialFor(
 	url: URL,
 	substituters: readonly string[],
 	netrc: string | undefined
@@ -526,7 +544,7 @@ export function registerRunCommand(
 		.argument('<command...>', 'command to run after --')
 		.option(
 			'--github-oidc',
-			'use temporary GitHub Actions read access even if the cache is public or saved read credentials are present; requires id-token: write'
+			'use temporary GitHub Actions read access even if the cache is public or an access key is configured for it; requires id-token: write'
 		)
 		.option(
 			'--audience <audience>',

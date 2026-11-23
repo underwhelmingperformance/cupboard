@@ -1,6 +1,7 @@
 import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
+import { parseAccessKey } from '../access-key-options.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -10,7 +11,6 @@ import {
 	reprobeAvailability
 } from '../plan/availability-reprobe.ts';
 import type { CohortTarget } from '../plan/cohort-target.ts';
-import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import {
@@ -59,22 +59,14 @@ export function registerPlanReprobeCommand(
 			'reuse view to query for store paths that other caches already have'
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
-			parseReadUser
+			'--access-key <key>',
+			'access key for a private cache (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
-			'--read-password <password>',
-			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
-		)
-		.option(
-			'--view-read-user <user>',
-			'user name of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--view-read-password <password>',
-			'password of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_PASSWORD)'
+			'--view-access-key <key>',
+			'access key for a private reuse view or reference source (default: $CUPBOARD_VIEW_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.action(
 			async (

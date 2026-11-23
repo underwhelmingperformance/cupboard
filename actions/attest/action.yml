@@ -61,11 +61,13 @@ inputs:
   read-session-view:
     description: Pass the read-session-view output from actions/setup.
     required: false
-  read-user:
-    description: User name of a read credential for a private destination cache.
-    required: false
-  read-password:
-    description: Password of a read credential for a private destination cache.
+  access-key:
+    description:
+      Access key for a private destination cache, as `cupboard access-key
+      create` prints it. With it, the action reads the cache and attaches
+      attestations with the key instead of the job's OIDC token, so the key
+      needs the attestation grants. When the input is empty, the action uses the
+      CUPBOARD_ACCESS_KEY environment variable.
     required: false
   github-token:
     description:
@@ -205,8 +207,7 @@ runs:
         READ_SESSION_AUDIENCE: ${{ inputs.audience }}
         READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
-        READ_USER: ${{ inputs.read-user }}
-        READ_PASSWORD: ${{ inputs.read-password }}
+        ACCESS_KEY: ${{ inputs.access-key }}
       run: |
         verified_directory="$(mktemp -d "$RUNNER_TEMP/cupboard-attest-check.XXXXXX")"
         source "$GITHUB_ACTION_PATH/../read-session.sh"
@@ -220,7 +221,6 @@ runs:
             --verified-checksums-file "$verified_directory/verified-subjects.txt" \
             --url "$URL" \
             --cache "$CACHE" \
-            --read-user "$READ_USER"
 
     - name: Sign the attestation statements
       id: attest
