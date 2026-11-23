@@ -1,8 +1,8 @@
 # Operators
 
 An **operator** administers the deployment as a whole. An operator can create
-and remove tenants, issue read credentials, and deploy upgrades. The first
-operator is the deployment's **admin**: whoever
+and remove tenants and deploy upgrades. The first operator is the deployment's
+**admin**: whoever
 [claimed the deployment](./deploying.md#claiming-the-deployment) when they first
 ran `cupboard init`. The deployment records the admin in the `global_admin` row
 of its D1 database.

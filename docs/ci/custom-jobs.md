@@ -260,9 +260,9 @@ in the trust rules that match the job. The tenant refuses a job token whose
 audience is not the tenant URL, so leave setup's `audience` input unset or set
 it to the tenant URL.
 
-A tenant read credential can also read a private view. A cache read credential
-only reads its cache; use the destination credential inputs for that pair and
-OIDC for the view.
+An access key with `view:content-read` can also read a private view. `setup`
+writes the key from `access-key` to a netrc file, so Nix uses it for the view as
+well as the caches.
 
 ### Trust rules for these jobs
 
@@ -344,38 +344,39 @@ as well as named caches, set `include-default-cache: true`.
 
 #### Private caches
 
-There are three ways to give `setup` credentials, depending on what you're
-reading:
+Without a key, `setup` reads private caches with the job's OIDC token, as
+[Private caches in CI](./private-caches.md) describes. There are three ways to
+give `setup` an [access key](../admin/access.md#access-keys) instead:
 
-- To use the tenant read credential, pass it as `read-user` and `read-password`.
-  `setup` writes it to a netrc file. Nix uses it for authorised caches that
-  don't have their own credential and for private views in the tenant. Because
-  netrc uses the hostname as its machine key, other tenants on that host need
-  their own complete URL credentials or separate jobs.
-- To use cache read credentials, pass a single cache's credential as
-  `destination-read-user` and `destination-read-password`. For several caches,
-  pass `cache-credentials`, a JSON array with one entry per cache:
+- Pass one key as `access-key`. `setup` writes it to a netrc file. Nix uses it
+  for the selected caches that don't have their own key, and for the reuse view.
+  Because netrc uses the hostname as its machine key, Nix also sends the key to
+  other tenants on that host. They need their own complete URL credentials or
+  separate jobs.
+- To give caches different keys, pass `cache-access-keys`, a JSON array with one
+  entry per cache:
 
   ```json
   [
     {
       "cache": { "kind": "named", "name": "release" },
-      "credential": { "user": "cupboard", "password": "..." }
+      "accessKey": "cupboard_ak_..."
     }
   ]
   ```
 
   Each entry must refer to one of the selected caches, and each cache can appear
-  only once. `setup` puts these credentials into the cache's substituter URL.
+  only once. `setup` puts each key into its cache's substituter URL.
 
 - To read from private caches that the job doesn't publish to, pass them in
   `private-substituters`, one URL per line, with the username and password in
   each URL. Each URL must use HTTPS, or HTTP to a loopback host. Pass the value
   from a secret. Nix still needs each cache's public key.
 
-`setup` hides every password, and every URL that contains one, in the job log.
-Pass `read-password` from a secret too, so that the runner hides it. This only
-affects the log, so never write credentials into artefacts or job summaries.
+`setup` hides every key and password, and every URL that contains one, in the
+job log. Pass `access-key` and `cache-access-keys` from secrets too, so that the
+runner hides them. This only affects the log, so never write credentials into
+artefacts or job summaries.
 
 #### Reuse views
 

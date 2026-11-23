@@ -73,14 +73,13 @@ Each tenant is charged once for each distinct NAR and attestation bundle that it
 refers to. NARs use their compressed file size; attestation bundles use their
 stored byte length.
 
-## Read credentials
+## Access keys
 
 Nix reads a private cache with a username and password, sent as HTTP Basic
-credentials. There are two kinds of read credential: the **tenant read
-credential** and a **cache read credential**, which belongs to a single cache.
-Only the operator can issue them.
-[Read credentials](./use/private-caches.md#read-credentials) explains which one
-a cache accepts.
+credentials. The password is an **access key**: a long-lived secret that a
+tenant administrator creates, with its own grants and usually an expiry. A key
+can also publish, so a CI system without OIDC can use one. See
+[Access keys](./admin/access.md#access-keys).
 
 ## Signing in and trust rules
 

@@ -114,7 +114,7 @@ checks that the tenant exists (this is called admission), authenticates reads
 from private caches, and makes the final decision on whether a write is allowed.
 It then passes the request on to the tenant's Durable Object when needed.
 
-The raw cache read probes use the same read credentials as the Nix routes.
+The raw cache read probes accept the same credentials as the Nix routes.
 Availability and attestation probes report cache state; the metadata probe
 returns complete narinfos for a bounded page of store paths. For public caches,
 the metadata probe admits the page once and reads each canonical narinfo through
@@ -139,10 +139,10 @@ at most six simultaneous object reads. Requests are limited to 64 KiB, lists to
 1 MiB and responses to 4 MiB. A partial page reports `nextIndex` after the
 processed prefix. The next request submits the remaining hashes and the previous
 page's `scopeVersion` as `expectedScopeVersion`. Lifecycle or access changes
-produce a `scope-changed` refusal. Private pages revalidate read credentials
-before returning. Malformed and oversized lists produce typed errors; provider
-failures remain temporary failures. Generation checks retain the existing
-acceptance of public lists without valid generation metadata.
+produce a `scope-changed` refusal. Private pages revalidate the request's
+credential before returning. Malformed and oversized lists produce typed errors;
+provider failures remain temporary failures. Generation checks retain the
+existing acceptance of public lists without valid generation metadata.
 
 The read capability header advertises `attestation-info-v1`. Clients may use
 bounded individual list reads when this capability is absent. An authentication
@@ -474,25 +474,25 @@ and recovery requirements.
 
 The remaining tables in `CUPBOARD_DB` include:
 
-| Table                                   | What it stores                                                                                                               |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `tenant`                                | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
-| `tenant_cache_read_credential`          | The verifier for each cache that has its own read credential.                                                                |
-| `cache_lifecycle_storage`               | Each cache's access mode, generation, read revision and deletion time.                                                       |
-| `path_read_revocation`                  | Per-path revocation fences and pending demotion of readable references.                                                      |
-| `blob_state`                            | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
-| `blob_ref_storage`                      | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
-| `tenant_blob`, `tenant_cas_blob`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
-| `tenant_usage`                          | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
-| `cas_object`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                             |
-| `object_incarnation`, `object_deletion` | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
-| `deployment_transition`                 | The state of each schema transition that the deploy has started.                                                             |
-| `deployment_phase`                      | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
-| `local_step_wake_cursor`                | No longer read. A later transition's contract migrations will drop it.                                                       |
-| `manifest_state`                        | Kept for older databases. Nothing reads it.                                                                                  |
-| `tenant_maintenance_eligibility`        | Hints about which tenants to wake.                                                                                           |
-| `instance_config`                       | The deployment's instance name.                                                                                              |
-| `backfill_purge_pace`                   | One row with the earliest time at which any tenant's signing-key backfill may send its next cache purge request.             |
+| Table                                   | What it stores                                                                                                                                     |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenant`                                | The list of tenants: status, owner identity, config version and maintenance position. Its retired static read-credential columns are always empty. |
+| `tenant_cache_read_credential`          | Nothing. The table is retired, and no runtime service reads or writes it.                                                                          |
+| `cache_lifecycle_storage`               | Each cache's access mode, generation, read revision and deletion time.                                                                             |
+| `path_read_revocation`                  | Per-path revocation fences and pending demotion of readable references.                                                                            |
+| `blob_state`                            | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                                         |
+| `blob_ref_storage`                      | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads.                       |
+| `tenant_blob`, `tenant_cas_blob`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                                         |
+| `tenant_usage`                          | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                                        |
+| `cas_object`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                                                   |
+| `object_incarnation`, `object_deletion` | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                                                   |
+| `deployment_transition`                 | The state of each schema transition that the deploy has started.                                                                                   |
+| `deployment_phase`                      | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.                               |
+| `local_step_wake_cursor`                | No longer read. A later transition's contract migrations will drop it.                                                                             |
+| `manifest_state`                        | Kept for older databases. Nothing reads it.                                                                                                        |
+| `tenant_maintenance_eligibility`        | Hints about which tenants to wake.                                                                                                                 |
+| `instance_config`                       | The deployment's instance name.                                                                                                                    |
+| `backfill_purge_pace`                   | One row with the earliest time at which any tenant's signing-key backfill may send its next cache purge request.                                   |
 
 Some of these tables are written by only one party. A tenant's Durable Object is
 the only thing that writes that tenant's `blob_ref` and `tenant_blob` rows.
@@ -750,17 +750,13 @@ filter can lack a new tenant until the next filter write. Tenant creation then
 fails with `TENANT_MEMBERSHIP_UNPUBLISHED`, a 503 with the tenant and a retry
 delay, because admission does not read the marker while the filter excludes the
 tenant. The tenant's row and marker exist. The create is idempotent only for an
-identical request, including the same read password, so repeating that request
-publishes the filter. `cupboard tenant create` repeats it twice, after the delay
-that the response gives, capped at 10 seconds. When the third request fails too,
-or a later request fails in another way after this answer, the command prints
-the generated read password as a result, then exits with an error that says the
-tenant exists, with the generic exit code. The error itself never contains the
-password. A new run would generate a different password, which the deployment
-refuses for the existing tenant. Running `cupboard deploy` again publishes the
-filter for every tenant, because the deploy rebuilds the membership.
-`cupboard tenant rotate-credential` replaces a lost read password, but it does
-not publish the filter.
+identical request, so repeating that request publishes the filter.
+`cupboard tenant create` repeats it twice, after the delay that the response
+gives, capped at 10 seconds. When the third request fails too, or a later
+request fails in another way after this answer, the command exits with an error
+that says the tenant exists, with the generic exit code. Running
+`cupboard deploy` again publishes the filter for every tenant, because the
+deploy rebuilds the membership.
 
 Other colos can serve the previous filter for up to about 70 seconds after a
 write: KV can serve a value up to 60 seconds old, and the Cache API keeps each
@@ -1160,14 +1156,12 @@ steps:
 1. The control Worker parses `/t/<tenant>/[cache/<name>/]...` from the raw path.
    It refuses a tenant slug or cache name that's percent-encoded.
 2. It checks that the tenant exists. First it checks the membership filter and
-   the KV marker. Then it reads the tenant's row, and the addressed cache's
-   lifecycle and read-credential verifier, from D1 in one batch. An unknown
-   tenant gets a 404. So does a read from a tenant that isn't active. A read
-   from a deleted cache gets a 404 after authentication.
-3. If the cache is private, the control Worker authenticates the request. For
-   static HTTP Basic credentials, it uses the cache's own salted verifier if the
-   cache has one, and the tenant's verifier otherwise. For an access token, it
-   calls the tenant's Durable Object to verify the JWT and its
+   the KV marker. Then it reads the tenant's row and the addressed cache's
+   lifecycle from D1 in one batch. An unknown tenant gets a 404. So does a read
+   from a tenant that isn't active. A read from a deleted cache gets a 404 after
+   authentication.
+3. If the cache is private, the control Worker authenticates the request. For an
+   access token, it calls the tenant's Durable Object to verify the JWT and its
    `cache:content-read` grant for the addressed cache. For an access key, it
    uses the key's grants from its isolate's key cache, or asks the object to
    verify the key on a miss, and checks the same grant. The control Worker then
@@ -1462,13 +1456,12 @@ stuck joins it again. A fill that has sent its headers and then stalls before
 the first byte of the body is a known gap: Nix retries it with a plain GET,
 which can join the same stuck fill again, up to Nix's `download-attempts`.
 
-Public narinfo and NAR reads, and private reads authenticated by static
-credentials, do not wake the tenant's Durable Object. Token-authenticated
-private reads call the object once per HTTP request; the NAR stream stays on the
-control Worker. A private read with an access key calls the object only when the
-control Worker's isolate has not verified that key in the last five minutes.
-These reads also use the object: `nix-cache-info`, the public key, attestations,
-availability queries, and reuse views.
+Public narinfo and NAR reads do not wake the tenant's Durable Object.
+Token-authenticated private reads call the object once per HTTP request; the NAR
+stream stays on the control Worker. A private read with an access key calls the
+object only when the control Worker's isolate has not verified that key in the
+last five minutes. These reads also use the object: `nix-cache-info`, the public
+key, attestations, availability queries, and reuse views.
 
 The key cache is in the isolate's memory, keyed by tenant and key id, and keeps
 at most 1,000 keys. Each entry has the hash of the key's secret, its grants and
@@ -1479,23 +1472,23 @@ with the stored hash, so a cached key never admits a wrong secret. The cache
 stores only verified keys. Someone who knows a key's id but not its secret could
 otherwise store a refusal under that id and lock out the key's holder.
 
-A private reuse view accepts the tenant's static credential, or an access token
-or access key with `view:content-read` for that view. A view grant does not
-authorise direct reads from the view's source caches. Content-read grants cannot
-select a root, and publication grants do not imply content-read permission. The
-existing `cache:read` operation authorises cache metadata through the admin API.
+A private reuse view accepts an access token or access key with
+`view:content-read` for that view. A view grant does not authorise direct reads
+from the view's source caches. Content-read grants cannot select a root, and
+publication grants do not imply content-read permission. The existing
+`cache:read` operation authorises cache metadata through the admin API.
 
 Nix sends a credential through HTTP Basic authentication. A password that starts
 with `cupboard_ak_` is an access key, and a password of the form
 `cupboard-access+jwt:<token>` is an access token. For either, the control Worker
-ignores the user name. Any other password is checked with the user name as a
-static read credential. Read endpoints also accept either kind of credential
-through Bearer authentication, without the `cupboard-access+jwt:` prefix.
-`cupboard run` exchanges a fresh GitHub OIDC token for narrowly scoped read
-access and renews it while its child command runs. It writes each replacement to
-a temporary netrc atomically, and selects that file through the child's
-`NIX_CONFIG`. Nix and Cupboard's direct HTTP readers reread the netrc for
-subsequent requests. When the command exits, the wrapper stops renewal and
+ignores the user name. Any other password presents no credential, so the request
+has only the resource's public grants. Read endpoints also accept either kind of
+credential through Bearer authentication, without the `cupboard-access+jwt:`
+prefix. `cupboard run` exchanges a fresh GitHub OIDC token for narrowly scoped
+read access and renews it while its child command runs. It writes each
+replacement to a temporary netrc atomically, and selects that file through the
+child's `NIX_CONFIG`. Nix and Cupboard's direct HTTP readers reread the netrc
+for subsequent requests. When the command exits, the wrapper stops renewal and
 removes the file. Removing the file does not revoke issued JWTs; normal token
 expiry and key retirement still apply. This lifecycle adds no per-token
 revocation state.
@@ -2605,8 +2598,8 @@ lists every key and secret, and how each is protected. In the code:
   private JWK is wrapped with AES-256-GCM under `CONTROL_KEY_WRAP_SECRET`.
 - Each tenant's narinfo signing keys and access-token keys are plain JWKs in the
   tenant object's SQLite, in the `signing_key` and `auth_key` tables.
-- Static read credentials are stored in D1 as a user name, a salt and a salted
-  SHA-256 hash. The server generates each password from 32 random bytes.
+- Access keys are stored in the tenant object's SQLite as the SHA-256 hash of
+  each secret. The server generates each secret from 32 random bytes.
 
 Tenant administrators can rotate signing keys and access-token keys through the
 admin API. When a signing key is rotated, the existing narinfos are re-signed in

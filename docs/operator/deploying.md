@@ -102,16 +102,16 @@ separate sign-in, so the token doesn't decide who becomes the admin.
    ```
 
 8. Create the first tenant. `init` asks whether the tenant's default cache is
-   public ("Anyone who learns the URL") or private ("Only clients with a read
-   credential").
+   public ("Anyone who learns the URL") or private ("Only clients with an access
+   key or a token").
 
    You can answer this and the slug prompt in advance with `--cache acme` and
    `--access public` or `--access private`. You become the tenant's owner. See
    [The first tenant](#the-first-tenant).
 
-9. Save the tenant read credential. `init` prints it along with the netrc line
-   that Nix needs for a private cache and the lines to add to `nix.conf`. The
-   password isn't shown again.
+9. Configure Nix. `init` prints the lines to add to `nix.conf`. For a private
+   cache, it also says which netrc file should contain each reader's access key.
+   Create the keys as [Access keys](../admin/access.md#access-keys) describes.
 
 `init` finishes with:
 
@@ -152,10 +152,6 @@ step of deployment.
   deploy: when the variable is set in the environment, `init` uploads its value
   on every deploy and replaces the Worker's secret. When the variable isn't set,
   `init` generates a value only if the control Worker doesn't have one yet.
-- The tenant read credential, shown when `init` creates the first tenant. The
-  user name is `cupboard` and the password is generated. The deployment only
-  keeps a salted hash of the password, not the password itself. If you lose the
-  password, replace the credential with `cupboard tenant rotate-credential`.
 
 `init` also shows `PUSH_ID_SIGNING_KEY`, with a note to save it, but you don't
 need a copy. Both Workers keep it. When a deploy finds that only one Worker has
@@ -321,12 +317,11 @@ domain, so check that the zone's other hosts work over HTTPS first. A browser
 remembers an HSTS header for its `max-age`, and the `includeSubDomains` option
 extends it to every subdomain. `init` doesn't change these settings.
 
-A redirect doesn't protect a client that sends a token or a read credential in
-its first request, because the credential crosses the network before the
-redirect arrives. The CLI refuses `http://` URLs except to loopback hosts. Nix
-and other clients still send such a request, and the Worker refuses it only
-after the credential has been sent. Use `https://` URLs in every Nix
-configuration.
+A redirect doesn't protect a client that sends a token or an access key in its
+first request, because the credential crosses the network before the redirect
+arrives. The CLI refuses `http://` URLs except to loopback hosts. Nix and other
+clients still send such a request, and the Worker refuses it only after the
+credential has been sent. Use `https://` URLs in every Nix configuration.
 
 ### Rate limiting
 

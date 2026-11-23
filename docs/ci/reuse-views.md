@@ -149,9 +149,9 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
 
 A private view accepts a read token with the exact `view:content-read` grant.
 The GitHub workflow obtains one through OIDC when its trust rule permits that
-view. An operator-issued tenant read credential also works as a static pair. A
-cache read credential does not work for a view, even over one cache, because a
-view can serve paths from any cache that it includes. See [Private caches in
+view. An access key with the same grant also works. A key that reads only caches
+does not read a view, even a view over one of those caches, because a view can
+serve paths from any cache that it includes. See [Private caches in
 CI][private-ci] for the workflow's read options.
 
 Publishing a path [by reference][by-reference] from a private view needs the

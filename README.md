@@ -8,14 +8,13 @@ cupboard is a [Nix] binary cache that you run on your own Cloudflare account.
   key, credentials and retention settings, so one deployment can serve every
   team in an organisation, and no tenant can see another's data.
 - A tenant can have as many caches as it needs, public or private. Private reads
-  need authorised credentials. Each cache can have its own static read
-  credential.
+  need an access key or a CI token with a content-read grant.
 - CI publishes without a stored push credential. A GitHub Actions job signs in
   with the OIDC token that GitHub already gives it. A job can also use OIDC for
-  private reads when its trust rules permit content reads. Static read
-  credentials remain available. See [Private reads in CI][private-ci-reads]. A
-  trust rule on your tenant says which repository, branch or pull request to
-  accept, and what that job may do. The signing key never leaves the server.
+  private reads when its trust rules permit content reads. See [Private reads in
+  CI][private-ci-reads]. A trust rule on your tenant says which repository,
+  branch or pull request to accept, and what that job may do. The signing key
+  never leaves the server.
 - Store paths are kept by named retention roots, which can expire, and a cache
   can also keep paths for a grace period. Garbage collection deletes every path
   that no root or grace period keeps, so a cache that CI fills every day doesn't
@@ -64,10 +63,9 @@ plain bucket, and lists what it can't do yet.
    and their storage, and creates your first tenant. The first `init` from a
    terminal also makes you the deployment's admin, after you confirm the
    identity that it shows. Run it from a terminal: a first `init` without one
-   leaves the deployment without an admin. `init` finishes by printing the
-   tenant's read credential and the lines to add to `nix.conf`.
-   [Deploying cupboard](./docs/operator/deploying.md) explains each step and
-   each choice.
+   leaves the deployment without an admin. `init` finishes by printing the lines
+   to add to `nix.conf`. [Deploying cupboard](./docs/operator/deploying.md)
+   explains each step and each choice.
 
    A later `init` upgrades the deployment and needs the admin's token. At a
    terminal it signs you in if needed. From CI, it needs a control-plane trust

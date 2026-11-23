@@ -40,9 +40,9 @@ The report distinguishes paths with matching stored attestations, published
 paths without matching evidence, and missing published paths. Omit
 `--predicate-type` to include every type, or repeat the option to match any of
 the exact predicate URIs. Use `--output-mode json` for structured results.
-Private caches accept the read credential options, a configured Nix netrc, or
-`--github-oidc` in GitHub Actions. OIDC credentials renew while discovery runs,
-and the temporary credential files are removed when the check ends.
+Private caches accept `--access-key`, a configured Nix netrc, or `--github-oidc`
+in GitHub Actions. OIDC credentials renew while discovery runs, and the
+temporary credential files are removed when the check ends.
 
 A successful status check exits zero even when some paths have no evidence. Pass
 `--require-all` to exit one when any requested path lacks matching evidence.
@@ -415,7 +415,8 @@ A few options change how the command reads from the cache:
 
 - `--trust-cache-pubkey` downloads the public key from the cache instead of
   taking it from `--trusted-public-key`.
-- For a private cache, pass `--read-user` and `--read-password`.
+- For a private cache, pass an access key in `--access-key` or
+  `CUPBOARD_ACCESS_KEY`.
 - If the cache has more than one bundle of the same predicate type for the path,
   for example after a rerun, choose one with `--bundle-digest`.
 

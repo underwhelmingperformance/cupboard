@@ -82,9 +82,8 @@ This is a pnpm workspace.
   `cupboard`, the tenant `acme`, the repository `acme/app`, the release `vX.Y.Z`
   and keys named `cupboard-acme-1:...`.
 - Use one term per concept: operator; tenant administrator (owner only for the
-  identity fixed at creation); tenant read credential and cache read credential;
-  deployment URL, tenant URL and cache URL; trust rule and grant; publish for
-  the outcome and push for the command.
+  identity fixed at creation); access key; deployment URL, tenant URL and cache
+  URL; trust rule and grant; publish for the outcome and push for the command.
 - Every factual claim should be checkable against the code. When behaviour
   changes, update the page that owns the topic rather than adding a note
   elsewhere.
@@ -119,6 +118,6 @@ This is a pnpm workspace.
   contract procedure; never add a hand-written route and client pair for JSON.
   Only the raw Request/Response endpoints listed above stay outside the
   contract, on the slim hand-written `CupboardClient`. The read probes are not
-  admin procedures: they accept the cache's read credentials, which the admin
-  contract does not, so they stay outside it. Their request and response schemas
-  are in `@cupboard/protocol`.
+  admin procedures: they accept credentials in HTTP Basic, as Nix sends them,
+  which the admin contract does not, so they stay outside it. Their request and
+  response schemas are in `@cupboard/protocol`.

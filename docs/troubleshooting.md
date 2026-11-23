@@ -48,12 +48,12 @@ cache to the daemon's configuration instead.
 
 There are two usual causes:
 
-- The credential isn't the right one for this cache. If the operator has given a
-  cache its own credential, that cache accepts only that credential. The tenant
-  read credential doesn't work for it.
-- Nix isn't reading the netrc file that contains the tenant read credential.
-  Check the `netrc-file` setting in `nix config show`, and check that the Nix
-  daemon can read the file.
+- The access key can't read this cache. It has expired, someone deleted it, or
+  it has no content-read grant for this cache. `cupboard access-key list` shows
+  each key's grants and expiry.
+- Nix isn't reading the netrc file that contains the access key. Check the
+  `netrc-file` setting in `nix config show`, and check that the Nix daemon can
+  read the file.
 
 ### A private cache stops being used, without an error
 
@@ -237,16 +237,15 @@ the cache access][ci-cache-access].
 
 [ci-cache-access]: ./ci/private-caches.md#choose-the-cache-access
 
-### A private cache refuses the credential
+### A private cache refuses the access key
 
-If a cache has its own static credential, the tenant's static credential does
-not read it. Pass the cache's pair in `destination_read_user` and
-`destination_read_password`, or omit static credentials and authorise the job's
-exact `cache:content-read` grant. A private reuse view accepts a tenant static
-credential through `read_user` and `read_password`, or a Cupboard read token
-with the exact `view:content-read` grant. A supplied static pair takes
-precedence, so a rejected pair does not trigger an OIDC retry. See [Private
-caches in CI][ci-private-caches].
+The key in `access_key` needs a content-read grant for the destination cache.
+Nix also reads the reuse view with that key, so it needs `view:content-read` for
+the view too. The key in `view_access_key` needs `view:content-read` for the
+reuse view, or a content-read grant for the reference source. Without a key, the
+job needs the exact `cache:content-read` and `view:content-read` grants in its
+trust rule. A supplied key takes precedence, so a refused key does not trigger
+an OIDC retry. See [Private caches in CI][ci-private-caches].
 
 [ci-private-caches]: ./ci/private-caches.md
 

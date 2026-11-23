@@ -43,8 +43,6 @@ explain how to run the tenant day to day.
 Some things are managed by the deployment's operator, not by tenant
 administrators. Ask the operator if you need any of these:
 
-- Read credentials for private caches. Only the operator can issue or replace
-  them. See [Read credentials](../operator/tenants.md#read-credentials).
 - A change to the tenant's storage quota, which the operator makes with
   `cupboard tenant set-quota` or `cupboard tenant clear-quota`.
 - Suspending or removing the tenant.

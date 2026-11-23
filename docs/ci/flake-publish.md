@@ -510,11 +510,9 @@ To use a different release, set `cupboard-version` to an exact release tag, or
 to `latest`, which includes prereleases. Only do this if you really want the CLI
 to differ from the workflow.
 
-A run with static read credentials needs cupboard `v0.0.50` or later. The
-workflow passes the read passwords to the CLI in environment variables, and
-earlier releases don't read them there. With an older release, the job fails
-before it runs the CLI with a credential, and reports the minimum version and
-the version that it found.
+A run with an access key needs a cupboard release that accepts access keys. With
+an older release, the job fails before it runs the CLI with the key, and reports
+the minimum version and the version that it found.
 
 Once a release has been chosen, its checks are strict. If it fails them, the run
 fails. The workflow never falls back to building from source.
@@ -534,8 +532,8 @@ available.
 A build-only run makes no Cupboard publication request. With the
 `pull-request-and-branch` preset, it reads from the tenant's default cache and
 neither creates nor removes a pull-request cache. A public cache needs no read
-grant. A private cache needs its exact `cache:content-read` grant or a static
-read credential. A build-only run does not need publication grants.
+grant. A private cache needs its exact `cache:content-read` grant or an access
+key. A build-only run does not need publication grants.
 
 ## Making the most of the runners
 

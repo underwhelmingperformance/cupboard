@@ -20,23 +20,22 @@ way:
   a trust rule on that tenant accepts them.
 - A **CI job** publishes to a tenant. It presents an OIDC token from its CI
   platform, and a trust rule on the tenant accepts it.
-- A **reader of a private cache**, usually Nix, presents a static read
-  credential or a short-lived content-read token. Nix sends both with HTTP Basic
-  authentication.
+- A **reader of a private cache**, usually Nix, presents an access key or a
+  short-lived content-read token. Nix sends both with HTTP Basic authentication.
 
 Behind all of them is the Cloudflare account that hosts the deployment. Whoever
 controls that account can do anything.
 
 The table below sums up what each of them can do.
 
-| Who                         | What they can do                                                                                                     |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| The Cloudflare account      | Everything. It runs the deployment, and can read all of its data and secrets.                                        |
-| The operator                | Create, suspend and remove tenants. Set quotas. Issue static read credentials. Add operators. Update the deployment. |
-| A tenant administrator      | Everything within one tenant except issuing static read credentials: caches, keys, retention, trust rules.           |
-| A CI job                    | Whatever its trust rule grants, such as publishing to one cache, setting certain roots, and attaching attestations.  |
-| A reader of a private cache | Read that cache. With the tenant read credential, read every private cache that has no credential of its own.        |
-| Anyone                      | Read public caches, and every tenant's public key.                                                                   |
+| Who                         | What they can do                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| The Cloudflare account      | Everything. It runs the deployment, and can read all of its data and secrets.                                       |
+| The operator                | Create, suspend and remove tenants. Set quotas. Add operators. Update the deployment.                               |
+| A tenant administrator      | Everything within one tenant: caches, keys, access keys, retention, trust rules.                                    |
+| A CI job                    | Whatever its trust rule grants, such as publishing to one cache, setting certain roots, and attaching attestations. |
+| A reader of a private cache | Whatever its access key's grants allow, such as reading one cache.                                                  |
+| Anyone                      | Read public caches, and every tenant's public key.                                                                  |
 
 Being the operator doesn't give you access to a tenant's caches or settings. The
 operator can only manage a tenant's contents if they're also one of its
@@ -119,15 +118,15 @@ Attestations record where published store paths came from. See
 
 ## Where keys and secrets are kept
 
-| What                                     | Where it's kept                                  | How it's protected                                                                                                                          |
-| ---------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tenant signing and access-token keys     | The tenant's Durable Object storage              | Cloudflare's storage encryption. cupboard adds none.                                                                                        |
-| Control keys, which sign operator tokens | `CONTROL_DB`                                     | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                                   |
-| `CONTROL_KEY_WRAP_SECRET`                | Only the control Worker, and the operator's copy | The tenant Worker never has it. HKDF also uses this secret to derive the keys that encrypt operator refresh tokens.                         |
-| R2 access key                            | The tenant Worker                                | It gives access to every tenant's stored objects.                                                                                           |
-| `PUSH_ID_SIGNING_KEY`                    | Both Workers                                     | It signs push IDs. HKDF also uses this secret to derive the keys that encrypt tenant refresh tokens and identities in tenant access tokens. |
-| Static read credentials                  | D1, as salted SHA-256 hashes                     | The CLI generates each password from 32 random bytes, and the server accepts only that format. The plaintext is never stored.               |
-| CLI sessions and Cloudflare sign-in      | `~/.config/cupboard` on each machine             | File permissions. The Cloudflare sign-in can deploy to the account.                                                                         |
+| What                                     | Where it's kept                                        | How it's protected                                                                                                                          |
+| ---------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tenant signing and access-token keys     | The tenant's Durable Object storage                    | Cloudflare's storage encryption. cupboard adds none.                                                                                        |
+| Control keys, which sign operator tokens | `CONTROL_DB`                                           | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                                   |
+| `CONTROL_KEY_WRAP_SECRET`                | Only the control Worker, and the operator's copy       | The tenant Worker never has it. HKDF also uses this secret to derive the keys that encrypt operator refresh tokens.                         |
+| R2 access key                            | The tenant Worker                                      | It gives access to every tenant's stored objects.                                                                                           |
+| `PUSH_ID_SIGNING_KEY`                    | Both Workers                                           | It signs push IDs. HKDF also uses this secret to derive the keys that encrypt tenant refresh tokens and identities in tenant access tokens. |
+| Access keys                              | The tenant's Durable Object storage, as SHA-256 hashes | Each key contains 32 random bytes. The plaintext is never stored.                                                                           |
+| CLI sessions and Cloudflare sign-in      | `~/.config/cupboard` on each machine                   | File permissions. The Cloudflare sign-in can deploy to the account.                                                                         |
 
 Changing `PUSH_ID_SIGNING_KEY` ends every tenant refresh session issued by this
 release, and tenant administrators with such a session have to sign in again.
@@ -138,9 +137,12 @@ longer create access keys, and they expire within 15 minutes.
 When a client uploads to R2, it gets a temporary credential. That credential can
 only write to its own push's staging area, and lasts at most six hours.
 
-CI jobs need no long-lived secret to publish or to read private caches when
-their trust rules grant the exact content read. A job can still use a static
-read credential when its runner or remote daemon needs one.
+Publishing with OIDC needs no stored secret, and neither does reading a private
+cache when the job's trust rule grants the content read. A CI system without
+OIDC can publish or read with an access key, which is a stored secret. A trust
+rule that grants `access-key:create` lets the jobs that it accepts create
+long-lived keys. See
+[Access keys from a job](./ci/trust-rules.md#access-keys-from-a-job).
 
 ### Plan archives
 
@@ -233,15 +235,15 @@ in either case.
 
 ## Revoking access
 
-| To revoke                       | Do this                                                                                                                | It takes effect                                     |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| An administrator                | Remove every matching trust rule that permits their authority.                                                         | Within 10 minutes, when their access token expires. |
-| A CI job                        | Remove its trust rule.                                                                                                 | Within 15 minutes.                                  |
-| A sign-in session               | List it with `cupboard session list`, then run `cupboard session revoke`. This also deletes every access key below it. | Within 10 minutes; renewal stops at once.           |
-| An operator's sign-in session   | List it with `cupboard deployment session list`, then run `cupboard deployment session revoke`.                        | Within 10 minutes; renewal stops at once.           |
-| A leaked access token           | [Rotate the access-token key](./admin/keys.md#access-token-keys), then retire the old one.                             | Immediately.                                        |
-| A leaked static read credential | Rotate it with `cupboard tenant rotate-credential` or `rotate-cache-credential`.                                       | Immediately.                                        |
-| A compromised signing key       | [Rotate it](./admin/keys.md#rotating-the-signing-key), and remove it from clients.                                     | As clients are updated.                             |
+| To revoke                     | Do this                                                                                                                | It takes effect                                                                                                                                    |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An administrator              | Remove every matching trust rule that permits their authority.                                                         | Within 10 minutes, when their access token expires.                                                                                                |
+| A CI job                      | Remove its trust rule.                                                                                                 | Within 15 minutes.                                                                                                                                 |
+| A sign-in session             | List it with `cupboard session list`, then run `cupboard session revoke`. This also deletes every access key below it. | Within 10 minutes; renewal stops at once.                                                                                                          |
+| An operator's sign-in session | List it with `cupboard deployment session list`, then run `cupboard deployment session revoke`.                        | Within 10 minutes; renewal stops at once.                                                                                                          |
+| A leaked access token         | [Rotate the access-token key](./admin/keys.md#access-token-keys), then retire the old one.                             | Immediately.                                                                                                                                       |
+| A leaked access key           | Delete it with `cupboard access-key delete`.                                                                           | At once for new admin, upload and commit requests, and within five minutes for reads. Work that the key started can continue for up to 15 minutes. |
+| A compromised signing key     | [Rotate it](./admin/keys.md#rotating-the-signing-key), and remove it from clients.                                     | As clients are updated.                                                                                                                            |
 
 `cupboard logout` deletes the sessions saved on one machine, and with
 `--cloudflare` the saved Cloudflare sign-in too. It also sends the server, or

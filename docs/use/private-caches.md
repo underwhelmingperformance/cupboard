@@ -1,9 +1,9 @@
 # Private caches
 
 A private cache checks every request for read access. Nix sends a username and
-password, which can come from a static read credential or a short-lived CI
-token. This page explains how to configure static credentials on a machine. The
-[CI guide][private-ci] covers OIDC reads in GitHub Actions.
+password, and the password is an access key or a short-lived CI token. This page
+explains how to give an access key to Nix on a machine. The [CI
+guide][private-ci] covers OIDC reads in GitHub Actions.
 
 [private-ci]: ../ci/private-caches.md
 
@@ -11,50 +11,52 @@ Set up the cache as a normal substituter first, as described in
 [Using a cache](./nix-clients.md). The public signing key at `/pubkey` doesn't
 need a credential, even for a private cache. Everything else does.
 
-## Read credentials
+## Access keys
 
-A static read credential is the username and password that Nix uses to read a
-private cache. There are two kinds.
+An access key is a secret that a tenant administrator creates for a machine or a
+person. It looks like `cupboard_ak_<id>_<secret>`. Each key has grants, which
+say what it can do, and usually an expiry. A key for Nix needs a content-read
+grant for each cache or reuse view that it reads.
 
-The tenant read credential reads most private caches in the tenant. It works for
-every private cache that doesn't have a credential of its own. It also works for
-every private [reuse view](../ci/reuse-views.md).
+Ask a tenant administrator for a key. They create one with
+`cupboard access-key create`; see [Access keys][admin-keys]. For example, this
+creates a key that reads the default cache for 90 days:
 
-A cache read credential reads a single cache. When a cache has its own
-credential, it accepts only that one, and the tenant read credential no longer
-works for it. Use a cache read credential when you want to share one cache with
-a reader who shouldn't see the tenant's other private caches.
+[admin-keys]: ../admin/access.md#access-keys
 
-Only the deployment's operator can issue static read credentials of either kind,
-so ask them for one. An authorised CI job can instead obtain a short-lived OIDC
-token for a particular cache or reuse view. The operator's static credential
-procedure is described in [Read credentials][operator-reads].
+```sh
+cupboard access-key create https://cupboard.example.workers.dev/t/acme \
+  --allow read --expires-in 90d
+```
 
-[operator-reads]: ../operator/tenants.md#read-credentials
+The command prints the key once. The deployment keeps only a SHA-256 hash of it,
+so a lost key can't be recovered. Create a new one and delete the old one.
 
-The username is `cupboard`, unless the operator chose a different one. The
-password is 43 characters long. The deployment doesn't keep a copy of the
-password. It keeps only a salted SHA-256 hash of it. If you lose the password,
-the operator has to issue a new one.
+Nix sends the key as the password. The server ignores the username, so any
+username works; this page uses `cupboard`.
 
-## Giving credentials to Nix
+A key for one tenant also reaches every other tenant on the same deployment URL,
+because Nix chooses a netrc entry by host. Those tenants don't accept the key.
+Their public caches still answer, and their private caches refuse the request.
 
-Nix can read a credential from two places. Each suits one kind of credential.
+## Giving a key to Nix
+
+Nix can read a credential from two places.
 
 A netrc file contains one username and password for each host. You tell Nix
-where the file is with the `netrc-file` setting. Use it for a tenant read
-credential or a short-lived Cupboard read token in CI. For a static tenant
-credential:
+where the file is with the `netrc-file` setting. Nix uses the entry for every
+cache on that host:
 
 ```
-machine cupboard.example.workers.dev login cupboard password <password>
+machine cupboard.example.workers.dev login cupboard password cupboard_ak_...
 ```
 
 A substituter URL can include its own username and password. For that URL, they
-take priority over the netrc file. Use this for a cache read credential:
+take priority over the netrc file. Use this when one cache needs a different key
+from the others on the same host:
 
 ```
-extra-substituters = https://reader:<password>@cupboard.example.workers.dev/t/acme/cache/release
+extra-substituters = https://cupboard:cupboard_ak_...@cupboard.example.workers.dev/t/acme/cache/release
 ```
 
 Both contain secrets. Don't put them in the Nix store, because any user on the
@@ -63,55 +65,66 @@ file is usually readable by everyone too.
 
 ### Generating the configuration with `cupboard config`
 
-`cupboard config` can write both for you. It reads the credentials from
-environment variables:
+`cupboard config` can write both for you. It reads the keys from environment
+variables:
 
-- `CUPBOARD_CACHE_CREDENTIALS` contains cache read credentials, as JSON.
-  `cupboard config` puts them into the substituter lines that it prints.
-- `CUPBOARD_READ_USER` and `CUPBOARD_READ_PASSWORD` contain the tenant read
-  credential. `cupboard config` shows the matching netrc line as a message on
+- `CUPBOARD_CACHE_ACCESS_KEYS` contains an access key for each of several
+  caches, as JSON. `cupboard config` puts each key into the substituter line of
+  its cache.
+- `CUPBOARD_ACCESS_KEY` contains the access key for every other cache that you
+  configure. `cupboard config` shows the matching netrc line as a message on
   standard error, not in its output, because the line belongs in a different
   file.
 
-For example, to set up the default cache with the tenant read credential and the
-`release` cache with its own credential:
+For example, to set up the default cache with one key and the `release` cache
+with its own key:
 
 ```sh
-export CUPBOARD_READ_USER=cupboard CUPBOARD_READ_PASSWORD=<password>
-export RELEASE_USER=reader RELEASE_PASSWORD=<password>
-export CUPBOARD_CACHE_CREDENTIALS=$(jq -nc \
-  '[{cache: {kind: "named", name: "release"}, credential: {user: env.RELEASE_USER, password: env.RELEASE_PASSWORD}}]')
+default_key=cupboard_ak_...
+release_key=cupboard_ak_...
+release_keys=$(RELEASE_KEY=$release_key jq -nc \
+  '[{cache: {kind: "named", name: "release"}, accessKey: env.RELEASE_KEY}]')
 
 (
   umask 077
-  cupboard config https://cupboard.example.workers.dev/t/acme \
+  CUPBOARD_ACCESS_KEY=$default_key CUPBOARD_CACHE_ACCESS_KEYS=$release_keys \
+    cupboard config https://cupboard.example.workers.dev/t/acme \
     "$(cupboard pubkey https://cupboard.example.workers.dev/t/acme)" \
     --include-default-cache release > cupboard-substituters.conf
 )
+unset default_key release_key release_keys
 ```
 
-The `--read-user`, `--read-password` and `--cache-credentials` options take the
-same values and override the environment variables. Passing the passwords in
-environment variables keeps them off the command line, where other users of the
-machine could see them. The output contains the cache read credential, so
-`umask 077` makes the shell create the file with mode 0600, readable only by
-you.
+The shell variables are not exported. The assignments before `cupboard config`
+set the environment variables for that one command. Do not export
+`CUPBOARD_ACCESS_KEY` in an interactive shell: `cupboard push` and the other
+commands listed in [Scripting the CLI][scripting] use it in place of your login
+session.
 
-Every entry in `CUPBOARD_CACHE_CREDENTIALS` must be for one of the caches that
+The `--access-key` and `--cache-access-keys` options take the same values and
+override the environment variables. Passing the keys in environment variables
+keeps them off the command line, where other users of the machine could see
+them. The output contains the `release` key, so `umask 077` makes the shell
+create the file with mode 0600, readable only by you.
+
+[scripting]: ../reference/cli-scripting.md#access-keys
+
+Every entry in `CUPBOARD_CACHE_ACCESS_KEYS` must be for one of the caches that
 you're configuring. Otherwise the command fails.
 
 ## Linux and macOS, without NixOS
 
-1. Write the tenant read credential to a netrc file that only root can read:
+1. Write the access key to a netrc file that only root can read:
 
    ```sh
    sudo install -m 0600 /dev/null /etc/nix/netrc
-   echo 'machine cupboard.example.workers.dev login cupboard password <password>' \
+   echo 'machine cupboard.example.workers.dev login cupboard password cupboard_ak_...' \
      | sudo tee /etc/nix/netrc > /dev/null
    ```
 
-2. Copy the substituter lines, including any cache read credentials, to another
-   file that only root can read. With the `cupboard-substituters.conf` file from
+2. Copy the substituter lines, including any keys for individual caches, to
+   another file that only root can read. With the `cupboard-substituters.conf`
+   file from
    [the example above](#generating-the-configuration-with-cupboard-config):
 
    ```sh
@@ -224,8 +237,10 @@ behaves differently. Every Nix command fails instead.
 
 ### Nix gets a 401 response
 
-A 401 response means that the cache doesn't accept the credential. Remember that
-a cache with its own credential doesn't accept the tenant read credential.
+A 401 response means that the cache doesn't accept the key. Check that the key
+hasn't expired or been deleted, and that it has a content-read grant for this
+cache or reuse view. `cupboard access-key list` shows each key's grants and
+expiry.
 
 ## What a private cache protects
 

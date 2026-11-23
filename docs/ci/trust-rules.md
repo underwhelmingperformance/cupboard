@@ -1,15 +1,16 @@
 # Trust rules
 
 A CI job that publishes to your cache has to prove to cupboard that it's allowed
-to. cupboard doesn't give CI jobs a password or API key to store as a secret.
-Instead, it relies on the identity token that GitHub Actions already gives every
-job.
+to. Publishing with OIDC needs no stored secret: cupboard relies on the identity
+token that GitHub Actions already gives every job.
 
 That token is signed by GitHub, and it says which repository, branch or pull
 request, event and workflow the job is running for. The job sends it to
 cupboard, and cupboard compares it with your tenant's **trust rules**. If a rule
 accepts it, cupboard gives the job a cupboard token that lasts a few minutes and
 allows only what the rule says. The job never has a long-lived cupboard secret.
+A CI system without OIDC can publish with an access key instead, which is a
+stored secret. See [Publishing without OIDC](./access-keys.md).
 
 A trust rule says two things:
 
@@ -326,6 +327,19 @@ content-read grant with the same cache selector. Content reads apply to the
 whole cache and cannot select a root. `--root` and `--root-template` apply to
 the publication grant. A read-only rule cannot use either root option.
 
+### Access keys from a job
+
+A job can create an [access key](../admin/access.md#access-keys) with
+`cupboard access-key create`, using a subset of its own grants. Without
+`access-key:create`, the key expires no later than the job's token, within 15
+minutes. A rule that grants `access-key:create` for a cache lets every job that
+the rule accepts create a key for that cache that lasts as long as the job
+chooses, or never expires. Such a key is a long-lived secret that outlives the
+job and keeps working until it expires or someone deletes it, so grant
+`access-key:create` to a CI rule only when the job must hand a key to another
+system. Write the grant in a rule file, as
+[Writing a rule as JSON](#writing-a-rule-as-json) describes.
+
 ### Which cache a grant applies to
 
 Every grant applies to one cache. By default, that's the default cache. To
@@ -338,8 +352,8 @@ doesn't change which jobs can write to it.
 
 Trust rules can grant a CI job `cache:content-read` for one cache or
 `view:content-read` for one reuse view. The job exchanges its GitHub OIDC
-identity token for a short-lived Cupboard read token. A static [read
-credential][static-credential] remains an option.
+identity token for a short-lived Cupboard read token. An [access
+key][access-key] is another option.
 
 Read acquisition composes authority for the configured cache and view from the
 preferred matching rules. Public resources require no content-read grant;
@@ -349,7 +363,7 @@ authority. That token authorises an absence response but cannot read private
 content after creation. Existing private resources require their exact
 content-read grants.
 
-[static-credential]: ../use/private-caches.md#read-credentials
+[access-key]: ../use/private-caches.md#access-keys
 
 ### Which roots a grant applies to
 
