@@ -37,7 +37,7 @@ function settingsSummary(rows: readonly string[]): string {
 }
 
 const credentialsGuide =
-	'https://github.com/underwhelmingperformance/cupboard/blob/vX.Y.Z/docs/use/private-caches.md#giving-credentials-to-nix';
+	'https://github.com/underwhelmingperformance/cupboard/blob/vX.Y.Z/docs/use/private-caches.md#giving-a-key-to-nix';
 
 function nixConfigSummary(
 	cacheUrl: string,
@@ -86,7 +86,7 @@ describe('publicationSettingsAction', () => {
 				'nix.conf lines for reading the cache',
 				'extra-substituters = https://cupboard.example.workers.dev/acme/cache/gh-1234-pr-7',
 				`extra-trusted-public-keys = ${publicKey}`,
-				`A private cache also needs a read credential, in a netrc entry or in the substituter URL. See Giving credentials to Nix (${credentialsGuide}).`,
+				`A private cache also needs an access key, in a netrc entry or in the substituter URL. See Giving a key to Nix (${credentialsGuide}).`,
 				''
 			],
 			summary: [
@@ -102,7 +102,7 @@ describe('publicationSettingsAction', () => {
 				nixConfigSummary(
 					'https://cupboard.example.workers.dev/acme/cache/gh-1234-pr-7',
 					[
-						`A private cache also needs a read credential, in a netrc entry or in the substituter URL. See [Giving credentials to Nix](<${credentialsGuide}>).`
+						`A private cache also needs an access key, in a netrc entry or in the substituter URL. See [Giving a key to Nix](<${credentialsGuide}>).`
 					]
 				)
 			]

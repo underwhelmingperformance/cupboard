@@ -13,12 +13,12 @@ import {
 	uploadCapabilitiesHeader
 } from '@cupboard/protocol/upload';
 import { createReporter } from '@cupboard/reporter';
-import { readUserSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 import { type RawData, WebSocketServer } from 'ws';
 import { z } from 'zod';
 
 import { PushIncompleteError } from '../errors.ts';
+import { destinationAccessKey } from '../test-support.ts';
 
 import { PublicationCollection } from './publication.ts';
 import { defaultUploadConcurrency, type PushClient, runPush } from './push.ts';
@@ -405,8 +405,7 @@ async function pushReferences(
 				retain: false,
 				referenceSource: {
 					url: tenantUrl,
-					readUser: readUserSchema.parse('reader'),
-					readPassword: 'secret'
+					accessKey: destinationAccessKey
 				},
 				client: recordingCommitErrors(
 					pushClientFor(tenantUrl, 'token', {

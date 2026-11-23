@@ -45,10 +45,10 @@ import {
 	pullRequestViewName
 } from './convention.ts';
 import {
+	type AccessKeyWiring,
 	type DiscoveredPublishingJob,
 	discoverPublishingJobs,
 	githubWorkflowSource,
-	type ReadCredentialWiring,
 	type WorkflowDiscovery,
 	type WorkflowSource
 } from './discovery.ts';
@@ -66,7 +66,6 @@ import {
 	FailedCheckFinding,
 	PassedCheckFinding,
 	ReadAuthenticationConfiguredFinding,
-	ReadAuthenticationIncompleteFinding,
 	ReadAuthenticationUnverifiedFinding,
 	ReuseViewAccessModeMismatchFinding,
 	ReuseViewMissingFinding,
@@ -102,7 +101,7 @@ export interface DiscoveredGithubCheckOptions {
 	Defaults to the repository's default branch.
 	*/
 	readonly branch?: string;
-	readonly readUser?: string;
+	readonly hasAccessKey?: boolean;
 	readonly isFixRequested?: boolean;
 	/**
 	Reports the result as `github-check-verified`, without the repair
@@ -597,14 +596,11 @@ export function isBuildInputsGrantMissing(
 
 function readAuthenticationFinding(
 	resource: 'cache' | 'view',
-	wiring: ReadCredentialWiring
+	wiring: AccessKeyWiring
 ): CheckFinding | undefined {
 	switch (wiring) {
 		case 'configured': {
 			return new ReadAuthenticationConfiguredFinding(resource);
-		}
-		case 'incomplete': {
-			return new ReadAuthenticationIncompleteFinding(resource);
 		}
 		case 'unknown': {
 			return new ReadAuthenticationUnverifiedFinding(resource);
@@ -671,7 +667,7 @@ async function inspectPublication(
 		['view', read.viewAccess, read.viewWiring],
 		['cache', read.referenceAccess, read.referenceWiring ?? 'none']
 	] as const) {
-		if (access !== 'private' && wiring !== 'incomplete') {
+		if (access !== 'private') {
 			continue;
 		}
 
@@ -969,10 +965,8 @@ export async function inspectDiscoveredGithubCheck(
 		)
 			? `The check models the preset's push and manual runs on the default branch ${identity.defaultBranch}, using the workflow files from ${branch}. Changes on ${branch} take effect after ${branch} is merged into ${identity.defaultBranch}.`
 			: undefined;
-	const readCredential =
-		options.readUser === undefined
-			? ''
-			: ' --read-user <user> --read-password <password>';
+	const accessKeyOption =
+		options.hasAccessKey === true ? ' --access-key <key>' : '';
 
 	const rows: ResultRow[] = [
 		{
@@ -1003,7 +997,7 @@ export async function inspectDiscoveredGithubCheck(
 					{
 						label: 'Review a repair',
 						raw: true,
-						value: `cupboard github check ${canonicalHref(tenant)} --repo ${identity.fullName} --branch ${branch}${readCredential} --fix`
+						value: `cupboard github check ${canonicalHref(tenant)} --repo ${identity.fullName} --branch ${branch}${accessKeyOption} --fix`
 					}
 				]
 			: [])

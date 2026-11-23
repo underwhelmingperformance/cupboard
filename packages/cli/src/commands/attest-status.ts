@@ -3,15 +3,16 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import type { AttestationInfoEntry } from '@cupboard/protocol/attestations';
 import {
 	formatCount,
 	type Reporter,
 	type ResultPayload
 } from '@cupboard/reporter';
-import { type ReadUser } from '@cupboard/shared/http';
 import { type Command } from 'commander';
 
+import { accessKeyFor, parseAccessKey } from '../access-key-options.ts';
 import { readAttestationInfo } from '../attest/status.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { issueGithubReadCredential } from '../auth/github-read-credential.ts';
@@ -22,20 +23,21 @@ import {
 import { cacheTargetFromUrl } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { CliError, CliUsageError } from '../errors.ts';
-import { parseReadUser } from '../read-user.ts';
+import {
+	AccessKeyWithGithubOidcError,
+	CliError,
+	CliUsageError
+} from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { appendPathFile } from './attest.ts';
 import { resolvePushPath } from './push.ts';
-import { readCredentials } from './read-credentials.ts';
 
 interface StatusOptions {
 	readonly pathsFile?: string;
 	readonly predicateType: readonly string[];
 	readonly requireAll?: boolean;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -87,13 +89,9 @@ export function registerAttestStatusCommand(
 			'exit one when any requested path has no matching evidence'
 		)
 		.option(
-			'--read-user <user>',
-			'private cache read user (default: $CUPBOARD_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--read-password <password>',
-			'private cache read password (default: $CUPBOARD_READ_PASSWORD)'
+			'--access-key <key>',
+			'access key for a private cache (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--github-oidc',
@@ -135,11 +133,9 @@ export function registerAttestStatusCommand(
 							return parsed.data;
 						});
 			const target = cacheTargetFromUrl(url);
-			const credential = readCredentials(options);
-			if (credential !== undefined && options.githubOidc === true) {
-				throw new StatusOptionsError(
-					'--github-oidc cannot be combined with static read credentials. Remove the read credential options and environment variables.'
-				);
+			const accessKey = accessKeyFor(options);
+			if (accessKey !== undefined && options.githubOidc === true) {
+				throw new AccessKeyWithGithubOidcError();
 			}
 			if (options.audience !== undefined && options.githubOidc !== true) {
 				throw new StatusOptionsError('--audience requires --github-oidc.');
@@ -199,8 +195,7 @@ export function registerAttestStatusCommand(
 									)
 								: readAttestationInfo({
 										...progress,
-										readUser: credential?.user,
-										readPassword: credential?.password
+										...(accessKey !== undefined && { accessKey })
 									});
 						}
 					);

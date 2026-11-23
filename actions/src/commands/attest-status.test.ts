@@ -10,10 +10,14 @@ import { ResultLink, ResultTable } from '@cupboard/reporter';
 import { UsageError } from '@cupboard/shared/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { destinationAccessKey } from '../access-key.test-support.ts';
+import { AccessKeyVersionError } from '../errors.ts';
 import { buildProgram } from '../program.ts';
 
 const mocks = vi.hoisted(() => ({
 	runCupboard: vi.fn<typeof import('../cupboard-run.ts').runCupboard>(),
+	inspectCupboardVersion:
+		vi.fn<typeof import('../cupboard-run.ts').inspectCupboardVersion>(),
 	result: vi.fn<import('@cupboard/reporter').Reporter['result']>()
 }));
 vi.mock('@cupboard/reporter', async (importOriginal) => {
@@ -28,7 +32,8 @@ vi.mock('@cupboard/reporter', async (importOriginal) => {
 });
 vi.mock('../cupboard-run.ts', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../cupboard-run.ts')>()),
-	runCupboard: mocks.runCupboard
+	runCupboard: mocks.runCupboard,
+	inspectCupboardVersion: mocks.inspectCupboardVersion
 }));
 
 const app = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
@@ -46,6 +51,7 @@ const directories: string[] = [];
 afterEach(async () => {
 	vi.restoreAllMocks();
 	mocks.runCupboard.mockReset();
+	mocks.inspectCupboardVersion.mockReset();
 	mocks.result.mockReset();
 	await Promise.all(
 		directories
@@ -180,58 +186,91 @@ describe('publication attestation coverage', () => {
 		});
 	});
 
-	it('passes the read password to the status query in its environment', async () => {
-		const files = await fixture();
-		mocks.runCupboard.mockResolvedValue([
-			{
-				kind: 'attestation-status',
-				data: {
-					entries: entries(),
-					covered: [StorePath.hash(app), StorePath.hash(dependency)],
-					withoutEvidence: [StorePath.hash(unattested)],
-					fetchedUpstream: [],
-					missing: [StorePath.hash(absent)]
+	it.each([
+		{
+			name: 'the access-key input',
+			keys: { ACCESS_KEY: destinationAccessKey },
+			version: 'v0.0.56',
+			refused: false
+		},
+		{
+			name: 'the job environment key',
+			keys: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+			version: 'v0.0.56',
+			refused: false
+		},
+		{
+			name: 'the job environment key with a CLI that cannot read it',
+			keys: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+			version: 'v0.0.55',
+			refused: true
+		}
+	])(
+		'passes $name to the status query in its environment',
+		async ({ keys, version, refused }) => {
+			const files = await fixture();
+			mocks.inspectCupboardVersion.mockResolvedValue(version);
+			mocks.runCupboard.mockResolvedValue([
+				{
+					kind: 'attestation-status',
+					data: {
+						entries: entries(),
+						covered: [StorePath.hash(app), StorePath.hash(dependency)],
+						withoutEvidence: [StorePath.hash(unattested)],
+						fetchedUpstream: [],
+						missing: [StorePath.hash(absent)]
+					}
 				}
+			]);
+			const environment = { RUNNER_TEMP: files.directory, ...keys };
+			let error: unknown;
+
+			try {
+				await buildProgram(environment).parseAsync([
+					'node',
+					'action',
+					'attest-status',
+					'--url',
+					'https://cupboard.example.workers.dev/t/acme',
+					'--cupboard-path',
+					'/bin/cupboard',
+					'--receipt-file',
+					files.receipt
+				]);
+			} catch (error_) {
+				error = error_;
 			}
-		]);
-		const environment = {
-			RUNNER_TEMP: files.directory,
-			READ_PASSWORD: 'secret'
-		};
 
-		await buildProgram(environment).parseAsync([
-			'node',
-			'action',
-			'attest-status',
-			'--url',
-			'https://cupboard.example.workers.dev/t/acme',
-			'--cupboard-path',
-			'/bin/cupboard',
-			'--receipt-file',
-			files.receipt,
-			'--read-user',
-			'reader'
-		]);
-
-		const [call] = mocks.runCupboard.mock.calls;
-		expect({
-			arguments: call?.[1].filter(
-				(argument) => !argument.startsWith(files.directory)
-			),
-			environment: call?.[2]
-		}).toStrictEqual({
-			arguments: [
-				'--no-colour',
-				'attest',
-				'status',
-				'https://cupboard.example.workers.dev/t/acme',
-				'--paths-file',
-				'--read-user',
-				'reader'
-			],
-			environment: { ...environment, CUPBOARD_READ_PASSWORD: 'secret' }
-		});
-	});
+			expect({
+				refused: error instanceof AccessKeyVersionError,
+				calls: mocks.runCupboard.mock.calls.map((call) => ({
+					arguments: call[1].filter(
+						(argument) => !argument.startsWith(files.directory)
+					),
+					environment: call[2]
+				}))
+			}).toStrictEqual({
+				refused,
+				calls: refused
+					? []
+					: [
+							{
+								arguments: [
+									'--no-colour',
+									'attest',
+									'status',
+									'https://cupboard.example.workers.dev/t/acme',
+									'--paths-file'
+								],
+								environment: {
+									...environment,
+									CUPBOARD_ACCESS_KEY: destinationAccessKey
+								}
+							}
+						]
+			});
+		}
+	);
 
 	it.each([
 		{ signed: true, version: 3 as const, subjectCount: 4, copied: false },

@@ -6,6 +6,10 @@ import process from 'node:process';
 
 import { rootLogger } from '@cupboard/logger';
 import {
+	type AccessKeySecret,
+	accessKeySecretSchema
+} from '@cupboard/protocol/access-keys';
+import {
 	type DocumentVersions,
 	documentVersionsSchema
 } from '@cupboard/protocol/publish-plan';
@@ -23,7 +27,6 @@ import {
 	type WorkflowCommands,
 	workflowCommands
 } from '@cupboard/shared/github-actions';
-import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 import { subprocessTraceEnvironment } from '@cupboard/shared/node-tracing';
 import semverLt from 'semver/functions/lt.js';
 import semverParse from 'semver/functions/parse.js';
@@ -31,12 +34,11 @@ import { z } from 'zod';
 
 import { subprocessLogFile } from './diagnostics/logging.ts';
 import {
+	AccessKeyInvalidError,
+	AccessKeyVersionError,
 	CommandFailedError,
 	CupboardReportedError,
-	CupboardVersionOutputMissingError,
-	EnvironmentCredentialVersionError,
-	ReadCredentialVariablesIncompleteError,
-	ReadUserVariableInvalidError
+	CupboardVersionOutputMissingError
 } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 import { assertReleasePlatformSupported } from './release-platform.ts';
@@ -68,166 +70,116 @@ export interface CupboardInvocation {
 	readonly environment: Environment;
 }
 
-const readCredentialRoles = {
-	cache: {
-		userOption: '--read-user',
-		userVariable: 'CUPBOARD_READ_USER',
-		passwordVariable: 'CUPBOARD_READ_PASSWORD'
-	},
-	view: {
-		userOption: '--view-read-user',
-		userVariable: 'CUPBOARD_VIEW_READ_USER',
-		passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
-	},
-	'reference-source': {
-		userOption: '--read-user',
-		userVariable: 'CUPBOARD_VIEW_READ_USER',
-		passwordVariable: 'CUPBOARD_VIEW_READ_PASSWORD'
-	}
+const accessKeyVariables = {
+	cache: 'CUPBOARD_ACCESS_KEY',
+	view: 'CUPBOARD_VIEW_ACCESS_KEY',
+	'reference-source': 'CUPBOARD_VIEW_ACCESS_KEY'
 } as const;
 
 /**
-The cache that a read credential is for: the cache that the command addresses,
-the reuse view or reference source of `plan cohort` and `plan reprobe`, or the
+The cache that an access key is for: the cache that the command addresses, the
+reuse view or reference source of `plan cohort` and `plan reprobe`, or the
 `--reference-source` of `push`.
 */
-type ReadCredentialRole = keyof typeof readCredentialRoles;
+type AccessKeyRole = keyof typeof accessKeyVariables;
 
 /**
-Passes a read credential to a cupboard command: the user name as an option and
-the password in an environment variable. `cache` uses `--read-user` and
-`CUPBOARD_READ_PASSWORD`, `view` uses `--view-read-user` and
-`CUPBOARD_VIEW_READ_PASSWORD`, and `reference-source` uses `--read-user` and
-`CUPBOARD_VIEW_READ_PASSWORD`.
+Passes an access key to a cupboard command in the role's environment variable:
+`CUPBOARD_ACCESS_KEY` for `cache`, and `CUPBOARD_VIEW_ACCESS_KEY` for `view`
+and `reference-source`.
 
-An empty user name returns no arguments and no variables, and the command reads
-the role's environment variables if the job sets them. The plan and build-cohort
-actions resolve those variables into their inputs with
-{@link resolveReadCredential} first. For them, an empty user name means that
-neither the inputs nor the environment variables supply a credential.
+An empty key returns no variables, and the command reads the role's variable if
+the job sets it. The plan and build-cohort actions resolve that variable into
+their inputs with {@link resolveAccessKey} first. For them, an empty key means
+that neither the inputs nor the environment supply one.
 
 Other processes on the runner can read a command line, and Node copies it into
-the error that it reports when a command cannot start, so a password never
-goes on the command line.
+the error that it reports when a command cannot start, so a key never goes on
+the command line.
 */
-export function readCredentialInvocation(
-	user: string,
-	password: string,
-	role: ReadCredentialRole = 'cache'
+export function accessKeyInvocation(
+	key: string,
+	role: AccessKeyRole = 'cache'
 ): CupboardInvocation {
-	const { userOption, passwordVariable } = readCredentialRoles[role];
-
-	if (user === '') {
+	if (key === '') {
 		return { arguments: [], environment: {} };
 	}
 
 	return {
-		arguments: [userOption, user],
-		environment: { [passwordVariable]: password }
+		arguments: [],
+		environment: { [accessKeyVariables[role]]: key }
 	};
 }
 
 /**
-Removes a role's variables from a command's environment. An action uses this
-when it gives the role to a cache other than the one that the variables are
-documented for, so a job's variables do not reach that cache.
+Removes a role's variable from a command's environment. An action uses this
+when it gives the role to a cache other than the one that the variable is
+documented for, so a job's key does not reach that cache.
 */
-export function withoutReadCredential(
-	role: ReadCredentialRole
-): CupboardInvocation {
-	const { userVariable, passwordVariable } = readCredentialRoles[role];
-
+export function withoutAccessKey(role: AccessKeyRole): CupboardInvocation {
 	return {
 		arguments: [],
-		environment: { [userVariable]: undefined, [passwordVariable]: undefined }
+		environment: { [accessKeyVariables[role]]: undefined }
 	};
 }
 
 /**
-A read credential from an action's inputs. An empty user name means that the
-inputs supply no credential.
+Returns the access key for `role`: the input when it is not empty, and the
+role's environment variable otherwise. GitHub Actions sets a variable to an
+empty string when the secret behind it is unset, and the CLI treats an empty
+variable as unset, so an unset secret does not count as a key.
+
+Throws {@link AccessKeyInvalidError} when the variable is not an access key.
 */
-export interface ReadCredentialInput {
-	readonly user: ReadUser | '';
-	readonly password: string;
-}
-
-/**
-Returns the read credential for `role`. An input with a user name takes
-precedence, and the function then ignores the environment variables. Otherwise
-the credential comes from the role's user and password variables, which must
-both be set or both be unset. The action rejects an input user name without an
-input password before it calls this function, so a credential never combines an
-input with a variable.
-
-GitHub Actions sets a variable to an empty string when the secret behind it is
-unset, and the CLI treats an empty variable as unset. Match the CLI so an unset
-secret does not count as a credential.
-
-Throws {@link ReadCredentialVariablesIncompleteError} when only one of the
-variables is set, and {@link ReadUserVariableInvalidError} when the user
-variable contains a colon.
-*/
-export function resolveReadCredential(
-	input: ReadCredentialInput,
+export function resolveAccessKey(
+	input: AccessKeySecret | '',
 	environment: Environment,
-	role: ReadCredentialRole
-): ReadCredentialInput {
-	if (input.user !== '') {
+	role: AccessKeyRole
+): AccessKeySecret | '' {
+	if (input !== '') {
 		return input;
 	}
 
-	const { userVariable, passwordVariable } = readCredentialRoles[role];
-	const variableUser = environment[userVariable] ?? '';
-	const password = environment[passwordVariable] ?? '';
+	const variable = accessKeyVariables[role];
+	const value = environment[variable] ?? '';
 
-	if ((variableUser === '') !== (password === '')) {
-		throw new ReadCredentialVariablesIncompleteError(
-			userVariable,
-			passwordVariable
-		);
+	if (value === '') {
+		return '';
 	}
 
-	if (variableUser === '') {
-		return { user: '', password: '' };
+	const parsed = accessKeySecretSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new AccessKeyInvalidError(variable);
 	}
 
-	const user = readUserInputSchema.safeParse(variableUser);
-
-	if (!user.success) {
-		throw new ReadUserVariableInvalidError(userVariable, variableUser);
-	}
-
-	return { user: user.data, password };
+	return parsed.data;
 }
 
 /**
-The first release whose `push`, `plan cohort` and `plan reprobe` read a read
-password from the environment.
+The first release whose commands read an access key from
+`CUPBOARD_ACCESS_KEY` and `CUPBOARD_VIEW_ACCESS_KEY`.
 */
-const minimumEnvironmentCredentialVersion = 'v0.0.50';
+const minimumAccessKeyVersion = 'v0.0.56';
 
 /**
-Throws {@link EnvironmentCredentialVersionError} when `version` is a release
-older than {@link minimumEnvironmentCredentialVersion}. A development build
+Throws {@link AccessKeyVersionError} when `version` is a release older than
+{@link minimumAccessKeyVersion}. A development build
 reports 0.0.0 and a build from source reports its commit, so the check
 accepts both.
 */
-export function assertEnvironmentCredentialSupport(version: string): void {
+export function assertAccessKeySupport(version: string): void {
 	const release = semverParse(version);
 
 	if (
 		release === null ||
 		(release.major === 0 && release.minor === 0 && release.patch === 0) ||
-		!semverLt(release, minimumEnvironmentCredentialVersion)
+		!semverLt(release, minimumAccessKeyVersion)
 	) {
 		return;
 	}
 
-	throw new EnvironmentCredentialVersionError(
-		minimumEnvironmentCredentialVersion,
-		version
-	);
+	throw new AccessKeyVersionError(minimumAccessKeyVersion, version);
 }
 
 /**
@@ -245,15 +197,15 @@ export function isReleaseVersion(version: string): boolean {
 
 /**
 Reads the version of the CLI at `binaryPath` and applies
-{@link assertEnvironmentCredentialSupport}. An action calls this before it
-starts work that passes a read credential to the CLI.
+{@link assertAccessKeySupport}. An action calls this before it starts work
+that passes an access key to the CLI.
 */
-export async function requireEnvironmentCredentialSupport(
+export async function requireAccessKeySupport(
 	binaryPath: string,
 	inspectVersion: typeof inspectCupboardVersion,
 	signal?: AbortSignal
 ): Promise<void> {
-	assertEnvironmentCredentialSupport(await inspectVersion(binaryPath, signal));
+	assertAccessKeySupport(await inspectVersion(binaryPath, signal));
 }
 
 /**

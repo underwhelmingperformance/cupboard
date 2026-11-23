@@ -28,13 +28,14 @@ import { z } from 'zod';
 import type { ProgramOptions } from '../cli.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
+	AccessKeyWithGithubOidcError,
 	CliAbortError,
 	CommandPayloadRequiredError,
 	CupboardHttpError,
+	InvalidAccessKeyError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
-	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
 	ReferenceSourceReadRefusedError,
@@ -44,8 +45,10 @@ import {
 } from '../errors.ts';
 import type { PushStore } from '../push/push.ts';
 import {
-	basicAuthorization,
-	readCredentialVariables,
+	accessKeyAuthorization,
+	accessKeyVariables,
+	destinationAccessKey,
+	sourceAccessKey,
 	withRecordingServer
 } from '../test-support.ts';
 
@@ -65,7 +68,7 @@ const rootName = (value: string) => rootNameSchema.parse(value);
 const defaultCache: CacheScope = { kind: 'default' };
 
 beforeEach(() => {
-	for (const variable of readCredentialVariables) {
+	for (const variable of accessKeyVariables) {
 		vi.stubEnv(variable, undefined);
 	}
 });
@@ -1019,31 +1022,46 @@ describe('push command', () => {
 		}
 	);
 
-	it.each([
-		['--read-user', 'reader'],
-		['--read-password', 'secret']
-	])('rejects an unpaired %s before authenticating', async (option, value) => {
+	it('refuses an access token for the reference source before authenticating', async () => {
 		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			'--reference-source',
 			'https://cache.example.workers.dev/t/acme/cache/source',
-			option,
-			value
+			'--view-access-key',
+			'eyJhbGciOiJFZERTQSJ9.e30.signature'
 		]);
 
 		expect(run).toStrictEqual({
-			result: new ReadCredentialPairError('cache', {
-				user: 'CUPBOARD_VIEW_READ_USER',
-				password: 'CUPBOARD_VIEW_READ_PASSWORD'
-			}),
+			result: new InvalidAccessKeyError('The access key'),
 			tokenProviderRequests: [],
 			openStoreCalls: 0
 		});
 	});
 
-	it('does not read the view variables without --reference-source', async () => {
-		vi.stubEnv('CUPBOARD_VIEW_READ_USER', 'source-reader');
+	it('refuses an access key together with --github-oidc before authenticating', async () => {
+		const run = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'--github-oidc',
+			'--no-retain',
+			'--access-key',
+			destinationAccessKey
+		]);
+
+		expect(run).toStrictEqual({
+			result: new AccessKeyWithGithubOidcError(),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
+	});
+
+	it('does not read the view variable without --reference-source', async () => {
+		// Reading this value would fail, because it is not an access key.
+		vi.stubEnv(
+			'CUPBOARD_VIEW_ACCESS_KEY',
+			'eyJhbGciOiJFZERTQSJ9.e30.signature'
+		);
 
 		// The conflicting receipt options fail after the credential would be
 		// read, so the error shows that no credential was read.
@@ -1068,50 +1086,35 @@ describe('push command', () => {
 		readonly environment: Readonly<Record<string, string>>;
 		readonly options: readonly string[];
 		readonly authorization: string | undefined;
+		readonly tokenProviderRequests: readonly CacheScope[];
 	}>([
 		{
-			name: 'no credential from the destination read variables',
+			name: 'no credential, and publishes with the destination key',
+			environment: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+			options: [],
+			authorization: undefined,
+			tokenProviderRequests: []
+		},
+		{
+			name: 'the view access key from the environment',
 			environment: {
-				CUPBOARD_READ_USER: 'destination-reader',
-				CUPBOARD_READ_PASSWORD: 'destination-secret'
+				CUPBOARD_ACCESS_KEY: destinationAccessKey,
+				CUPBOARD_VIEW_ACCESS_KEY: sourceAccessKey
 			},
 			options: [],
-			authorization: undefined
+			authorization: accessKeyAuthorization(sourceAccessKey),
+			tokenProviderRequests: []
 		},
 		{
-			name: 'the view read credential from the environment',
-			environment: {
-				CUPBOARD_READ_USER: 'destination-reader',
-				CUPBOARD_READ_PASSWORD: 'destination-secret',
-				CUPBOARD_VIEW_READ_USER: 'source-reader',
-				CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
-			},
-			options: [],
-			authorization: basicAuthorization('source-reader', 'source-secret')
-		},
-		{
-			name: 'the options in preference to the environment',
-			environment: {
-				CUPBOARD_VIEW_READ_USER: 'source-reader',
-				CUPBOARD_VIEW_READ_PASSWORD: 'source-secret'
-			},
-			options: [
-				'--read-user',
-				'option-reader',
-				'--read-password',
-				'option-secret'
-			],
-			authorization: basicAuthorization('option-reader', 'option-secret')
-		},
-		{
-			name: 'a user option with the password from the environment',
-			environment: { CUPBOARD_VIEW_READ_PASSWORD: 'source-secret' },
-			options: ['--read-user', 'source-reader'],
-			authorization: basicAuthorization('source-reader', 'source-secret')
+			name: 'the option in preference to the environment',
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: sourceAccessKey },
+			options: ['--view-access-key', destinationAccessKey],
+			authorization: accessKeyAuthorization(destinationAccessKey),
+			tokenProviderRequests: [defaultCache]
 		}
 	])(
 		'sends the reference source $name',
-		async ({ environment, options, authorization }) => {
+		async ({ environment, options, authorization, tokenProviderRequests }) => {
 			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
 			const referencePathsFile = path.join(directory, 'reference-paths.txt');
 			const storePath = storePathSchema.parse(
@@ -1164,7 +1167,7 @@ describe('push command', () => {
 						expect({ run, requests }).toStrictEqual({
 							run: {
 								result: new CliAbortError(),
-								tokenProviderRequests: [defaultCache],
+								tokenProviderRequests,
 								openStoreCalls: 0
 							},
 							requests: [

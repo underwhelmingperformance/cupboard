@@ -19,29 +19,30 @@ import { z } from 'zod';
 import { waitForFile } from '../../tests/support/filesystem.ts';
 
 import {
-	assertEnvironmentCredentialSupport,
+	destinationAccessKey,
+	viewAccessKey
+} from './access-key.test-support.ts';
+import {
+	accessKeyInvocation,
+	assertAccessKeySupport,
 	commandOptionsFromHelp,
 	cupboardDebugArguments,
 	detectCacheSelectionSyntax,
 	inspectDocumentVersions,
-	readCredentialInvocation,
+	resolveAccessKey,
 	runCupboard,
-	withoutReadCredential
+	withoutAccessKey
 } from './cupboard-run.ts';
 import {
+	AccessKeyInvalidError,
+	AccessKeyVersionError,
 	CommandFailedError,
 	CupboardReportedError,
-	EnvironmentCredentialVersionError,
 	IntelMacOsUnsupportedError,
 	MissingInputError
 } from './errors.ts';
 
-const credentialVariables = [
-	'CUPBOARD_READ_USER',
-	'CUPBOARD_READ_PASSWORD',
-	'CUPBOARD_VIEW_READ_USER',
-	'CUPBOARD_VIEW_READ_PASSWORD'
-];
+const credentialVariables = ['CUPBOARD_ACCESS_KEY', 'CUPBOARD_VIEW_ACCESS_KEY'];
 
 interface FakeCupboardOptions {
 	readonly results: readonly object[];
@@ -547,84 +548,95 @@ const summaryEvent = {
 	data: { uploadedPaths: 2, reusedBlobs: 1, skipped: 0, uploadedBytes: 4096 }
 };
 
-describe('readCredentialInvocation', () => {
-	it.each([
-		{
-			target: 'cache',
-			user: 'reader',
-			expected: {
-				arguments: ['--read-user', 'reader'],
-				environment: { CUPBOARD_READ_PASSWORD: 'secret' }
-			}
-		},
-		{
-			target: 'cache',
-			user: '',
-			expected: { arguments: [], environment: {} }
-		},
-		{
-			target: 'view',
-			user: 'reader',
-			expected: {
-				arguments: ['--view-read-user', 'reader'],
-				environment: { CUPBOARD_VIEW_READ_PASSWORD: 'secret' }
-			}
-		},
-		{
-			target: 'view',
-			user: '',
-			expected: { arguments: [], environment: {} }
-		},
-		{
-			target: 'reference-source',
-			user: 'reader',
-			expected: {
-				arguments: ['--read-user', 'reader'],
-				environment: { CUPBOARD_VIEW_READ_PASSWORD: 'secret' }
-			}
-		},
-		{
-			target: 'reference-source',
-			user: '',
-			expected: { arguments: [], environment: {} }
-		}
-	] as const)(
-		'passes the $target credential for user "$user"',
-		({ target, user, expected }) => {
-			expect(readCredentialInvocation(user, 'secret', target)).toStrictEqual(
-				expected
-			);
-		}
-	);
-});
-
-describe('withoutReadCredential', () => {
+describe('accessKeyInvocation', () => {
 	it.each([
 		{
 			role: 'cache',
-			environment: {
-				CUPBOARD_READ_USER: undefined,
-				CUPBOARD_READ_PASSWORD: undefined
+			key: destinationAccessKey,
+			expected: {
+				arguments: [],
+				environment: { CUPBOARD_ACCESS_KEY: destinationAccessKey }
+			}
+		},
+		{
+			role: 'view',
+			key: viewAccessKey,
+			expected: {
+				arguments: [],
+				environment: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey }
 			}
 		},
 		{
 			role: 'reference-source',
-			environment: {
-				CUPBOARD_VIEW_READ_USER: undefined,
-				CUPBOARD_VIEW_READ_PASSWORD: undefined
+			key: viewAccessKey,
+			expected: {
+				arguments: [],
+				environment: { CUPBOARD_VIEW_ACCESS_KEY: viewAccessKey }
 			}
+		},
+		{
+			role: 'cache',
+			key: '',
+			expected: { arguments: [], environment: {} }
 		}
-	] as const)('removes the $role variables', ({ role, environment }) => {
-		expect(withoutReadCredential(role)).toStrictEqual({
+	] as const)('passes the $role key "$key"', ({ role, key, expected }) => {
+		expect(accessKeyInvocation(key, role)).toStrictEqual(expected);
+	});
+});
+
+describe('withoutAccessKey', () => {
+	it.each([
+		{ role: 'cache', environment: { CUPBOARD_ACCESS_KEY: undefined } },
+		{
+			role: 'reference-source',
+			environment: { CUPBOARD_VIEW_ACCESS_KEY: undefined }
+		}
+	] as const)('removes the $role variable', ({ role, environment }) => {
+		expect(withoutAccessKey(role)).toStrictEqual({
 			arguments: [],
 			environment
 		});
 	});
 });
 
-describe('assertEnvironmentCredentialSupport', () => {
+describe('resolveAccessKey', () => {
 	it.each([
-		'v0.0.50',
+		{
+			name: 'the input in preference to the variable',
+			input: destinationAccessKey,
+			environment: { CUPBOARD_ACCESS_KEY: viewAccessKey },
+			expected: destinationAccessKey
+		},
+		{
+			name: 'the variable without an input',
+			input: '',
+			environment: { CUPBOARD_ACCESS_KEY: viewAccessKey },
+			expected: viewAccessKey
+		},
+		{
+			name: 'no key for an empty variable',
+			input: '',
+			environment: { CUPBOARD_ACCESS_KEY: '' },
+			expected: ''
+		}
+	] as const)('returns $name', ({ input, environment, expected }) => {
+		expect(resolveAccessKey(input, environment, 'cache')).toBe(expected);
+	});
+
+	it('refuses an access token in the variable', () => {
+		expect(() =>
+			resolveAccessKey(
+				'',
+				{ CUPBOARD_VIEW_ACCESS_KEY: 'eyJhbGciOiJFZERTQSJ9.e30.signature' },
+				'view'
+			)
+		).toThrow(AccessKeyInvalidError);
+	});
+});
+
+describe('assertAccessKeySupport', () => {
+	it.each([
+		'v0.0.56',
 		'v0.1.0',
 		'1.0.0',
 		'0.0.0',
@@ -633,25 +645,25 @@ describe('assertEnvironmentCredentialSupport', () => {
 		'dev'
 	])('accepts a CLI that reports %s', (version) => {
 		expect(() => {
-			assertEnvironmentCredentialSupport(version);
+			assertAccessKeySupport(version);
 		}).not.toThrow();
 	});
 
-	it.each(['v0.0.49', '0.0.19'])(
-		'rejects a release older than v0.0.50: %s',
+	it.each(['v0.0.55', '0.0.19'])(
+		'rejects a release older than v0.0.56: %s',
 		(version) => {
 			let error: unknown;
 
 			try {
-				assertEnvironmentCredentialSupport(version);
+				assertAccessKeySupport(version);
 			} catch (error_) {
 				error = error_;
 			}
 
 			expect({
-				isTyped: error instanceof EnvironmentCredentialVersionError,
+				isTyped: error instanceof AccessKeyVersionError,
 				fields:
-					error instanceof EnvironmentCredentialVersionError
+					error instanceof AccessKeyVersionError
 						? {
 								minimumVersion: error.minimumVersion,
 								version: error.version
@@ -659,13 +671,13 @@ describe('assertEnvironmentCredentialSupport', () => {
 						: undefined
 			}).toStrictEqual({
 				isTyped: true,
-				fields: { minimumVersion: 'v0.0.50', version }
+				fields: { minimumVersion: 'v0.0.56', version }
 			});
 		}
 	);
 });
 
-describe('runCupboard credential variables', () => {
+describe('runCupboard access-key variables', () => {
 	afterEach(() => {
 		vi.unstubAllEnvs();
 	});
@@ -674,7 +686,7 @@ describe('runCupboard credential variables', () => {
 		{ protocol: 'result-file', supportsResultFile: true },
 		{ protocol: 'legacy stderr', supportsResultFile: false }
 	])(
-		'passes job-level credentials for a role without one and removes stripped ones ($protocol)',
+		'passes a job-level key for a role without one and removes a stripped one ($protocol)',
 		async ({ supportsResultFile }) => {
 			const temporary = await runnerTemporary();
 			const captureEnvironmentFile = path.join(temporary, 'environment.json');
@@ -691,16 +703,15 @@ describe('runCupboard credential variables', () => {
 
 			await runCupboard(binary, ['plan'], {
 				RUNNER_TEMP: temporary,
-				...readCredentialInvocation('', '', 'cache').environment,
-				...withoutReadCredential('view').environment
+				...accessKeyInvocation('', 'cache').environment,
+				...withoutAccessKey('view').environment
 			});
 			const childEnvironment = z
 				.object({ credentials: z.record(z.string(), z.string()) })
 				.parse(JSON.parse(await readFile(captureEnvironmentFile, 'utf8')));
 
 			expect(childEnvironment.credentials).toStrictEqual({
-				CUPBOARD_READ_USER: 'job-CUPBOARD_READ_USER',
-				CUPBOARD_READ_PASSWORD: 'job-CUPBOARD_READ_PASSWORD'
+				CUPBOARD_ACCESS_KEY: 'job-CUPBOARD_ACCESS_KEY'
 			});
 		}
 	);

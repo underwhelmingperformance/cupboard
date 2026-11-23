@@ -28,7 +28,6 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
@@ -48,11 +47,15 @@ import {
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
-	ReadCredentialPairError,
+	InvalidAccessKeyError,
 	ScopeForbiddenError,
 	SessionRejectedError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
+import {
+	accessKeyAuthorization,
+	destinationAccessKey
+} from '../test-support.ts';
 
 import {
 	cacheAccessFetcher,
@@ -76,7 +79,6 @@ import {
 import { buildCacheGrant } from './oidc-trust/rule-builder.ts';
 
 const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
-const alice = readUserInputSchema.parse('alice');
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
@@ -393,16 +395,12 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('does not infer cache visibility from read credentials', async () => {
+	it('does not infer cache visibility from an access key', async () => {
 		const { client, recorded } = setupClient({});
 
 		await runGithubSetup(
 			url,
-			{
-				...options,
-				readUser: readUserInputSchema.parse('reader'),
-				readPassword: 'secret'
-			},
+			{ ...options, accessKey: destinationAccessKey },
 			reporter([]),
 			client,
 			dependencies
@@ -2091,8 +2089,7 @@ describe('registerGithubCommands', () => {
 			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
 			'--allow-branch-workflow',
 			'-y, --yes',
-			'--read-user <user>',
-			'--read-password <password>',
+			'--access-key <key>',
 			'--trusted-contributor-reuse',
 			'--access, --cache-access-mode <mode>'
 		]);
@@ -2147,8 +2144,7 @@ describe('registerGithubCommands', () => {
 			{ flags: '--trust-scope <scope>', mandatory: false },
 			{ flags: '--tag-pattern <glob>', mandatory: false },
 			{ flags: '--root-prefix <value>', mandatory: false },
-			{ flags: '--read-user <user>', mandatory: false },
-			{ flags: '--read-password <password>', mandatory: false }
+			{ flags: '--access-key <key>', mandatory: false }
 		]);
 	});
 
@@ -2374,10 +2370,10 @@ describe('cacheInfoFetcher', () => {
 		cachePrioritySchema.parse(40)
 	).render();
 
-	it('sends the Basic credential and parses the answer', async () => {
+	it('presents the access key and parses the answer', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];
 		const fetch = cacheInfoFetcher(
-			{ readUser: alice, readPassword: 's3cret' },
+			{ accessKey: destinationAccessKey },
 			{
 				fetch: (input, init) => {
 					requests.push({
@@ -2403,7 +2399,7 @@ describe('cacheInfoFetcher', () => {
 			requests: [
 				{
 					url: 'https://cupboard.example/t/acme/nix-cache-info',
-					authorization: `Basic ${Buffer.from('alice:s3cret').toString('base64')}`
+					authorization: accessKeyAuthorization(destinationAccessKey)
 				}
 			]
 		});
@@ -2511,10 +2507,14 @@ describe('cacheInfoFetcher', () => {
 		}
 	);
 
-	it('rejects half a credential pair before any request', () => {
-		expect(() => cacheInfoFetcher({ readUser: alice })).toThrow(
-			ReadCredentialPairError
-		);
+	it('refuses an access token in CUPBOARD_ACCESS_KEY before any request', () => {
+		vi.stubEnv('CUPBOARD_ACCESS_KEY', 'eyJhbGciOiJFZERTQSJ9.e30.signature');
+
+		try {
+			expect(() => cacheInfoFetcher({})).toThrow(InvalidAccessKeyError);
+		} finally {
+			vi.unstubAllEnvs();
+		}
 	});
 
 	it('retries a transient response before parsing the answer', async () => {

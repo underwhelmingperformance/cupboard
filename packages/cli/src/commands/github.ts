@@ -5,6 +5,7 @@ import {
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { withoutTrailingSlashes } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	type OidcTrustAddBodyInput,
 	type OidcTrustExtendBodyInput,
@@ -17,12 +18,17 @@ import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { filterProgressively } from '@cupboard/shared/collections';
 import { genericExitCode } from '@cupboard/shared/errors';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { type Command, Option } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 
 import { abortReason } from '../abort.ts';
+import {
+	accessKeyFor,
+	basicCredentialForAccessKey,
+	parseAccessKey
+} from '../access-key-options.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
@@ -46,11 +52,9 @@ import {
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
-	ReadCredentialPairError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
 import { classifyFailures } from '../exit-code.ts';
-import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
@@ -174,8 +178,7 @@ export interface GithubSetupOptions {
 	readonly workflowRef: string;
 	readonly allowBranchWorkflow?: boolean;
 	readonly yes?: boolean;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 	readonly cacheAccessMode?: CacheAccessMode;
 	readonly trustedContributorReuse?: boolean;
 }
@@ -236,9 +239,8 @@ export interface SetupStep {
 	readonly detail?: string;
 }
 
-export interface ReadCredentialOptions {
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+export interface CacheInfoReadOptions {
+	readonly accessKey?: AccessKeySecret;
 	readonly signal?: AbortSignal;
 }
 
@@ -252,28 +254,18 @@ interface CacheInfoFetcherDependencies {
 const cacheInfoTimeoutMs = 30_000;
 
 /**
-Reads `nix-cache-info` with the supplied Basic credential. A private cache
-returns 401 without one. Supplying only one part of the credential pair fails
-before the request starts.
+Reads `nix-cache-info` with the access key from the options or from
+`CUPBOARD_ACCESS_KEY`. A private cache returns 401 without one.
 */
 export function cacheInfoFetcher(
-	options: ReadCredentialOptions,
+	options: CacheInfoReadOptions,
 	dependencies: CacheInfoFetcherDependencies = {}
 ): (url: URL) => Promise<CacheInfo> {
-	if (
-		(options.readUser === undefined) !==
-		(options.readPassword === undefined)
-	) {
-		throw new ReadCredentialPairError();
-	}
-
+	const accessKey = accessKeyFor(options);
 	const headers =
-		options.readUser === undefined || options.readPassword === undefined
+		accessKey === undefined
 			? undefined
-			: basicAuthHeader({
-					user: options.readUser,
-					password: options.readPassword
-				});
+			: basicAuthHeader(basicCredentialForAccessKey(accessKey));
 	const fetcher = resilientFetcher('replay-safe', dependencies.fetch);
 	const timeoutMs = dependencies.timeoutMs ?? cacheInfoTimeoutMs;
 
@@ -1266,11 +1258,10 @@ export function registerGithubCommands(
 			'remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.'
 		)
 		.option(
-			'--read-user <user>',
-			'user name of a read credential for checking private cache information',
-			parseReadUser
+			'--access-key <key>',
+			'access key for reading private cache and view metadata; it does not select access mode or workflow grants (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
-		.option('--read-password <password>', 'password of the read credential')
 		.option(
 			'--trusted-contributor-reuse',
 			'allow branch runs to reuse only the merged PR cache; requires the trusted workflow and pull-requests: read'
@@ -1358,11 +1349,10 @@ export function registerGithubCommands(
 			"the root-prefix value that the repository's workflow passes"
 		)
 		.option(
-			'--read-user <user>',
-			'user name of a read credential for checking private cache and view metadata; it does not select access mode or workflow grants',
-			parseReadUser
+			'--access-key <key>',
+			'access key for reading private cache and view metadata; it does not select access mode or workflow grants (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
-		.option('--read-password <password>', 'password of the read credential')
 		.addHelpText(
 			'after',
 			[
@@ -1464,9 +1454,7 @@ export function registerGithubCommands(
 				{
 					repo: options.repo,
 					...(options.branch !== undefined && { branch: options.branch }),
-					...(options.readUser !== undefined && {
-						readUser: options.readUser
-					}),
+					...(accessKeyFor(options) !== undefined && { hasAccessKey: true }),
 					isFixRequested: options.fix === true
 				},
 				reporter,
@@ -1477,7 +1465,10 @@ export function registerGithubCommands(
 			await offerDiscoveredGithubRepair(result, ui, options.fix === true, () =>
 				checkDependencies.runDiscoveredGithubRepair(
 					url,
-					options,
+					{
+						...options,
+						...(accessKeyFor(options) !== undefined && { hasAccessKey: true })
+					},
 					ui,
 					client,
 					dependencies,

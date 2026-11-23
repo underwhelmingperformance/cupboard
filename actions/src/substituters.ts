@@ -14,7 +14,8 @@ const cacheHeaders: Readonly<Record<string, string>> = {
 };
 
 /**
-A configured cache and its optional cache-specific read credential.
+A configured cache and, when it has its own access key, the Basic credential
+that presents the key.
 */
 export interface CacheSelection {
 	readonly cache: CacheScope;
@@ -26,8 +27,8 @@ export function cacheUrlFor(baseUrl: URL, cache: CacheScope): URL {
 }
 
 /**
-Returns the substituter URL for one cache. A cache-specific read credential
-is placed in the URL because netrc is keyed by host and cannot select a cache.
+Returns the substituter URL for one cache. A cache's own access key is placed
+in the URL because netrc is keyed by host and cannot select a cache.
 A `nix-cache-info` probe uses `cacheUrlFor` instead and sends the credential
 in an `authorization` header because fetch ignores URL credentials.
 */

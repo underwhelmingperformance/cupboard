@@ -666,18 +666,6 @@ export class InvalidAudienceError extends CliUsageError {
 	}
 }
 
-// A Basic credential is `user:password`, split on the first colon. A read user
-// containing a colon could therefore not be recovered from the Authorization
-// header a reader sends.
-export class InvalidReadUserError extends CliUsageError {
-	constructor(public readonly value: string) {
-		super(
-			`Invalid read user (expected a non-empty string with no colon): ${value}`
-		);
-		this.name = 'InvalidReadUserError';
-	}
-}
-
 export class InvalidStoreUriError extends CliUsageError {
 	constructor(
 		public readonly value: string,
@@ -1370,11 +1358,11 @@ export type PushCommand =
 
 /**
 The credential that a push uses: the owner session cached by
-`cupboard login`, or a token exchanged for the GitHub Actions OIDC token
-with `--github-oidc`. `PushIncompleteError` gives advice for it when a push
-is not authorised.
+`cupboard login`, a token exchanged for the GitHub Actions OIDC token with
+`--github-oidc`, or an access key from `--access-key`. `PushIncompleteError`
+gives advice for it when a push is not authorised.
 */
-export type PushCredential = 'cupboard-login' | 'github-oidc';
+export type PushCredential = 'cupboard-login' | 'github-oidc' | 'access-key';
 
 /**
 The step of a push at which a path failed. A path that fails at `verify` was
@@ -1486,9 +1474,17 @@ function pushRetryAdvice({
 	credential
 }: IncompletePush): string {
 	if (exitStatus === authExitCode) {
-		return credential === 'github-oidc'
-			? `Check that a trust rule of the tenant grants this GitHub workflow the push, then run ${command} again.`
-			: `Sign in again with cupboard login or use a credential that allows the push, then run ${command} again.`;
+		switch (credential) {
+			case 'github-oidc': {
+				return `Check that a trust rule of the tenant grants this GitHub workflow the push, then run ${command} again.`;
+			}
+			case 'access-key': {
+				return `Check that the access key exists, has not expired, and has publication grants for this cache, then run ${command} again.`;
+			}
+			case 'cupboard-login': {
+				return `Sign in again with cupboard login or use a credential that allows the push, then run ${command} again.`;
+			}
+		}
 	}
 
 	if (exitStatus === transientExitCode) {
@@ -2203,42 +2199,44 @@ export class GithubSetupOwnerRuleConflictError extends CliUsageError {
 }
 
 /**
-Basic read credentials come as a pair; half a pair is a mistake. `variables`
-lists the environment variables that supply a half that the options omit.
+An access-key option or variable has a value that is not an access key. These
+options accept only access keys; an access token is refused.
 */
-export class ReadCredentialPairError extends CliUsageError {
-	constructor(
-		target: 'cache' | 'view' = 'cache',
-		readonly variables?: { readonly user: string; readonly password: string }
-	) {
-		const prefix = target === 'view' ? '--view-read' : '--read';
-		const pair = `${prefix}-user and ${prefix}-password`;
+export class InvalidAccessKeyError extends CliUsageError {
+	constructor(public readonly source: string) {
 		super(
-			variables === undefined
-				? `${pair} must be supplied together`
-				: `${pair} must be supplied together, from the options or from ${variables.user} and ${variables.password}`
+			`${source} must be an access key, as \`cupboard access-key create\` prints it (cupboard_ak_...)`
 		);
-		this.name = 'ReadCredentialPairError';
+		this.name = 'InvalidAccessKeyError';
 	}
 }
 
-export class InvalidCacheCredentialsError extends CliUsageError {
+export class AccessKeyWithGithubOidcError extends CliUsageError {
+	constructor() {
+		super(
+			'Use either --access-key (or CUPBOARD_ACCESS_KEY) or --github-oidc, not both'
+		);
+		this.name = 'AccessKeyWithGithubOidcError';
+	}
+}
+
+export class InvalidCacheAccessKeysError extends CliUsageError {
 	constructor(options?: { readonly cause: unknown }) {
 		super(
-			'Invalid cache credentials (expected a JSON array of cache scopes and credentials)',
+			'Invalid cache access keys (expected a JSON array of cache scopes and access keys)',
 			options
 		);
-		this.name = 'InvalidCacheCredentialsError';
+		this.name = 'InvalidCacheAccessKeysError';
 	}
 }
 
 /**
-Each credential must match a cache selected for the Nix configuration.
+Each access key must match a cache selected for the Nix configuration.
 */
-export class UnknownCacheCredentialError extends CliUsageError {
+export class UnknownCacheAccessKeyError extends CliUsageError {
 	constructor(public readonly cache: string) {
-		super(`Select ${cache} in the command or remove its credential.`);
-		this.name = 'UnknownCacheCredentialError';
+		super(`Select ${cache} in the command or remove its access key.`);
+		this.name = 'UnknownCacheAccessKeyError';
 	}
 }
 

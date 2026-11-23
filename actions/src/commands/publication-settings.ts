@@ -245,12 +245,12 @@ function privateCacheNote(
 	const guide = resolvedCupboardFile(
 		cupboard,
 		serverUrl,
-		'docs/use/private-caches.md#giving-credentials-to-nix'
+		'docs/use/private-caches.md#giving-a-key-to-nix'
 	);
 
 	return [
-		'A private cache also needs a read credential, in a netrc entry or in the substituter URL. See ',
-		new ResultLink('Giving credentials to Nix', guide),
+		'A private cache also needs an access key, in a netrc entry or in the substituter URL. See ',
+		new ResultLink('Giving a key to Nix', guide),
 		'.'
 	];
 }

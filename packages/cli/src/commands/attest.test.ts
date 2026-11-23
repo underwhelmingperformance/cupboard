@@ -10,8 +10,9 @@ import { describe, expect, it, onTestFinished } from 'vitest';
 import { buildProgram, cliExitCode } from '../cli.ts';
 import {
 	AttestAttachBundleRequiredError,
-	ReadCredentialPairError
+	InvalidAccessKeyError
 } from '../errors.ts';
+import { destinationAccessKey } from '../test-support.ts';
 
 import {
 	appendPathFile,
@@ -528,7 +529,7 @@ describe('attest attach command', () => {
 		expect(result).toBeInstanceOf(AttestAttachBundleRequiredError);
 	});
 
-	it('refuses an incomplete private-read credential before authenticating', async () => {
+	it('refuses an access token in place of an access key before authenticating', async () => {
 		const program = silentProgram();
 
 		await expect(
@@ -538,14 +539,14 @@ describe('attest attach command', () => {
 					'attach',
 					'https://cache.example.workers.dev/t/acme',
 					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-					'--read-user',
-					'reader',
+					'--access-key',
+					'eyJhbGciOiJFZERTQSJ9.e30.signature',
 					'--attestation',
 					'bundle.json'
 				],
 				{ from: 'user' }
 			)
-		).rejects.toBeInstanceOf(ReadCredentialPairError);
+		).rejects.toBeInstanceOf(InvalidAccessKeyError);
 	});
 });
 
@@ -588,8 +589,8 @@ describe('attest status command', () => {
 					'status',
 					'https://cache.example.workers.dev/t/acme',
 					'invalid-path',
-					'--read-user',
-					'alice'
+					'--access-key',
+					destinationAccessKey
 				],
 				{ from: 'user' }
 			);

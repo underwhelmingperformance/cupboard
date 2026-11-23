@@ -13,7 +13,12 @@ import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { refreshSessionIdSchema } from '@cupboard/protocol/sessions';
 import type { ResultRow } from '@cupboard/reporter';
-import { describe, expect, it } from 'vitest';
+import { Command } from 'commander';
+import { http, HttpResponse } from 'msw';
+import { setupServer } from 'msw/node';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+
+import { destinationAccessKey } from '../test-support.ts';
 
 import {
 	type AccessKeyClient,
@@ -26,6 +31,7 @@ import {
 	InvalidAccessKeyIdError,
 	InvalidAccessKeyResourceError,
 	parseAccessKeyId,
+	registerAccessKeyCommands,
 	runAccessKeyCreate,
 	runAccessKeyDelete,
 	runAccessKeyList
@@ -448,4 +454,86 @@ describe('runAccessKeyDelete', () => {
 			cancellations: ['The access key was left in place.']
 		});
 	});
+});
+
+describe('access-key commands with an access key', () => {
+	const tenantUrl = 'https://cupboard.example.workers.dev/t/acme';
+
+	it.each([
+		{
+			name: 'create with --access-key',
+			arguments_: [
+				'create',
+				tenantUrl,
+				'--allow',
+				'read',
+				'--expires-in',
+				'1h',
+				'--access-key',
+				destinationAccessKey
+			],
+			environment: {},
+			sent: [`Bearer ${destinationAccessKey}`]
+		},
+		{
+			name: 'list with --access-key',
+			arguments_: ['list', tenantUrl, '--access-key', destinationAccessKey],
+			environment: {},
+			sent: [`Bearer ${destinationAccessKey}`]
+		},
+		{
+			name: 'list with only CUPBOARD_ACCESS_KEY, which it ignores',
+			arguments_: ['list', tenantUrl],
+			environment: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+			sent: []
+		},
+		{
+			name: 'delete with --access-key',
+			arguments_: [
+				'delete',
+				tenantUrl,
+				keyId,
+				'--yes',
+				'--access-key',
+				destinationAccessKey
+			],
+			environment: {},
+			sent: [`Bearer ${destinationAccessKey}`]
+		}
+	])(
+		'sends the expected credential for $name',
+		async ({ arguments_, environment, sent }) => {
+			const authorizations: (string | null)[] = [];
+			const server = setupServer(
+				http.all('*', ({ request }) => {
+					authorizations.push(request.headers.get('authorization'));
+
+					return HttpResponse.json({}, { status: 403 });
+				})
+			);
+			const program = new Command().exitOverride();
+			registerAccessKeyCommands(program);
+			server.listen({ onUnhandledFrame: 'error' });
+			onTestFinished(() => {
+				server.close();
+				vi.unstubAllEnvs();
+			});
+
+			for (const [name, value] of Object.entries<string | undefined>(
+				environment
+			)) {
+				vi.stubEnv(name, value);
+			}
+
+			try {
+				await program.parseAsync(['access-key', ...arguments_], {
+					from: 'user'
+				});
+			} catch {
+				// The server refuses every request, and the test reads the headers.
+			}
+
+			expect(authorizations).toStrictEqual(sent);
+		}
+	);
 });

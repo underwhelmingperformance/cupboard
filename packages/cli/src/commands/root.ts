@@ -42,6 +42,11 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { cursorPages } from '@cupboard/shared/paging';
 import type { Command } from 'commander';
 
+import {
+	type AccessKeyOptions,
+	accessKeyOrAuthenticated,
+	parseAccessKey
+} from '../access-key-options.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	rootEnsureAuthorizationDetails,
@@ -79,7 +84,7 @@ interface RootSetOptions {
 	readonly permanent?: boolean;
 }
 
-interface RootEnsureOptions extends RootSetOptions {
+interface RootEnsureOptions extends RootSetOptions, AccessKeyOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly plan?: string;
@@ -103,7 +108,7 @@ interface RootOptions {
 	readonly yes?: boolean;
 }
 
-interface RootListingOptions extends RootOptions {
+interface RootListingOptions extends RootOptions, AccessKeyOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -209,19 +214,21 @@ export function registerRootCommands(
 			return;
 		}
 
-		const credential = await authenticateForPush(
-			CupboardClient.fromUrl(target.tenantUrl, {
-				cache: target.cache,
-				signal: programOptions.signal
-			}),
-			{
-				githubOidc: options.githubOidc,
-				audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
-				authorizationDetails: rootSetAuthorizationDetails({
+		const credential = await accessKeyOrAuthenticated(options, reporter, () =>
+			authenticateForPush(
+				CupboardClient.fromUrl(target.tenantUrl, {
 					cache: target.cache,
-					roots: roots.map((entry) => entry.name)
-				})
-			}
+					signal: programOptions.signal
+				}),
+				{
+					githubOidc: options.githubOidc,
+					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
+					authorizationDetails: rootSetAuthorizationDetails({
+						cache: target.cache,
+						roots: roots.map((entry) => entry.name)
+					})
+				}
+			)
 		);
 		const rpc = tenantRpc(target.tenantUrl, {
 			credential,
@@ -254,19 +261,21 @@ export function registerRootCommands(
 			return;
 		}
 
-		const credential = await authenticateForPush(
-			CupboardClient.fromUrl(target.tenantUrl, {
-				cache: target.cache,
-				signal: programOptions.signal
-			}),
-			{
-				githubOidc: options.githubOidc,
-				audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
-				authorizationDetails: rootTargetsAuthorizationDetails({
+		const credential = await accessKeyOrAuthenticated(options, reporter, () =>
+			authenticateForPush(
+				CupboardClient.fromUrl(target.tenantUrl, {
 					cache: target.cache,
-					roots
-				})
-			}
+					signal: programOptions.signal
+				}),
+				{
+					githubOidc: options.githubOidc,
+					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
+					authorizationDetails: rootTargetsAuthorizationDetails({
+						cache: target.cache,
+						roots
+					})
+				}
+			)
 		);
 		const rpc = tenantRpc(target.tenantUrl, {
 			credential,
@@ -308,6 +317,11 @@ export function registerRootCommands(
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
+			'--access-key <key>',
+			'sign in with this access key instead of your saved `cupboard login` session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
+		)
+		.option(
 			'--audience <audience>',
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
@@ -335,20 +349,25 @@ export function registerRootCommands(
 				validateRootTargets(targets);
 				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
-				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(target.tenantUrl, {
-						cache: target.cache,
-						signal: programOptions.signal
-					}),
-					{
-						githubOidc: options.githubOidc,
-						audience:
-							options.audience ?? audienceSchema.parse(target.tenantUrl),
-						authorizationDetails: rootEnsureAuthorizationDetails({
-							cache: target.cache,
-							root: name
-						})
-					}
+				const credential = await accessKeyOrAuthenticated(
+					options,
+					reporter,
+					() =>
+						authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: rootEnsureAuthorizationDetails({
+									cache: target.cache,
+									root: name
+								})
+							}
+						)
 				);
 				const rpc = tenantRpc(target.tenantUrl, {
 					credential,
@@ -430,6 +449,11 @@ export function registerRootCommands(
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
+			'--access-key <key>',
+			'sign in with this access key instead of your saved `cupboard login` session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
+		)
+		.option(
 			'--audience <audience>',
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
@@ -446,17 +470,24 @@ export function registerRootCommands(
 					cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, cacheName);
-				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(target.tenantUrl, {
-						cache: target.cache,
-						signal: programOptions.signal
-					}),
-					{
-						githubOidc: options.githubOidc,
-						audience:
-							options.audience ?? audienceSchema.parse(target.tenantUrl),
-						authorizationDetails: rootListingAuthorizationDetails(target.cache)
-					}
+				const credential = await accessKeyOrAuthenticated(
+					options,
+					reporter,
+					() =>
+						authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: rootListingAuthorizationDetails(
+									target.cache
+								)
+							}
+						)
 				);
 				const rpc = tenantRpc(target.tenantUrl, {
 					credential,
@@ -481,6 +512,11 @@ export function registerRootCommands(
 		.option(
 			'--github-oidc',
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
+		)
+		.option(
+			'--access-key <key>',
+			'sign in with this access key instead of your saved `cupboard login` session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--audience <audience>',
@@ -508,20 +544,25 @@ export function registerRootCommands(
 
 				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
-				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(target.tenantUrl, {
-						cache: target.cache,
-						signal: programOptions.signal
-					}),
-					{
-						githubOidc: options.githubOidc,
-						audience:
-							options.audience ?? audienceSchema.parse(target.tenantUrl),
-						authorizationDetails: rootListingAuthorizationDetails(
-							target.cache,
-							name
+				const credential = await accessKeyOrAuthenticated(
+					options,
+					reporter,
+					() =>
+						authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: rootListingAuthorizationDetails(
+									target.cache,
+									name
+								)
+							}
 						)
-					}
 				);
 				const rpc = tenantRpc(target.tenantUrl, {
 					credential,

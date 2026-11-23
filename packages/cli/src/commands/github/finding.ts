@@ -46,7 +46,7 @@ export class ReadAuthenticationUnverifiedFinding extends CheckFinding {
 	}
 
 	detail(): string {
-		return `the workflow's ${this.resource} read-secret wiring is inherited or ambiguous`;
+		return `the workflow's ${this.resource} access-key wiring is inherited or ambiguous`;
 	}
 }
 
@@ -57,17 +57,7 @@ export class ReadAuthenticationConfiguredFinding extends CheckFinding {
 	}
 
 	detail(): string {
-		return `the workflow declares a complete ${this.resource} read-secret pair; secret values are not inspected`;
-	}
-}
-
-export class ReadAuthenticationIncompleteFinding extends FailedCheckFinding {
-	constructor(public readonly resource: 'cache' | 'view') {
-		super('read authentication');
-	}
-
-	detail(): string {
-		return `the workflow declares only part of a ${this.resource} read-secret pair`;
+		return `the workflow declares a ${this.resource} access key; secret values are not inspected`;
 	}
 }
 

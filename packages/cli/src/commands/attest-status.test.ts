@@ -10,6 +10,8 @@ import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata
 import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
 import { describe, expect, it, onTestFinished } from 'vitest';
 
+import { destinationAccessKey } from '../test-support.ts';
+
 const hashes = [
 	'0123456789abcdfghijklmnpqrsvwxyz',
 	'11111111111111111111111111111111',
@@ -43,8 +45,7 @@ async function runStatus(
 	mode: ReporterMode = 'json'
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
 	const environment = { ...process.env };
-	delete environment.CUPBOARD_READ_USER;
-	delete environment.CUPBOARD_READ_PASSWORD;
+	delete environment.CUPBOARD_ACCESS_KEY;
 	delete environment.CUPBOARD_TOKEN;
 	const child = spawn(
 		process.execPath,
@@ -262,10 +263,8 @@ describe('attest status subprocess', () => {
 			arguments_: [
 				paths[0] ?? '',
 				'--github-oidc',
-				'--read-user',
-				'alice',
-				'--read-password',
-				'secret'
+				'--access-key',
+				destinationAccessKey
 			]
 		},
 		{ arguments_: [paths[0] ?? '', '--audience', 'https://audience.test'] },

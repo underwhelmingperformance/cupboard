@@ -21,7 +21,6 @@ import {
 	publishTargetSchema,
 	publishTargetsSchema
 } from '@cupboard/protocol/publish-plan';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import { probeDeadlineMs } from '@cupboard/shared/timeout';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
@@ -33,6 +32,10 @@ import {
 import { ManualDeadlineTimer } from '../../tests/support/manual-deadline-timer.ts';
 import { stalledResponse } from '../../tests/support/stalled-request.ts';
 
+import {
+	accessKeyAuthorization,
+	destinationAccessKey
+} from './access-key.test-support.ts';
 import {
 	CacheAvailabilityQueryError,
 	CacheAvailabilityResponseMalformedError,
@@ -46,6 +49,7 @@ import {
 	TargetEvaluationError,
 	TargetRootUnresolvedError
 } from './errors.ts';
+import { basicCredentialForAccessKey } from './options.ts';
 
 const namedCache = (): CacheScope => ({
 	kind: 'named',
@@ -1428,17 +1432,14 @@ describe('availableCachePaths', () => {
 		});
 	});
 
-	it('sends a basic-auth Authorization header on every probe when read credentials are supplied', async () => {
+	it('sends a basic-auth Authorization header on every probe when an access key is supplied', async () => {
 		const headers: (HeadersInit | undefined)[] = [];
 
 		await availableCachePaths({
 			baseUrl: new URL('https://cupboard.example/t/acme'),
 			cache: namedCache(),
 			paths: [firstPath, secondPath],
-			credentials: {
-				user: readUserInputSchema.parse('reader'),
-				password: 'secret'
-			},
+			credentials: basicCredentialForAccessKey(destinationAccessKey),
 			fetcher: (_input, init) => {
 				headers.push(init?.headers);
 
@@ -1458,7 +1459,7 @@ describe('availableCachePaths', () => {
 
 		expect(headers).toStrictEqual([
 			{
-				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`,
+				authorization: accessKeyAuthorization(destinationAccessKey),
 				'content-type': 'application/json'
 			}
 		]);

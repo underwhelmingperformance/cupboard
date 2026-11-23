@@ -21,18 +21,19 @@ import { CodedError, UsageError } from '@cupboard/shared/errors';
 import { type Command } from 'commander';
 import { z } from 'zod';
 
-import { readCredentialInvocation, runCupboard } from '../cupboard-run.ts';
 import {
-	MissingInputError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
-	SubjectNarHashMovedError
-} from '../errors.ts';
+	accessKeyInvocation,
+	inspectCupboardVersion,
+	requireAccessKeySupport,
+	resolveAccessKey,
+	runCupboard
+} from '../cupboard-run.ts';
+import { MissingInputError, SubjectNarHashMovedError } from '../errors.ts';
 import { type Environment, parseLines } from '../inputs.ts';
 import {
 	provided,
+	providedAccessKey,
 	providedCacheSelection,
-	providedReadUser,
 	providedUrl
 } from '../options.ts';
 import { assertReleasePlatformSupported } from '../release-platform.ts';
@@ -44,8 +45,6 @@ interface StatusOptions {
 	readonly cupboardPath?: string;
 	readonly receiptFile?: string;
 	readonly bundlesFile?: string;
-	readonly readUser?: string;
-	readonly readPassword?: string;
 }
 
 const statusResultSchema = z.object({
@@ -93,8 +92,6 @@ export function registerAttestStatusCommand(
 			'receipt for paths published by this run'
 		)
 		.option('--bundles-file <path>', 'manifest of bundles signed in this run')
-		.option('--read-user <user>', 'destination cache read user')
-		.option('--read-password <password>', 'destination cache read password')
 		.action((options: StatusOptions) =>
 			attestStatusAction(options, environment, createGithubReporter(), signal)
 		);
@@ -121,13 +118,14 @@ async function attestStatusAction(
 	if (receiptFile === undefined) {
 		throw new MissingInputError('receipt-file');
 	}
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
-	if (readUser !== '' && readPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-	if (readPassword !== '' && readUser === '') {
-		throw new ReadUserRequiredError();
+	const accessKey = resolveAccessKey(
+		providedAccessKey('access-key', environment.ACCESS_KEY),
+		environment,
+		'cache'
+	);
+
+	if (accessKey !== '') {
+		await requireAccessKeySupport(cupboardPath, inspectCupboardVersion, signal);
 	}
 
 	const receipt = buildReceiptSchema.parse(
@@ -174,7 +172,7 @@ async function attestStatusAction(
 		path.join(environment.RUNNER_TEMP ?? tmpdir(), 'cupboard-coverage-')
 	);
 	const pathsFile = path.join(directory, 'paths.txt');
-	const credential = readCredentialInvocation(readUser, readPassword);
+	const credential = accessKeyInvocation(accessKey);
 	try {
 		await writeFile(pathsFile, `${paths.join('\n')}\n`);
 		const results = await runCupboard(

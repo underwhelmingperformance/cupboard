@@ -34,6 +34,13 @@ import type { Reporter } from '@cupboard/reporter';
 import { type Command, Option } from 'commander';
 import { z } from 'zod';
 
+import {
+	accessKeyFor,
+	type AccessKeyOptions,
+	accessKeyOrAuthenticated,
+	parseAccessKey,
+	pushCredentialKind
+} from '../access-key-options.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { pushAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
@@ -89,7 +96,7 @@ declare module 'commander' {
 	}
 }
 
-interface BuildPushOptions {
+interface BuildPushOptions extends AccessKeyOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
@@ -471,6 +478,11 @@ export function registerBuildPushCommand(
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
+			'--access-key <key>',
+			'publish with this access key instead of your saved `cupboard login` session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
+		)
+		.option(
 			'--audience <audience>',
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
@@ -629,24 +641,31 @@ export function registerBuildPushCommand(
 					delimited.cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, delimited.cacheName);
-				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(target.tenantUrl, {
-						cache: target.cache,
-						signal: programOptions.signal
-					}),
-					{
-						githubOidc: options.githubOidc,
-						audience:
-							options.audience ?? audienceSchema.parse(target.tenantUrl),
-						authorizationDetails: pushAuthorizationDetails({
-							cache: target.cache,
-							attest: false,
-							...(targetRoot !== undefined && { root: targetRoot }),
-							...(options.runRoot !== undefined && {
-								runRoot: options.runRoot
-							})
-						})
-					}
+				const reporter = commandUi(program, programOptions).reporter();
+				const accessKey = accessKeyFor(options);
+				const credential = await accessKeyOrAuthenticated(
+					options,
+					reporter,
+					() =>
+						authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: pushAuthorizationDetails({
+									cache: target.cache,
+									attest: false,
+									...(targetRoot !== undefined && { root: targetRoot }),
+									...(options.runRoot !== undefined && {
+										runRoot: options.runRoot
+									})
+								})
+							}
+						)
 				);
 
 				const cohorts: readonly BuildInvocation[] =
@@ -666,7 +685,6 @@ export function registerBuildPushCommand(
 						: parseBuildInputsDocument(
 								await readFile(options.buildInputsFile, 'utf8')
 							);
-				const reporter = commandUi(program, programOptions).reporter();
 				const cache = target.cache;
 				const authorizationDetails = pushAuthorizationDetails({
 					cache,
@@ -764,23 +782,27 @@ export function registerBuildPushCommand(
 								signal: programOptions.signal
 							}),
 							client: pushClient,
+							// An access key cannot be exchanged for a token with
+							// further grants, so a key reads reference sources with
+							// its own grants.
 							referenceClient: (sources) =>
-								referenceBuildPushClient(sources, {
-									tenantUrl: target.tenantUrl,
-									cache,
-									client: pushClient,
-									auth: {
-										githubOidc: options.githubOidc,
-										audience:
-											options.audience ??
-											audienceSchema.parse(target.tenantUrl),
-										authorizationDetails
-									},
-									signal: programOptions.signal,
-									...(buildInputs !== undefined && { buildInputs })
-								}),
-							credential:
-								options.githubOidc === true ? 'github-oidc' : 'cupboard-login',
+								accessKey === undefined
+									? referenceBuildPushClient(sources, {
+											tenantUrl: target.tenantUrl,
+											cache,
+											client: pushClient,
+											auth: {
+												githubOidc: options.githubOidc,
+												audience:
+													options.audience ??
+													audienceSchema.parse(target.tenantUrl),
+												authorizationDetails
+											},
+											signal: programOptions.signal,
+											...(buildInputs !== undefined && { buildInputs })
+										})
+									: Promise.resolve(pushClient),
+							credential: pushCredentialKind(options, accessKey),
 							store: nix,
 							batchStore: {
 								withProtectedPaths: (use) =>

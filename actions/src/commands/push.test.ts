@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import { buildReceiptV3Schema } from '@cupboard/protocol/build';
 import {
 	type PushSummary,
@@ -15,8 +16,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildProgram } from '../../../packages/cli/src/cli.ts';
 import { modelPublishingJob } from '../../../packages/cli/src/commands/github/publication.ts';
 import { pushCommandAuthorizationDetails } from '../../../packages/cli/src/commands/push.ts';
+import { destinationAccessKey } from '../access-key.test-support.ts';
 import { inspectCupboardVersion } from '../cupboard-run.ts';
 import {
+	AccessKeyVersionError,
 	BooleanInputInvalidError,
 	CupboardReleaseSelectionConflictError,
 	CupboardVersionOutputMissingError,
@@ -58,12 +61,16 @@ import {
 	type PushOptions,
 	requireGraceResultProtocol,
 	requirePathsFileSupport,
+	requirePushAccessKeySupport,
 	requirePushSummary,
 	resolvePushInputs,
 	runPushCupboard
 } from './push.ts';
 
+const noAccessKey: AccessKeySecret | '' = '';
+
 const noExtras = {
+	accessKey: noAccessKey,
 	store: '',
 	permanent: false,
 	intermediatePathsFile: '',
@@ -108,6 +115,102 @@ describe('buildPushArguments', () => {
 			]
 		]);
 	});
+	it.each([
+		{
+			name: 'the job OIDC token',
+			variables: {},
+			credential: ['--github-oidc']
+		},
+		{
+			name: 'an inherited CUPBOARD_ACCESS_KEY',
+			variables: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+			credential: []
+		}
+	])('authenticates the push with $name', ({ variables, credential }) => {
+		const inputs = resolvePushInputs(
+			{
+				url: 'https://cache.example.test/t/acme',
+				paths: [],
+				attestations: [],
+				pathsFile: '/tmp/targets.txt',
+				root: 'github:owner/repo/main',
+				cupboardPath: '/bin/cupboard'
+			},
+			{ RUNNER_TEMP: '/tmp', ...variables }
+		);
+
+		expect(
+			pushArgumentsForInvocations(
+				inputs,
+				[{ root: inputs.root, paths: [] }],
+				'url'
+			)
+		).toStrictEqual([
+			[
+				'--no-colour',
+				'push',
+				'https://cache.example.test/t/acme',
+				'--paths-file',
+				'/tmp/targets.txt',
+				...credential,
+				'--root',
+				'github:owner/repo/main',
+				'--wait-timeout',
+				'10m'
+			]
+		]);
+	});
+
+	it.each([
+		{ name: 'no key', variables: {}, referenceSource: false, refused: false },
+		{
+			name: 'a destination key',
+			variables: { CUPBOARD_ACCESS_KEY: destinationAccessKey },
+			referenceSource: false,
+			refused: true
+		},
+		{
+			name: 'a reference source key',
+			variables: { CUPBOARD_VIEW_ACCESS_KEY: destinationAccessKey },
+			referenceSource: true,
+			refused: true
+		},
+		{
+			name: 'a view key without a reference source',
+			variables: { CUPBOARD_VIEW_ACCESS_KEY: destinationAccessKey },
+			referenceSource: false,
+			refused: false
+		}
+	])(
+		'checks the CLI version for $name',
+		({ variables, referenceSource, refused }) => {
+			const inputs = resolvePushInputs(
+				{
+					url: 'https://cache.example.test/t/acme',
+					paths: [],
+					attestations: [],
+					pathsFile: '/tmp/targets.txt',
+					root: 'github:owner/repo/main',
+					cupboardPath: '/bin/cupboard',
+					...(referenceSource && {
+						referencePathsFile: '/tmp/reference.txt',
+						referenceSource: 'https://cache.example.test/t/acme/cache/source'
+					})
+				},
+				{ RUNNER_TEMP: '/tmp', ...variables }
+			);
+			let error: unknown;
+
+			try {
+				requirePushAccessKeySupport(inputs, 'v0.0.55');
+			} catch (error_) {
+				error = error_;
+			}
+
+			expect(error instanceof AccessKeyVersionError).toBe(refused);
+		}
+	);
+
 	it('selects a named cache through the legacy CLI flag', () => {
 		expect(
 			buildPushArguments({
@@ -306,6 +409,7 @@ describe('buildPushArguments', () => {
 			buildPushArguments({
 				url: new URL('https://cache.example.test'),
 				paths: ['/nix/store/a'],
+				accessKey: noAccessKey,
 				audience: '',
 				root: 'github:owner/repo/main',
 				cache: { kind: 'default' },
@@ -545,6 +649,8 @@ describe('resolvePushInputs', () => {
 		store: '',
 		buildReceiptFile: '',
 		publicationReceiptFile: '/runner/temp/cupboard-push-receipt.json',
+		accessKey: '',
+		viewAccessKey: '',
 		audience: '',
 		root: 'github:owner/repo/main',
 		ttl: '',
@@ -1127,6 +1233,7 @@ describe('pushArgumentsForInvocations', () => {
 	const baseInputs: Pick<
 		PushInputs,
 		| 'url'
+		| 'accessKey'
 		| 'audience'
 		| 'cache'
 		| 'store'
@@ -1146,6 +1253,7 @@ describe('pushArgumentsForInvocations', () => {
 		| 'runRootPermanent'
 	> = {
 		url: new URL('https://cache.example.test'),
+		accessKey: '',
 		audience: '',
 		cache: { kind: 'default' },
 		store: '',

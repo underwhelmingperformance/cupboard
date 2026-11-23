@@ -11,9 +11,10 @@ import {
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import { keepAliveFetch } from '@cupboard/shared/keep-alive-fetch';
 import {
 	readResponseBytes,
@@ -33,6 +34,7 @@ import {
 	type VerifyResult
 } from '@cupboard/shared/sigstore';
 
+import { basicCredentialForAccessKey } from '../access-key-options.ts';
 import { cacheReadFetcher, resilientFetcher } from '../client/transport.ts';
 import { CliUsageError } from '../errors.ts';
 
@@ -46,8 +48,7 @@ export interface RemoteAttestationVerifyOptions extends AttestationPolicyOptions
 	readonly storePathHash: string;
 	readonly cache: CacheScope;
 	readonly bundleDigest?: string;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly accessKey?: AccessKeySecret;
 	readonly trustedPublicKey?: string;
 	readonly trustCachePubkey?: boolean;
 	readonly signal?: AbortSignal;
@@ -349,21 +350,13 @@ function trustedPublicKeys(source: string): readonly string[] {
 function readAuthHeaders(options: RemoteAttestationVerifyOptions): Headers {
 	const headers = new Headers();
 
-	if (options.readUser === undefined && options.readPassword === undefined) {
-		return headers;
+	if (options.accessKey !== undefined) {
+		headers.set(
+			'authorization',
+			basicAuthHeader(basicCredentialForAccessKey(options.accessKey))
+				.authorization
+		);
 	}
-
-	if (options.readUser === undefined || options.readPassword === undefined) {
-		throw new Error('Pass both --read-user and --read-password');
-	}
-
-	headers.set(
-		'authorization',
-		basicAuthHeader({
-			user: options.readUser,
-			password: options.readPassword
-		}).authorization
-	);
 
 	return headers;
 }

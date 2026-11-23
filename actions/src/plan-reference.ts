@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { type StorePathString } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	joinRoot,
 	type PlanReferenceOutcome
@@ -16,15 +17,15 @@ import {
 import { parseReporterResults } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { formatErrorWithCauses } from '@cupboard/shared/errors';
-import { type ReadUser } from '@cupboard/shared/http';
 import { StatusCodes } from 'http-status-codes';
 
 import { type EnsureRunner, type PlanInputs } from './commands/plan.ts';
-import { readCredentialInvocation } from './cupboard-run.ts';
+import { accessKeyInvocation } from './cupboard-run.ts';
 import {
 	CacheAvailabilityQueryError,
 	PlanReferencePublicationIncompleteError
 } from './errors.ts';
+import { basicCredentialForAccessKey } from './options.ts';
 import { availableCachePaths, type TargetEvaluation } from './publish-plan.ts';
 import { cacheUrlFor } from './substituters.ts';
 
@@ -32,8 +33,7 @@ const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface ReferencePlanInputs extends PlanInputs {
 	readonly referenceSource: string;
-	readonly fallbackReadUser: ReadUser | '';
-	readonly fallbackReadPassword: string;
+	readonly viewAccessKey: AccessKeySecret | '';
 }
 
 export interface ReferencePlanDependencies {
@@ -44,8 +44,8 @@ export interface ReferencePlanDependencies {
 
 /**
 Whether the plan job publishes targets by reference from the reference
-source. The publication runs `cupboard push` with the reference source's read
-credential.
+source. The publication runs `cupboard push` with the reference source's
+access key.
 */
 export function isPublishingByReference(
 	inputs: Pick<ReferencePlanInputs, 'referenceSource' | 'build' | 'publish'>
@@ -216,11 +216,8 @@ async function referenceAvailablePaths(
 			baseUrl: source.tenantUrl,
 			cache: source.cache,
 			paths,
-			...(inputs.fallbackReadUser !== '' && {
-				credentials: {
-					user: inputs.fallbackReadUser,
-					password: inputs.fallbackReadPassword
-				}
+			...(inputs.viewAccessKey !== '' && {
+				credentials: basicCredentialForAccessKey(inputs.viewAccessKey)
 			}),
 			...(dependencies.fetcher !== undefined && {
 				fetcher: dependencies.fetcher
@@ -266,11 +263,11 @@ async function publishRoot(
 	const pathsFile = `${stem}.paths`;
 	const resultFile = `${stem}.jsonl`;
 	await writeFile(pathsFile, `${paths.join('\n')}\n`);
-	const credential = readCredentialInvocation(
-		inputs.fallbackReadUser,
-		inputs.fallbackReadPassword,
+	const sourceKey = accessKeyInvocation(
+		inputs.viewAccessKey,
 		'reference-source'
 	);
+	const destinationKey = accessKeyInvocation(inputs.accessKey);
 	await dependencies.runner(
 		inputs.cupboardPath,
 		[
@@ -285,16 +282,19 @@ async function publishRoot(
 			pathsFile,
 			'--reference-source',
 			inputs.referenceSource,
-			'--github-oidc',
+			...(inputs.accessKey === ''
+				? [
+						'--github-oidc',
+						...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+					]
+				: []),
 			'--root',
 			root,
-			...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 			...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
-			...(inputs.permanent ? ['--permanent'] : []),
-			...credential.arguments
+			...(inputs.permanent ? ['--permanent'] : [])
 		],
 		dependencies.signal,
-		credential.environment
+		{ ...destinationKey.environment, ...sourceKey.environment }
 	);
 	const event = parseReporterResults(await readFile(resultFile, 'utf8')).find(
 		(result) => result.kind === pushSummaryResultKind

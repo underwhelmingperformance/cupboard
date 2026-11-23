@@ -406,8 +406,7 @@ jobs:
     with:
       url: https://cupboard.supply/t/laney
     secrets:
-      destination_read_user: \${{ secrets.CACHE_USER }}
-      destination_read_password: \${{ secrets.CACHE_PASSWORD }}
+      access_key: \${{ secrets.CACHE_USER }}
   inherited:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
     with:
@@ -418,18 +417,18 @@ jobs:
 		);
 
 		expect(
-			result.jobs.map(({ job, readCredentialWiring }) => ({
+			result.jobs.map(({ job, accessKeyWiring }) => ({
 				job,
-				readCredentialWiring
+				accessKeyWiring
 			}))
 		).toStrictEqual([
 			{
 				job: 'static-cache',
-				readCredentialWiring: { cache: 'configured', view: 'none' }
+				accessKeyWiring: { cache: 'configured', view: 'none' }
 			},
 			{
 				job: 'inherited',
-				readCredentialWiring: { cache: 'unknown', view: 'unknown' }
+				accessKeyWiring: { cache: 'unknown', view: 'unknown' }
 			}
 		]);
 	});

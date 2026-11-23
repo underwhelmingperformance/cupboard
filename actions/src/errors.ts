@@ -65,20 +65,16 @@ export class PrivateSubstitutersCacheUrlRequiredError extends UsageError {
 	}
 }
 
-export class ReadUserInvalidError extends UsageError {
-	constructor(public readonly value: string) {
-		super('read-user must not contain a colon');
-		this.name = 'ReadUserInvalidError';
-	}
-}
-
-export class ReadUserVariableInvalidError extends UsageError {
-	constructor(
-		public readonly variable: string,
-		public readonly value: string
-	) {
-		super(`${variable} must not contain a colon`);
-		this.name = 'ReadUserVariableInvalidError';
+/**
+An input or environment variable that should contain an access key contains
+something else, such as an access token.
+*/
+export class AccessKeyInvalidError extends UsageError {
+	constructor(public readonly source: string) {
+		super(
+			`${source} must be an access key, as \`cupboard access-key create\` prints it (cupboard_ak_...)`
+		);
+		this.name = 'AccessKeyInvalidError';
 	}
 }
 
@@ -461,105 +457,27 @@ export class CohortJsonSchemaError extends UsageError {
 	}
 }
 
-export class ReadPasswordRequiredError extends UsageError {
-	constructor() {
-		super('read-password is required when read-user is supplied');
-		this.name = 'ReadPasswordRequiredError';
-	}
-}
-
 /**
-The `cache-credentials` input is a JSON array of explicit cache scopes and
-their read credentials.
+The `cache-access-keys` input is a JSON array of explicit cache scopes and
+their access keys.
 */
-export class CacheCredentialsInvalidError extends UsageError {
+export class CacheAccessKeysInvalidError extends UsageError {
 	constructor(options?: { readonly cause: unknown }) {
 		super(
-			'cache-credentials must be a JSON array of cache scopes and credentials',
+			'cache-access-keys must be a JSON array of cache scopes and access keys',
 			options
 		);
-		this.name = 'CacheCredentialsInvalidError';
+		this.name = 'CacheAccessKeysInvalidError';
 	}
 }
 
 /**
-Each entry in `cache-credentials` must match a cache in `cache`.
+Each entry in `cache-access-keys` must match a cache in `cache`.
 */
-export class UnknownCacheCredentialError extends UsageError {
+export class UnknownCacheAccessKeyError extends UsageError {
 	constructor(public readonly cache: string) {
-		super(`add '${cache}' to cache or remove its cache-credentials entry`);
-		this.name = 'UnknownCacheCredentialError';
-	}
-}
-
-export class ReadUserRequiredError extends UsageError {
-	constructor() {
-		super('read-user is required when read-password is supplied');
-		this.name = 'ReadUserRequiredError';
-	}
-}
-
-export class ReadCredentialVariablesIncompleteError extends UsageError {
-	constructor(
-		public readonly userVariable: string,
-		public readonly passwordVariable: string
-	) {
-		super(`${userVariable} and ${passwordVariable} must be set together`);
-		this.name = 'ReadCredentialVariablesIncompleteError';
-	}
-}
-
-export class DestinationReadUserRequiredError extends UsageError {
-	constructor() {
-		super(
-			'destination-read-user is required when destination-read-password is supplied'
-		);
-		this.name = 'DestinationReadUserRequiredError';
-	}
-}
-
-export class DestinationReadPasswordRequiredError extends UsageError {
-	constructor() {
-		super(
-			'destination-read-password is required when destination-read-user is supplied'
-		);
-		this.name = 'DestinationReadPasswordRequiredError';
-	}
-}
-
-export class DestinationReadCredentialConflictError extends UsageError {
-	constructor() {
-		super(
-			'destination-read-user and cache-credentials both supply a destination credential; use one'
-		);
-		this.name = 'DestinationReadCredentialConflictError';
-	}
-}
-
-export class DestinationReadCredentialCacheCountError extends UsageError {
-	constructor(public readonly count: number) {
-		super(
-			'destination-read-user applies to a single destination cache; use cache-credentials for several'
-		);
-		this.name = 'DestinationReadCredentialCacheCountError';
-	}
-}
-
-export class FallbackReadUserRequiredError extends UsageError {
-	constructor() {
-		super(
-			'fallback-read-user is required when fallback-read-password is supplied'
-		);
-		this.name = 'FallbackReadUserRequiredError';
-	}
-}
-
-export class FallbackReadPasswordRequiredError extends UsageError {
-	constructor() {
-		super(
-			'fallback-read-password is required when fallback-read-user is supplied'
-		);
-		this.name = 'FallbackReadPasswordRequiredError';
+		super(`add '${cache}' to cache or remove its cache-access-keys entry`);
+		this.name = 'UnknownCacheAccessKeyError';
 	}
 }
 
@@ -879,15 +797,15 @@ export class ReleaseInstallationRollbackError extends CodedError {
 	}
 }
 
-export class EnvironmentCredentialVersionError extends UsageError {
+export class AccessKeyVersionError extends UsageError {
 	constructor(
 		public readonly minimumVersion: string,
 		public readonly version: string
 	) {
 		super(
-			`cupboard ${version} cannot take a read password from its environment; select cupboard ${minimumVersion} or later to use a read credential`
+			`cupboard ${version} cannot read an access key from its environment; select cupboard ${minimumVersion} or later to use an access key`
 		);
-		this.name = 'EnvironmentCredentialVersionError';
+		this.name = 'AccessKeyVersionError';
 	}
 }
 
@@ -1209,12 +1127,12 @@ export class CacheAccessProbeError extends CodedError {
 	}
 }
 
-export class StaticReadCredentialRejectedError extends CodedError {
+export class AccessKeyRejectedError extends CodedError {
 	constructor(public readonly url: URL) {
 		super(
-			`The configured read credential was rejected by ${url.href}. For a private reuse view, supply the tenant read credential or remove the static pair and use OIDC with view:content-read authority.`
+			`${url.href} rejected the configured access key. Check that the key exists, has not expired and can read the cache, or remove access-key and use OIDC; a private reuse view needs view:content-read.`
 		);
-		this.name = 'StaticReadCredentialRejectedError';
+		this.name = 'AccessKeyRejectedError';
 	}
 }
 
@@ -2029,7 +1947,7 @@ export class ReadCachesInvalidError extends UsageError {
 export class ReadConfigurationUnavailableError extends CodedError {
 	constructor() {
 		super(
-			'This cache configuration needs a newer cupboard CLI with server-resolved run --github-oidc support. Upgrade cupboard-version or configure an existing cache with a static read credential.'
+			'This cache configuration needs a newer cupboard CLI with server-resolved run --github-oidc support. Upgrade cupboard-version or read an existing cache with access-key.'
 		);
 		this.name = 'ReadConfigurationUnavailableError';
 	}

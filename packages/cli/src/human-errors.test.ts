@@ -12,7 +12,7 @@ import {
 	CliError,
 	CommitSocketCapabilityMismatchError,
 	CupboardHttpError,
-	InvalidCacheCredentialsError,
+	InvalidCacheAccessKeysError,
 	ReferenceSourceReadRefusedError,
 	ScopeForbiddenError,
 	SessionRejectedError,
@@ -196,18 +196,16 @@ describe('human error presentation', () => {
 
 	it('keeps field constraints without rendering validator issues', () => {
 		const parsed = z
-			.object({ password: z.string() })
-			.safeParse({ password: 42 });
+			.object({ accessKey: z.string() })
+			.safeParse({ accessKey: 42 });
 
 		if (parsed.success) {
-			throw new Error('Expected invalid credentials');
+			throw new Error('Expected invalid access keys');
 		}
 
 		expect(
-			formatHumanError(
-				new InvalidCacheCredentialsError({ cause: parsed.error })
-			)
-		).toBe('Invalid cache credentials. password: expected string.');
+			formatHumanError(new InvalidCacheAccessKeysError({ cause: parsed.error }))
+		).toBe('Invalid cache access keys. accessKey: expected string.');
 	});
 
 	it('includes original error diagnostics only when requested', () => {

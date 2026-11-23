@@ -1915,7 +1915,7 @@ it.each([
 			...job,
 			triggers: triggers(trigger),
 			...(trigger === 'push' && { trustedContributorReuse: true as const }),
-			readCredentialWiring: { cache: 'configured', view: 'configured' }
+			accessKeyWiring: { cache: 'configured', view: 'configured' }
 		};
 		const publication = modelPublishingJob(configured, identity, tenant, 'main')
 			.cases[0];
@@ -1991,7 +1991,7 @@ it.each(['branch', 'read-only', 'closed', 'merged-close'] as const)(
 				...job.inputs,
 				...(mode === 'read-only' && { publish: 'none' })
 			},
-			readCredentialWiring: { cache: 'configured', view: 'configured' }
+			accessKeyWiring: { cache: 'configured', view: 'configured' }
 		};
 		const publication = modelPublishingJob(configured, identity, tenant, 'main')
 			.cases[0];
@@ -2118,7 +2118,7 @@ it.each(
 			triggers: triggers('push'),
 			trustedContributorReuse: true,
 			...(configured && {
-				readCredentialWiring: {
+				accessKeyWiring: {
 					cache: 'configured' as const,
 					view: 'configured' as const
 				}

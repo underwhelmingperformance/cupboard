@@ -31,7 +31,6 @@ import {
 	type ResultRow,
 	type StepLog
 } from '@cupboard/reporter';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -45,6 +44,10 @@ import {
 	NarInfoUnavailableError,
 	ReferencePathMismatchError
 } from '../errors.ts';
+import {
+	accessKeyAuthorization,
+	destinationAccessKey
+} from '../test-support.ts';
 
 import {
 	type AttestationAttachClient,
@@ -111,8 +114,7 @@ describe('readCommittedAttestationPathInfos', () => {
 			{
 				url: new URL('https://cache.example.test/t/acme'),
 				cache: { kind: 'named', name: cacheNameSchema.parse('builds') },
-				readUser: readUserInputSchema.parse('reader'),
-				readPassword: 'secret'
+				accessKey: destinationAccessKey
 			},
 			{
 				onProgress: (completed) => {
@@ -138,7 +140,7 @@ describe('readCommittedAttestationPathInfos', () => {
 			requests: [
 				{
 					url: 'https://cache.example.test/t/acme/cache/builds/0123456789abcdfghijklmnpqrsvwxyz.narinfo',
-					authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+					authorization: accessKeyAuthorization(destinationAccessKey)
 				}
 			]
 		});

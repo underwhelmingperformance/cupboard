@@ -5,20 +5,27 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { isHttpsOrLoopbackHttp, parseBaseUrl } from '@cupboard/nix-store/url';
 import {
-	type CacheCredentials,
-	cacheCredentialsSchema
-} from '@cupboard/protocol/cache-credentials';
-import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
+	type AccessKeySecret,
+	accessKeySecretSchema
+} from '@cupboard/protocol/access-keys';
+import {
+	type CacheAccessKeys,
+	cacheAccessKeysSchema
+} from '@cupboard/protocol/cache-access-keys';
+import {
+	type BasicCredential,
+	readUserInputSchema
+} from '@cupboard/shared/http';
 import { hasControlCharacter } from '@cupboard/shared/text';
 
 import {
+	AccessKeyInvalidError,
 	BooleanInputInvalidError,
-	CacheCredentialsInvalidError,
+	CacheAccessKeysInvalidError,
 	CacheNameInvalidError,
 	ChoiceInputInvalidError,
 	PrivateSubstituterInvalidError,
-	ReadUserInvalidError,
-	UnknownCacheCredentialError,
+	UnknownCacheAccessKeyError,
 	UrlInputInsecureError,
 	UrlInputInvalidError,
 	type UrlInputName
@@ -69,14 +76,14 @@ export function providedCaches(
 }
 
 /**
-Parses `cache-credentials`. An absent or blank input returns an empty list.
-Rejects an entry unless `cache` lists the same cache. Otherwise the
-credential document and the configured cache list disagree.
+Parses `cache-access-keys`. An absent or blank input returns an empty list.
+Rejects an entry unless `cache` lists the same cache. Otherwise the key
+document and the configured cache list disagree.
 */
-export function providedCacheCredentials(
+export function providedCacheAccessKeys(
 	value: string | undefined,
 	caches: readonly CacheScope[]
-): CacheCredentials {
+): CacheAccessKeys {
 	const trimmed = provided(value);
 
 	if (trimmed === undefined) {
@@ -88,18 +95,18 @@ export function providedCacheCredentials(
 	try {
 		document = JSON.parse(trimmed);
 	} catch (error) {
-		throw new CacheCredentialsInvalidError({ cause: error });
+		throw new CacheAccessKeysInvalidError({ cause: error });
 	}
 
-	const parsed = cacheCredentialsSchema.safeParse(document);
+	const parsed = cacheAccessKeysSchema.safeParse(document);
 
 	if (!parsed.success) {
-		throw new CacheCredentialsInvalidError({ cause: parsed.error });
+		throw new CacheAccessKeysInvalidError({ cause: parsed.error });
 	}
 
 	for (const entry of parsed.data) {
 		if (caches.every((cache) => !isSameCacheScope(cache, entry.cache))) {
-			throw new UnknownCacheCredentialError(
+			throw new UnknownCacheAccessKeyError(
 				entry.cache.kind === 'default' ? 'the default cache' : entry.cache.name
 			);
 		}
@@ -184,23 +191,49 @@ export function providedPrivateSubstituters(
 }
 
 /**
-Preserve a read user verbatim because surrounding whitespace is part of the
-credential. Basic authentication separates user and password at the first
-colon, so reject a user containing a colon instead of creating a credential
-that no cache can match. Return `''` when the input is absent.
+Parses an input that contains an access key. Returns `''` when the input is
+absent or blank, and throws {@link AccessKeyInvalidError} when it contains
+something else, such as an access token.
 */
-export function providedReadUser(value = ''): ReadUser | '' {
-	if (value === '') {
+export function providedAccessKey(
+	name: string,
+	value: string | undefined
+): AccessKeySecret | '' {
+	const trimmed = provided(value);
+
+	if (trimmed === undefined) {
 		return '';
 	}
 
-	const parsed = readUserInputSchema.safeParse(value);
+	const parsed = accessKeySecretSchema.safeParse(trimmed);
 
 	if (!parsed.success) {
-		throw new ReadUserInvalidError(value);
+		throw new AccessKeyInvalidError(name);
 	}
 
 	return parsed.data;
+}
+
+// The server ignores the Basic user name of an access key, but netrc and Basic
+// authentication need one, so the actions always send this one.
+const accessKeyUser = readUserInputSchema.parse('cupboard');
+
+/**
+The HTTP Basic credential that presents an access key.
+*/
+export function basicCredentialForAccessKey(
+	key: AccessKeySecret
+): BasicCredential {
+	return { user: accessKeyUser, password: key };
+}
+
+/**
+The HTTP Basic credential that presents an access key, or undefined for `''`.
+*/
+export function accessKeyCredential(
+	key: AccessKeySecret | ''
+): BasicCredential | undefined {
+	return key === '' ? undefined : basicCredentialForAccessKey(key);
 }
 
 /**

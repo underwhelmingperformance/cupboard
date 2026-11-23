@@ -25,17 +25,20 @@ import {
 	runCohortSequence
 } from '../build-push/cohorts.ts';
 import {
+	AccessKeyWithGithubOidcError,
 	BuildCommandFailedError,
 	BuildPublicationFailedError,
 	CacheTargetConflictError,
 	CliAbortError,
 	CohortInputError,
 	CohortsFileInvalidError,
+	InvalidAccessKeyError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
+import { destinationAccessKey } from '../test-support.ts';
 
 import {
 	aggregateBuildReceipts,
@@ -709,6 +712,33 @@ describe('registerBuildPushCommand', () => {
 			name: 'a missing build command',
 			arguments_: [tenantUrl],
 			error: CohortInputError
+		},
+		{
+			name: 'an access key together with --github-oidc',
+			arguments_: [
+				tenantUrl,
+				'--github-oidc',
+				'--no-retain',
+				'--access-key',
+				destinationAccessKey,
+				'--',
+				'nix',
+				'build'
+			],
+			error: AccessKeyWithGithubOidcError
+		},
+		{
+			name: 'an access token in --access-key',
+			arguments_: [
+				tenantUrl,
+				'--no-retain',
+				'--access-key',
+				'eyJhbGciOiJFZERTQSJ9.e30.signature',
+				'--',
+				'nix',
+				'build'
+			],
+			error: InvalidAccessKeyError
 		},
 		{
 			name: 'a build command combined with a cohorts file',

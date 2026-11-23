@@ -18,9 +18,15 @@ import {
 } from '@cupboard/protocol/build';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
-import type { ReadUser } from '@cupboard/shared/http';
 import { type Command, Option } from 'commander';
 
+import {
+	accessKeyFor,
+	type AccessKeyOptions,
+	parseAccessKey,
+	pushCredentialKind,
+	sessionReplacingAccessKey
+} from '../access-key-options.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	contentReadAuthorizationDetails,
@@ -70,16 +76,14 @@ import {
 	referenceSourceReadIntents,
 	type ReferenceSourceReads
 } from '../push/reference-source-read.ts';
-import { parseReadUser } from '../read-user.ts';
 import { parseRootName } from '../root-name.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { cacheAccessFetcher } from './github.ts';
-import { referenceSourceCredentials } from './read-credentials.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 
-interface PushOptions {
+interface PushOptions extends AccessKeyOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
@@ -92,8 +96,6 @@ interface PushOptions {
 	readonly referencePathsFile?: string;
 	readonly referenceManifest?: string;
 	readonly referenceSource?: URL;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
 	readonly runRootPermanent?: boolean;
@@ -455,6 +457,11 @@ export function registerPushCommand(
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
+			'--access-key <key>',
+			'publish with this access key instead of your saved `cupboard login` session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
+		)
+		.option(
 			'--audience <audience>',
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
@@ -504,13 +511,9 @@ export function registerPushCommand(
 			parseWorkerUrl
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the read credential for a private --reference-source (default: $CUPBOARD_VIEW_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--read-password <password>',
-			'password of the read credential for a private --reference-source (default: $CUPBOARD_VIEW_READ_PASSWORD)'
+			'--view-access-key <key>',
+			'access key for a private --reference-source (default: $CUPBOARD_VIEW_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--run-root <name>',
@@ -650,10 +653,12 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
-			const referenceCredential =
+			const referenceAccessKey =
 				options.referenceSource === undefined
 					? undefined
-					: referenceSourceCredentials(options);
+					: accessKeyFor(options, 'view');
+			const reporter = commandUi(program, programOptions).reporter();
+			const accessKey = sessionReplacingAccessKey(options, reporter);
 
 			if (
 				options.referenceReceiptFile !== undefined &&
@@ -747,6 +752,10 @@ export function registerPushCommand(
 						fetchCacheAccess
 					);
 
+					if (accessKey !== undefined) {
+						return accessKey;
+					}
+
 					try {
 						return await authenticate(
 							CupboardClient.fromUrl(target.tenantUrl, {
@@ -784,14 +793,12 @@ export function registerPushCommand(
 			if (!isEmptyRootReplacement && publication.entries.length === 0) {
 				throw new EmptyPublicationError();
 			}
-			const reporter = commandUi(program, programOptions).reporter();
 			const cache = resolved.target.cache;
 
 			const copiedFrom = await observedCopiesFrom(options.copiedFromFile);
 			const receipt = await runPush(publication, reporter, {
 				command: 'cupboard push',
-				credential:
-					options.githubOidc === true ? 'github-oidc' : 'cupboard-login',
+				credential: pushCredentialKind(options, accessKey),
 				client: pushClientFor(resolved.target.tenantUrl, resolved.credential, {
 					cache,
 					signal: programOptions.signal,
@@ -813,9 +820,8 @@ export function registerPushCommand(
 				...(options.referenceSource !== undefined && {
 					referenceSource: {
 						url: options.referenceSource,
-						...(referenceCredential !== undefined && {
-							readUser: referenceCredential.user,
-							readPassword: referenceCredential.password
+						...(referenceAccessKey !== undefined && {
+							accessKey: referenceAccessKey
 						})
 					}
 				}),

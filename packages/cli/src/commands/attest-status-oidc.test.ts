@@ -112,8 +112,7 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 	vi.stubEnv('RUNNER_TEMP', directory);
 	vi.stubEnv('ACTIONS_ID_TOKEN_REQUEST_URL', new URL('/job-token', url).href);
 	vi.stubEnv('ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'job-secret');
-	vi.stubEnv('CUPBOARD_READ_USER', undefined);
-	vi.stubEnv('CUPBOARD_READ_PASSWORD', undefined);
+	vi.stubEnv('CUPBOARD_ACCESS_KEY', undefined);
 	const controller = new AbortController();
 	const program = new Command().exitOverride();
 	registerAttestStatusCommand(

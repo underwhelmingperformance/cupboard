@@ -15,15 +15,18 @@ import { ManualDeadlineTimer } from '../../tests/support/manual-deadline-timer.t
 import { stalledResponse } from '../../tests/support/stalled-request.ts';
 
 import {
+	accessKeyAuthorization,
+	destinationAccessKey
+} from './access-key.test-support.ts';
+import {
 	requirePublishedSubjects,
 	resolveAttestationDestination
 } from './attestation-destination.ts';
 import {
+	AccessKeyInvalidError,
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
 	MissingInputError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
 	SubjectNarHashMovedError
 } from './errors.ts';
 
@@ -70,41 +73,43 @@ function requestUrl(input: Parameters<typeof fetch>[0]): string {
 }
 
 describe('resolveAttestationDestination', () => {
-	it('reads the read password from the environment', () => {
+	it('reads the access key from the environment', () => {
 		expect(
 			resolveAttestationDestination(
-				{ url: tenantUrl, cache: 'builds', readUser: 'reader' },
-				{ READ_PASSWORD: 'secret' }
+				{ url: tenantUrl, cache: 'builds' },
+				{ ACCESS_KEY: destinationAccessKey }
 			)
 		).toStrictEqual({
 			url: new URL(tenantUrl),
 			cache: { kind: 'named', name: 'builds' },
-			readUser: 'reader',
-			readPassword: 'secret'
+			accessKey: destinationAccessKey
 		});
 	});
 
 	it.each([
-		{ name: 'the destination URL', given: {}, errorType: MissingInputError },
 		{
-			name: 'a read password for the read user',
-			given: { url: tenantUrl, readUser: 'reader' },
-			errorType: ReadPasswordRequiredError
+			name: 'a missing destination URL',
+			given: {},
+			environment: {},
+			errorType: MissingInputError
 		},
 		{
-			name: 'a read user for the read password',
-			given: { url: tenantUrl, readPassword: 'secret' },
-			errorType: ReadUserRequiredError
+			name: 'an access token in place of an access key',
+			given: { url: tenantUrl },
+			environment: { ACCESS_KEY: 'eyJhbGciOiJFZERTQSJ9.e30.signature' },
+			errorType: AccessKeyInvalidError
 		}
-	])('requires $name', ({ given, errorType }) => {
-		expect(() => resolveAttestationDestination(given, {})).toThrow(errorType);
+	])('refuses $name', ({ given, environment, errorType }) => {
+		expect(() => resolveAttestationDestination(given, environment)).toThrow(
+			errorType
+		);
 	});
 });
 
 describe('requirePublishedSubjects', () => {
 	const subjects = [{ storePath: appPath, sha256: appDigest }];
 
-	it('reads each narinfo with the read credential and the trace context', async () => {
+	it('reads each narinfo with the access key and the trace context', async () => {
 		const requests: {
 			url: string;
 			authorization?: string;
@@ -116,13 +121,8 @@ describe('requirePublishedSubjects', () => {
 			await requirePublishedSubjects(
 				subjects,
 				resolveAttestationDestination(
-					{
-						url: tenantUrl,
-						cache: 'builds',
-						readUser: 'reader',
-						readPassword: 'secret'
-					},
-					{}
+					{ url: tenantUrl, cache: 'builds' },
+					{ ACCESS_KEY: destinationAccessKey }
 				),
 				createGithubReporter(),
 				{
@@ -151,7 +151,7 @@ describe('requirePublishedSubjects', () => {
 				{
 					url: appNarInfoUrl,
 					propagated: true,
-					authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+					authorization: accessKeyAuthorization(destinationAccessKey)
 				}
 			]);
 		} finally {

@@ -15,6 +15,7 @@ import {
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	describeUnknownPath,
 	type PlanStore,
@@ -26,9 +27,14 @@ import type {
 } from '@cupboard/protocol/retention';
 import { formatBytes, formatCount, type Reporter } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import type { ReadUser } from '@cupboard/shared/http';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import {
+	accessKeyFor,
+	basicCredentialForAccessKey,
+	parseAccessKey,
+	sessionReplacingAccessKey
+} from '../access-key-options.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
@@ -84,14 +90,12 @@ import {
 	confirmUpstreamAvailabilityWith,
 	upstreamConfirmationOverrides
 } from '../plan/upstream-confirmation.ts';
-import { parseReadUser } from '../read-user.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { registerPlanDependenciesCommand } from './plan-dependencies.ts';
 import { registerPlanMeasureCommand } from './plan-measure.ts';
 import { registerPlanReprobeCommand } from './plan-reprobe.ts';
-import { readCredentials } from './read-credentials.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 import type { RootClient } from './root.ts';
 
@@ -331,22 +335,14 @@ export function registerPlanCommands(
 			'reuse view to query for store paths that other caches already have'
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)',
-			parseReadUser
+			'--access-key <key>',
+			'access key that reads the cache and, when the plan publishes, sets its roots, in place of the login session (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
-			'--read-password <password>',
-			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
-		)
-		.option(
-			'--view-read-user <user>',
-			'user name of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_USER)',
-			parseReadUser
-		)
-		.option(
-			'--view-read-password <password>',
-			'password of the read credential for a private reuse view (default: $CUPBOARD_VIEW_READ_PASSWORD)'
+			'--view-access-key <key>',
+			'access key for a private reuse view or reference source (default: $CUPBOARD_VIEW_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
 			'--ttl <duration>',
@@ -438,8 +434,10 @@ export function registerPlanCommands(
 					cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, cacheName);
-				const probes = planProbes(target, options);
 				const reporter = commandUi(program, programOptions).reporter();
+				const accessKey = sessionReplacingAccessKey(options, reporter);
+
+				const probes = planProbes(target, options);
 				const input = await readCohortPlanInput(options.targetsFile);
 				const { targets } = input;
 				const cache = target.cache;
@@ -449,20 +447,22 @@ export function registerPlanCommands(
 						const uniqueRoots = [
 							...new Set(targets.map((target) => target.root))
 						];
-						const credential = await authenticateForPush(
-							CupboardClient.fromUrl(target.tenantUrl, {
-								cache,
-								signal: programOptions.signal
-							}),
-							{
-								githubOidc: options.githubOidc,
-								audience:
-									options.audience ?? audienceSchema.parse(target.tenantUrl),
-								authorizationDetails: uniqueRoots.flatMap((root) =>
-									rootEnsureAuthorizationDetails({ cache, root })
-								)
-							}
-						);
+						const credential =
+							accessKey ??
+							(await authenticateForPush(
+								CupboardClient.fromUrl(target.tenantUrl, {
+									cache,
+									signal: programOptions.signal
+								}),
+								{
+									githubOidc: options.githubOidc,
+									audience:
+										options.audience ?? audienceSchema.parse(target.tenantUrl),
+									authorizationDetails: uniqueRoots.flatMap((root) =>
+										rootEnsureAuthorizationDetails({ cache, root })
+									)
+								}
+							));
 
 						return tenantRpc(target.tenantUrl, {
 							credential,
@@ -950,33 +950,39 @@ export async function readCohortPlanInput(
 
 /**
 Options of `plan cohort` and `plan reprobe` that select the reuse view or
-reference source and supply the read credentials.
+reference source and supply their access keys.
 */
 export interface PlanProbeOptions {
 	readonly reuseView?: string;
 	readonly referenceSource?: URL;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
-	readonly viewReadUser?: ReadUser;
-	readonly viewReadPassword?: string;
+	readonly accessKey?: AccessKeySecret;
+	readonly viewAccessKey?: AccessKeySecret;
 }
 
 /**
 Returns the probes that ask the destination cache, and the reuse view or
 reference source, which paths they have. Requests to the destination use the
-read credential, and requests to the view or reference source use the view
-read credential or no credential. The view credential is read only when the
-command has a view or reference source.
+access key for the cache, and requests to the view or reference source use
+the view access key or no credential. The view access key is read only when
+the command has a view or reference source.
 */
 export function planProbes(
 	target: CacheTarget,
 	options: PlanProbeOptions
 ): DestinationProbes {
-	const credentials = readCredentials(options);
-	const viewCredentials =
+	const accessKey = accessKeyFor(options);
+	const viewAccessKey =
 		options.reuseView === undefined && options.referenceSource === undefined
 			? undefined
-			: readCredentials(options, 'view');
+			: accessKeyFor(options, 'view');
+	const credentials =
+		accessKey === undefined
+			? undefined
+			: basicCredentialForAccessKey(accessKey);
+	const viewCredentials =
+		viewAccessKey === undefined
+			? undefined
+			: basicCredentialForAccessKey(viewAccessKey);
 
 	return tenantProbesFor({
 		baseUrl: target.tenantUrl,

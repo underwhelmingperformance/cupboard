@@ -57,7 +57,6 @@ import {
 	PassedCheckFinding,
 	PullRequestCacheAccessMismatchFinding,
 	ReadAuthenticationConfiguredFinding,
-	ReadAuthenticationIncompleteFinding,
 	ReadAuthenticationUnverifiedFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
@@ -1408,8 +1407,7 @@ it.each(
 			rules: [] as readonly unknown[],
 			secrets: `
     secrets:
-      destination_read_user: \${{ secrets.CACHE_USER }}
-      destination_read_password: \${{ secrets.CACHE_PASSWORD }}`,
+      access_key: \${{ secrets.CACHE_USER }}`,
 			status: 'ready',
 			findings: [new ReadAuthenticationConfiguredFinding('cache')]
 		},
@@ -1419,22 +1417,6 @@ it.each(
 			secrets: '\n    secrets: inherit',
 			status: 'unverified',
 			findings: [new ReadAuthenticationUnverifiedFinding('cache')]
-		},
-		{
-			access: 'private' as const,
-			rules: [] as readonly unknown[],
-			secrets:
-				'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
-			status: 'failed',
-			findings: [new ReadAuthenticationIncompleteFinding('cache')]
-		},
-		{
-			access: 'public' as const,
-			rules: [] as readonly unknown[],
-			secrets:
-				'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
-			status: 'failed',
-			findings: [new ReadAuthenticationIncompleteFinding('cache')]
 		}
 	].flatMap((scenario) =>
 		['push: false', 'publish: none'].map((publicationInput) => ({
@@ -2762,13 +2744,13 @@ jobs:
 
 it.each([
 	{
-		name: 'includes the read credential options in the repair command',
-		options: { readUser: 'reader' },
+		name: 'includes the access-key option in the repair command',
+		options: { hasAccessKey: true },
 		rows: [
 			{
 				label: 'Review a repair',
 				raw: true,
-				value: `cupboard github check ${tenant.href.replace(/\/$/u, '')} --repo ${repository} --branch main --read-user <user> --read-password <password> --fix`
+				value: `cupboard github check ${tenant.href.replace(/\/$/u, '')} --repo ${repository} --branch main --access-key <key> --fix`
 			}
 		]
 	},
@@ -3462,23 +3444,21 @@ const invalidAdditionalReads = [
 	{
 		input: `${tenant.href}/cache/falcon`,
 		secrets:
-			"    secrets:\n      read_user: '${{ secrets.USER }}'\n      read_password: '${{ secrets.PASSWORD }}'",
-		reason:
-			'read-caches requires OIDC reads; omit the default static read credential and provide complete destination credentials separately.'
+			"    secrets:\n      access_key: '${{ secrets.USER }}'\n      view_access_key: '${{ secrets.PASSWORD }}'",
+		reason: 'read-caches requires OIDC reads; omit the view_access_key secret.'
 	},
 	{
 		input: tenant.href,
-		secrets:
-			"    secrets:\n      destination_read_user: '${{ secrets.USER }}'\n      destination_read_password: '${{ secrets.PASSWORD }}'",
+		secrets: "    secrets:\n      access_key: '${{ secrets.USER }}'",
 		reason:
-			'Do not request OIDC reads for a destination with an explicit static credential.'
+			'Do not request OIDC reads for a destination that the access_key secret reads.'
 	},
 	{
 		input: `${tenant.href}/cache/falcon`,
 		secrets:
 			"    secrets:\n      private_substituters: '${{ secrets.SUBSTITUTERS }}'",
 		reason:
-			'The check cannot compare read-caches with secret private_substituters; verify that the same cache does not also use a static credential before repairing.'
+			'The check cannot compare read-caches with secret private_substituters; verify that the same cache is not also read with a credential in private_substituters before repairing.'
 	},
 	{
 		input: `|\n${Array.from({ length: 16 }, (_, index) => `        ${tenant.href}/cache/extra-${String(index)}`).join('\n')}`,
@@ -3733,7 +3713,7 @@ it.each([false, true])(
 	async (isStatic) => {
 		const input = `|\n        ${tenant.href}/cache/falcon\n        ${tenant.href}/cache/public\n        ${tenant.href}/cache/falcon/`;
 		const secrets = isStatic
-			? "    secrets:\n      destination_read_user: '${{ secrets.USER }}'\n      destination_read_password: '${{ secrets.PASSWORD }}'"
+			? "    secrets:\n      access_key: '${{ secrets.USER }}'"
 			: '';
 		const { client, dependencies } = fixture({
 			dependencies: {
@@ -3987,7 +3967,7 @@ it.each([
 	{ label: 'without a view read grant', hasViewGrant: false },
 	{ label: 'with a view read grant', hasViewGrant: true }
 ])(
-	'checks the view read grant for publication from a private view read with a static credential, $label',
+	'checks the view read grant for publication from a private view read with an access key, $label',
 	async ({ hasViewGrant }) => {
 		const view = reuseViewSummarySchema.parse({
 			name: 'pull-requests-1234',
@@ -4036,8 +4016,8 @@ jobs:
       root-prefix: builds
       reuse-view: pull-requests-1234
     secrets:
-      read_user: \${{ secrets.READ_USER }}
-      read_password: \${{ secrets.READ_PASSWORD }}
+      access_key: \${{ secrets.READ_USER }}
+      view_access_key: \${{ secrets.VIEW_ACCESS_KEY }}
 `)
 				},
 				fetchCacheAccess: () => Promise.resolve('public'),
@@ -4108,7 +4088,7 @@ jobs:
 							check: 'read authentication',
 							status: 'ok',
 							detail:
-								'the workflow declares a complete view read-secret pair; secret values are not inspected'
+								'the workflow declares a view access key; secret values are not inspected'
 						}
 					},
 					{ trigger: 'push', finding: { check: 'reuse view', status: 'ok' } }

@@ -4,14 +4,20 @@ import { cacheUrl, urlWithCredential } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import { type CacheScope, isSameCacheScope } from '@cupboard/nix-store/scalars';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
-	type CacheCredentials,
-	cacheCredentialsSchema
-} from '@cupboard/protocol/cache-credentials';
+	type CacheAccessKeys,
+	cacheAccessKeysSchema
+} from '@cupboard/protocol/cache-access-keys';
 import type { Reporter } from '@cupboard/reporter';
-import type { ReadUser } from '@cupboard/shared/http';
+import type { BasicCredential } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
+import {
+	accessKeyFor,
+	basicCredentialForAccessKey,
+	parseAccessKey
+} from '../access-key-options.ts';
 import {
 	type CacheTarget,
 	cacheTargetFromUrl,
@@ -20,39 +26,30 @@ import {
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
-	InvalidCacheCredentialsError,
-	UnknownCacheCredentialError
+	InvalidCacheAccessKeysError,
+	UnknownCacheAccessKeyError
 } from '../errors.ts';
-import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
-
-export interface ConfigCredential {
-	readonly user: ReadUser;
-	readonly password: string;
-}
 
 export interface ConfigSubstituter {
 	readonly cache: CacheScope;
-	readonly credential?: ConfigCredential;
+	readonly credential?: BasicCredential;
 }
 
 export interface ConfigInput {
 	readonly url: URL;
 	readonly publicKey: string;
 	readonly substituters: readonly ConfigSubstituter[];
-	readonly netrcCredential?: ConfigCredential;
+	readonly netrcCredential?: BasicCredential;
 }
 
 interface ConfigOptions {
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
-	readonly cacheCredentials?: string;
+	readonly accessKey?: AccessKeySecret;
+	readonly cacheAccessKeys?: string;
 	readonly includeDefaultCache?: boolean;
 }
 
 const defaultCacheScope: CacheScope = { kind: 'default' };
-
-export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
 Returns the substituter URL for one cache and optional credential.
@@ -60,7 +57,7 @@ Returns the substituter URL for one cache and optional credential.
 export function cacheSubstituterUrl(
 	url: URL,
 	cache: CacheScope,
-	credential?: ConfigCredential
+	credential?: BasicCredential
 ): URL {
 	const substituter = cacheUrl(url, cache);
 
@@ -100,16 +97,16 @@ export function runConfig(input: ConfigInput, reporter: Reporter): void {
 	if (input.substituters.some((entry) => entry.credential !== undefined)) {
 		reporter.info(
 			[
-				'# A substituter URL above contains a cache-specific read credential.',
-				'# Keep this snippet as secret as the credential itself.'
+				'# A substituter URL above contains a cache-specific access key.',
+				'# Keep this snippet as secret as the access key itself.'
 			].join('\n')
 		);
 	}
 }
 
-export function parseCacheCredentials(
+export function parseCacheAccessKeys(
 	value: string | undefined
-): CacheCredentials {
+): CacheAccessKeys {
 	if (value === undefined || value.trim() === '') {
 		return [];
 	}
@@ -119,13 +116,13 @@ export function parseCacheCredentials(
 	try {
 		document = JSON.parse(value);
 	} catch (error) {
-		throw new InvalidCacheCredentialsError({ cause: error });
+		throw new InvalidCacheAccessKeysError({ cause: error });
 	}
 
-	const parsed = cacheCredentialsSchema.safeParse(document);
+	const parsed = cacheAccessKeysSchema.safeParse(document);
 
 	if (!parsed.success) {
-		throw new InvalidCacheCredentialsError({ cause: parsed.error });
+		throw new InvalidCacheAccessKeysError({ cause: parsed.error });
 	}
 
 	return parsed.data;
@@ -133,24 +130,26 @@ export function parseCacheCredentials(
 
 export function resolveConfigSubstituters(
 	selected: readonly CacheScope[],
-	credentials: CacheCredentials
+	accessKeys: CacheAccessKeys
 ): readonly ConfigSubstituter[] {
-	for (const entry of credentials) {
+	for (const entry of accessKeys) {
 		if (selected.some((cache) => isSameCacheScope(cache, entry.cache))) {
 			continue;
 		}
 
-		throw new UnknownCacheCredentialError(cacheDescription(entry.cache));
+		throw new UnknownCacheAccessKeyError(cacheDescription(entry.cache));
 	}
 
 	return selected.map((cache) => {
-		const credential = credentials.find((entry) =>
+		const accessKey = accessKeys.find((entry) =>
 			isSameCacheScope(entry.cache, cache)
-		)?.credential;
+		)?.accessKey;
 
 		return {
 			cache,
-			...(credential !== undefined && { credential })
+			...(accessKey !== undefined && {
+				credential: basicCredentialForAccessKey(accessKey)
+			})
 		};
 	});
 }
@@ -203,17 +202,13 @@ export function registerConfigCommand(
 			"also add the tenant's default cache when you name caches"
 		)
 		.option(
-			'--read-user <user>',
-			'user name of the tenant read credential, for a private cache (default: $CUPBOARD_READ_USER)',
-			parseReadUser
+			'--access-key <key>',
+			'access key for private caches, printed as a netrc line (default: $CUPBOARD_ACCESS_KEY)',
+			parseAccessKey
 		)
 		.option(
-			'--read-password <password>',
-			'password of the tenant read credential, for a private cache (default: $CUPBOARD_READ_PASSWORD)'
-		)
-		.option(
-			'--cache-credentials <json>',
-			'cache read credentials, as a JSON array of caches and their credentials (default: $CUPBOARD_CACHE_CREDENTIALS)'
+			'--cache-access-keys <json>',
+			'an access key for each of several caches, as a JSON array of caches and keys, written into the substituter URLs (default: $CUPBOARD_CACHE_ACCESS_KEYS)'
 		)
 		.action(
 			(
@@ -223,9 +218,13 @@ export function registerConfigCommand(
 				options: ConfigOptions
 			) => {
 				const reporter = commandUi(program, programOptions).reporter();
-				const shared = sharedCredential(options, env);
-				const credentials = parseCacheCredentials(
-					options.cacheCredentials ?? env.CUPBOARD_CACHE_CREDENTIALS
+				const sharedKey = accessKeyFor(options);
+				const shared =
+					sharedKey === undefined
+						? undefined
+						: basicCredentialForAccessKey(sharedKey);
+				const credentials = parseCacheAccessKeys(
+					options.cacheAccessKeys ?? env.CUPBOARD_CACHE_ACCESS_KEYS
 				);
 				const target = cacheTargetFromUrl(url);
 				const selected = selectConfigCaches(
@@ -245,19 +244,6 @@ export function registerConfigCommand(
 				);
 			}
 		);
-}
-
-function sharedCredential(
-	options: ConfigOptions,
-	environment: ConfigEnvironment
-): ConfigCredential | undefined {
-	const user =
-		options.readUser ?? parseReadUser(environment.CUPBOARD_READ_USER);
-	const password = options.readPassword ?? environment.CUPBOARD_READ_PASSWORD;
-
-	return user === undefined || password === undefined
-		? undefined
-		: { user, password };
 }
 
 function cacheDescription(cache: CacheScope): string {

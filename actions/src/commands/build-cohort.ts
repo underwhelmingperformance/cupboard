@@ -43,6 +43,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, storePathBasename } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type AccessKeySecret } from '@cupboard/protocol/access-keys';
 import {
 	type BuildReceiptV3,
 	buildReceiptV3Schema,
@@ -90,7 +91,6 @@ import {
 	waitForAbortableChildProcess
 } from '@cupboard/shared/child-process';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { readUserInputSchema } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -109,16 +109,16 @@ import {
 	uploadTally
 } from '../cohort-summary.ts';
 import {
+	accessKeyInvocation,
 	type CupboardInvocation,
 	type CupboardRunDependencies,
 	inspectCommandOptions,
 	inspectCupboardVersion,
 	inspectDocumentVersions,
-	readCredentialInvocation,
-	requireEnvironmentCredentialSupport,
-	resolveReadCredential,
+	requireAccessKeySupport,
+	resolveAccessKey,
 	runCupboard as defaultRunCupboard,
-	withoutReadCredential
+	withoutAccessKey
 } from '../cupboard-run.ts';
 import {
 	diskCleanupFiles,
@@ -143,8 +143,6 @@ import {
 	CupboardReportedError,
 	DependencyPassResultMissingError,
 	FailOnDivergenceUnsupportedError,
-	FallbackReadPasswordRequiredError,
-	FallbackReadUserRequiredError,
 	InvalidMaxJobsError,
 	LocalBuildExpectedPathMissingError,
 	LocalBuildOutputsMissingError,
@@ -155,8 +153,6 @@ import {
 	PlannedTargetNotDerivationError,
 	PlannedTargetSourceMissingError,
 	PublishRootTargetLimitError,
-	ReadPasswordRequiredError,
-	ReadUserRequiredError,
 	RemoteBuildOutputPathUnknownError,
 	RemoteBuildOutputUndeclaredError,
 	RemoteBuildOwnerMissingError,
@@ -172,11 +168,12 @@ import {
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { copyNixPaths, type NixCopyDependencies } from '../nix-copy.ts';
 import {
+	basicCredentialForAccessKey,
 	isEnabled,
 	provided,
+	providedAccessKey,
 	providedCacheSelection,
 	providedChoice,
-	providedReadUser,
 	providedUrl
 } from '../options.ts';
 import { importEncryptedDerivations } from '../plan-archive.ts';
@@ -457,10 +454,6 @@ export interface BuildCohortOptions {
 	readonly ttl?: string;
 	readonly permanent?: string;
 	readonly audience?: string;
-	readonly readUser?: string;
-	readonly fallbackReadUser?: string;
-	readonly fallbackReadPassword?: string;
-	readonly readPassword?: string;
 	readonly maxJobs?: string;
 	readonly store?: string;
 	readonly publish?: string;
@@ -492,10 +485,8 @@ export interface BuildCohortInputs {
 	readonly ttl: string;
 	readonly permanent: boolean;
 	readonly audience: string;
-	readonly readUser: string;
-	readonly fallbackReadUser: string;
-	readonly fallbackReadPassword: string;
-	readonly readPassword: string;
+	readonly accessKey: AccessKeySecret | '';
+	readonly viewAccessKey: AccessKeySecret | '';
 	readonly maxJobs: string;
 	readonly store: string;
 	readonly publish: 'none' | 'outputs' | 'built' | 'closure';
@@ -583,42 +574,19 @@ export function resolveBuildCohortInputs(
 
 	assertReleasePlatformSupported();
 
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
-
-	if (readUser !== '' && readPassword === '') {
-		throw new ReadPasswordRequiredError();
-	}
-
-	if (readPassword !== '' && readUser === '') {
-		throw new ReadUserRequiredError();
-	}
-
-	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
-	const fallbackReadPassword =
-		options.fallbackReadPassword ?? environment.FALLBACK_READ_PASSWORD ?? '';
-
-	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
-		throw new FallbackReadPasswordRequiredError();
-	}
-
-	if (fallbackReadPassword !== '' && fallbackReadUser === '') {
-		throw new FallbackReadUserRequiredError();
-	}
-
-	const destinationCredential = resolveReadCredential(
-		{ user: readUser, password: readPassword },
+	const accessKey = resolveAccessKey(
+		providedAccessKey('access-key', environment.ACCESS_KEY),
 		environment,
 		'cache'
 	);
-	const viewCredential =
+	const inputViewAccessKey = providedAccessKey(
+		'view-access-key',
+		environment.VIEW_ACCESS_KEY
+	);
+	const viewAccessKey =
 		referenceSource === undefined && provided(options.reuseView) === undefined
-			? { user: fallbackReadUser, password: fallbackReadPassword }
-			: resolveReadCredential(
-					{ user: fallbackReadUser, password: fallbackReadPassword },
-					environment,
-					'view'
-				);
+			? inputViewAccessKey
+			: resolveAccessKey(inputViewAccessKey, environment, 'view');
 
 	const maxJobs = provided(options.maxJobs) ?? '';
 
@@ -702,10 +670,8 @@ export function resolveBuildCohortInputs(
 		ttl,
 		permanent: isPermanent,
 		audience: provided(options.audience) ?? '',
-		readUser: destinationCredential.user,
-		fallbackReadUser: viewCredential.user,
-		fallbackReadPassword: viewCredential.password,
-		readPassword: destinationCredential.password,
+		accessKey,
+		viewAccessKey,
 		maxJobs,
 		store: provided(options.store) ?? '',
 		publish,
@@ -799,16 +765,6 @@ export function registerBuildCohortCommand(
 			'false'
 		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
-		.option('--read-user <user>', 'username for cache reads')
-		.option('--read-password <password>', 'password for cache reads')
-		.option(
-			'--fallback-read-user <user>',
-			'tenant-fallback username for private reuse-view reads'
-		)
-		.option(
-			'--fallback-read-password <password>',
-			'tenant-fallback password for private reuse-view reads'
-		)
 		.option('--max-jobs <count>', 'maximum local build jobs')
 		.option(
 			'--store <uri>',
@@ -933,18 +889,31 @@ export interface BuildCohortDependencies {
 }
 
 /**
-Whether the cohort's cupboard commands receive a read credential: the
-destination's, or the reuse view's for a reuse view or reference source.
+Whether the cohort's cupboard commands receive an access key. Every command
+that addresses the destination receives the destination's key. The commands
+for queryable members and the dependency pass read a reuse view or reference
+source, so the view's key reaches the CLI when the cohort has such a member
+or a run root, which enables the dependency pass.
 */
-function hasCommandReadCredential(
+function isPassingAccessKey(
 	inputs: Pick<
 		BuildCohortInputs,
-		'url' | 'readUser' | 'fallbackReadUser' | 'reuseView' | 'referenceSource'
-	>
+		| 'url'
+		| 'accessKey'
+		| 'viewAccessKey'
+		| 'reuseView'
+		| 'referenceSource'
+		| 'runRoot'
+	>,
+	hasQueryableMember: boolean
 ): boolean {
+	const isReadingReferenceSource = hasQueryableMember || inputs.runRoot !== '';
+
 	return (
-		inputs.readUser !== '' ||
-		(inputs.fallbackReadUser !== '' && cohortReferenceSource(inputs) !== '')
+		inputs.accessKey !== '' ||
+		(isReadingReferenceSource &&
+			inputs.viewAccessKey !== '' &&
+			cohortReferenceSource(inputs) !== '')
 	);
 }
 
@@ -1007,11 +976,8 @@ function cachedClosureSources(
 		sources.push({
 			url: cacheUrlFor(inputs.url, inputs.cache),
 			paths: destination,
-			...(inputs.readUser !== '' && {
-				credential: {
-					user: readUserInputSchema.parse(inputs.readUser),
-					password: inputs.readPassword
-				}
+			...(inputs.accessKey !== '' && {
+				credential: basicCredentialForAccessKey(inputs.accessKey)
 			})
 		});
 	}
@@ -1020,11 +986,8 @@ function cachedClosureSources(
 		sources.push({
 			url: new URL(cohortReferenceSource(inputs)),
 			paths: view,
-			...(inputs.fallbackReadUser !== '' && {
-				credential: {
-					user: readUserInputSchema.parse(inputs.fallbackReadUser),
-					password: inputs.fallbackReadPassword
-				}
+			...(inputs.viewAccessKey !== '' && {
+				credential: basicCredentialForAccessKey(inputs.viewAccessKey)
 			})
 		});
 	}
@@ -1073,10 +1036,8 @@ export async function buildCohortAction(
 		);
 	}
 
-	// Only `plan cohort`, `plan reprobe` and a push with references receive a
-	// read credential, and they run only for queryable members.
-	if (queryable.length > 0 && hasCommandReadCredential(inputs)) {
-		await requireEnvironmentCredentialSupport(
+	if (isPassingAccessKey(inputs, queryable.length > 0)) {
+		await requireAccessKeySupport(
 			inputs.cupboardPath,
 			dependencies.inspectVersion ?? inspectCupboardVersion,
 			dependencies.signal
@@ -2139,11 +2100,8 @@ async function keepDependencies(
 			{
 				url: cacheUrlFor(inputs.url, inputs.cache),
 				paths: [],
-				...(inputs.readUser !== '' && {
-					credential: {
-						user: readUserInputSchema.parse(inputs.readUser),
-						password: inputs.readPassword
-					}
+				...(inputs.accessKey !== '' && {
+					credential: basicCredentialForAccessKey(inputs.accessKey)
 				})
 			},
 			...(cohortReferenceSource(inputs) === ''
@@ -2152,11 +2110,8 @@ async function keepDependencies(
 						{
 							url: new URL(cohortReferenceSource(inputs)),
 							paths: [],
-							...(inputs.fallbackReadUser !== '' && {
-								credential: {
-									user: readUserInputSchema.parse(inputs.fallbackReadUser),
-									password: inputs.fallbackReadPassword
-								}
+							...(inputs.viewAccessKey !== '' && {
+								credential: basicCredentialForAccessKey(inputs.viewAccessKey)
 							})
 						}
 					])
@@ -2438,7 +2393,10 @@ async function settleCohortBuild(
 				copiedFromFile,
 				context.buildInputsFile
 			),
-			environment,
+			{
+				...environment,
+				...accessKeyInvocation(inputs.accessKey).environment
+			},
 			cupboardRunDependencies
 		);
 		buildUploads = addUploads(buildUploads, uploadTally(results));
@@ -2680,6 +2638,7 @@ export function cohortBuildPushArguments(
 	inputs: Pick<
 		BuildCohortInputs,
 		| 'url'
+		| 'accessKey'
 		| 'audience'
 		| 'cache'
 		| 'gcBetweenCohorts'
@@ -2699,7 +2658,7 @@ export function cohortBuildPushArguments(
 		'--no-colour',
 		'build-push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
-		'--github-oidc',
+		...githubOidcArguments(inputs),
 		'--no-retain',
 		'--no-reference-dependencies',
 		'--cohorts-file',
@@ -2712,7 +2671,6 @@ export function cohortBuildPushArguments(
 		...(inputs.publish === 'none'
 			? []
 			: ['--publication-scope', inputs.publish]),
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.gcBetweenCohorts ? ['--gc-between-cohorts'] : []),
 		...(inputs.allBestEffort ? ['--keep-going-cohorts'] : []),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
@@ -2799,6 +2757,7 @@ async function runBuildPushCohort(
 		cohortBuildPushArguments(inputs, cohortsFile, buildInputsFile),
 		{
 			...environment,
+			...accessKeyInvocation(inputs.accessKey).environment,
 			CUPBOARD_BUILD_CONTEXTS: JSON.stringify(buildContexts)
 		},
 		{
@@ -2819,6 +2778,7 @@ export function cohortReceiptPushArguments(
 	inputs: Pick<
 		BuildCohortInputs,
 		| 'url'
+		| 'accessKey'
 		| 'audience'
 		| 'cache'
 		| 'store'
@@ -2837,7 +2797,7 @@ export function cohortReceiptPushArguments(
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		'--paths-file',
 		pathsFile,
-		'--github-oidc',
+		...githubOidcArguments(inputs),
 		'--no-retain',
 		'--store',
 		inputs.store,
@@ -2845,7 +2805,6 @@ export function cohortReceiptPushArguments(
 		inputs.receiptFile,
 		'--copied-from-file',
 		copiedFromFile,
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
 		...(inputs.runRootPermanent ? ['--run-root-permanent'] : []),
@@ -3033,10 +2992,8 @@ export function cohortPushInvocation(
 		| 'runRoot'
 		| 'runRootTtl'
 		| 'runRootPermanent'
-		| 'readUser'
-		| 'readPassword'
-		| 'fallbackReadUser'
-		| 'fallbackReadPassword'
+		| 'accessKey'
+		| 'viewAccessKey'
 		| 'reuseView'
 		| 'referenceSource'
 		| 'publish'
@@ -3048,20 +3005,25 @@ export function cohortPushInvocation(
 	const viewSource = hasReferences ? cohortReferenceSource(inputs) : '';
 	const isViewReference =
 		viewSource !== '' && extras.referenceSource === viewSource;
-	const readUser = isViewReference ? inputs.fallbackReadUser : inputs.readUser;
-	const readPassword = isViewReference
-		? inputs.fallbackReadPassword
-		: inputs.readPassword;
-	// The destination can be the reference source. Without a destination
-	// credential, push would send the job's view variables to it.
-	const credential =
-		hasReferences && !isViewReference && readUser === ''
-			? withoutReadCredential('reference-source')
-			: readCredentialInvocation(
-					hasReferences ? readUser : '',
-					readPassword,
+	const referenceKey = isViewReference
+		? inputs.viewAccessKey
+		: inputs.accessKey;
+	// The destination can be the reference source. Without a destination key,
+	// push would send the job's view key to it.
+	const referenceCredential =
+		hasReferences && !isViewReference && referenceKey === ''
+			? withoutAccessKey('reference-source')
+			: accessKeyInvocation(
+					hasReferences ? referenceKey : '',
 					'reference-source'
 				);
+	const credential = {
+		arguments: [],
+		environment: {
+			...accessKeyInvocation(inputs.accessKey).environment,
+			...referenceCredential.environment
+		}
+	};
 
 	const isRetained = group.complete || extras.rootsFile !== undefined;
 	const retention =
@@ -3077,9 +3039,8 @@ export function cohortPushInvocation(
 		...(extras.pathsFile === undefined
 			? group.paths
 			: ['--paths-file', extras.pathsFile]),
-		'--github-oidc',
+		...githubOidcArguments(inputs),
 		...retention,
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.store === '' &&
 		(extras.receiptFile === undefined || extras.receiptFile === '')
 			? []
@@ -3612,7 +3573,7 @@ interface MergedCohortPush {
 /**
 Merges the planned pushes of one kind that read their references from the
 same source and record the same kind of receipt. The source and the receipt
-kind decide the push's read credential and receipt option. The merged push
+kind decide the push's view access key and receipt option. The merged push
 publishes the union of their paths and records the union of their receipts,
 and its roots file sets each group's root to the same targets as the group's
 own push. The kinds run in the order of the planned pushes, so every reused
@@ -4097,8 +4058,9 @@ function reprobeTargets(
 
 /**
 The `cupboard plan reprobe` invocation for one cohort. The command reads cache
-endpoints without exchanging a token or opening a Nix store. It uses the
-run's read credentials for a cache.
+endpoints without exchanging a token or opening a Nix store. It reads the
+destination with the destination's access key, and the reuse view or reference
+source with the view's access key.
 */
 export function planReprobeInvocation(
 	inputs: Pick<
@@ -4107,18 +4069,13 @@ export function planReprobeInvocation(
 		| 'cache'
 		| 'reuseView'
 		| 'referenceSource'
-		| 'readUser'
-		| 'readPassword'
-		| 'fallbackReadUser'
-		| 'fallbackReadPassword'
+		| 'accessKey'
+		| 'viewAccessKey'
 	>,
 	targetsFile: string
 ): CupboardInvocation {
-	const view = viewReadCredential(inputs);
-	const destination = readCredentialInvocation(
-		inputs.readUser,
-		inputs.readPassword
-	);
+	const view = viewAccessKeyInvocation(inputs);
+	const destination = accessKeyInvocation(inputs.accessKey);
 
 	return {
 		arguments: [
@@ -4139,22 +4096,17 @@ export function planReprobeInvocation(
 }
 
 /**
-The credential for the reuse view or reference source that a `cupboard plan`
+The access key for the reuse view or reference source that a `cupboard plan`
 command reads.
 */
-function viewReadCredential(
+function viewAccessKeyInvocation(
 	inputs: Pick<
 		BuildCohortInputs,
-		| 'url'
-		| 'reuseView'
-		| 'referenceSource'
-		| 'fallbackReadUser'
-		| 'fallbackReadPassword'
+		'url' | 'reuseView' | 'referenceSource' | 'viewAccessKey'
 	>
 ): CupboardInvocation {
-	return readCredentialInvocation(
-		cohortReferenceSource(inputs) === '' ? '' : inputs.fallbackReadUser,
-		inputs.fallbackReadPassword,
+	return accessKeyInvocation(
+		cohortReferenceSource(inputs) === '' ? '' : inputs.viewAccessKey,
 		'view'
 	);
 }
@@ -4356,8 +4308,8 @@ export function cohortDependencyGraph(
 
 /**
 The `cupboard plan dependencies` invocation for one cohort. It reads the
-destination and the reference source with the run's read credentials and
-exchanges the job's OIDC token for its own grants.
+destination and the reference source with the run's access keys. Without a
+destination key, it exchanges the job's OIDC token for its own grants.
 */
 export function planDependenciesInvocation(
 	inputs: Pick<
@@ -4367,10 +4319,8 @@ export function planDependenciesInvocation(
 		| 'audience'
 		| 'reuseView'
 		| 'referenceSource'
-		| 'readUser'
-		| 'readPassword'
-		| 'fallbackReadUser'
-		| 'fallbackReadPassword'
+		| 'accessKey'
+		| 'viewAccessKey'
 		| 'runRoot'
 		| 'runRootTtl'
 		| 'runRootPermanent'
@@ -4379,11 +4329,8 @@ export function planDependenciesInvocation(
 	graphFile: string,
 	readCaches: readonly string[] = []
 ): CupboardInvocation {
-	const view = viewReadCredential(inputs);
-	const destination = readCredentialInvocation(
-		inputs.readUser,
-		inputs.readPassword
-	);
+	const view = viewAccessKeyInvocation(inputs);
+	const destination = accessKeyInvocation(inputs.accessKey);
 	const referenceSource = cohortReferenceSource(inputs);
 
 	return {
@@ -4405,8 +4352,7 @@ export function planDependenciesInvocation(
 				? []
 				: ['--reference-source', referenceSource]),
 			...readCaches.flatMap((readCache) => ['--read-cache', readCache]),
-			...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
-			'--github-oidc',
+			...githubOidcArguments(inputs),
 			...view.arguments,
 			...destination.arguments
 		],
@@ -4600,11 +4546,8 @@ async function planCohort(
 		)}\n`
 	);
 
-	const view = viewReadCredential(inputs);
-	const destination = readCredentialInvocation(
-		inputs.readUser,
-		inputs.readPassword
-	);
+	const view = viewAccessKeyInvocation(inputs);
+	const destination = accessKeyInvocation(inputs.accessKey);
 	const arguments_ = [
 		'--no-colour',
 		'plan',
@@ -4614,7 +4557,7 @@ async function planCohort(
 		targetsFile,
 		'--plan-file',
 		planFile,
-		'--github-oidc',
+		...githubOidcArguments(inputs),
 		'--build',
 		inputs.build,
 		'--substituter',
@@ -4627,7 +4570,6 @@ async function planCohort(
 		queryable.length === inputs.cohort.attrs.length
 			? ['--complete-targets']
 			: []),
-		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...referenceProbeArguments(inputs),
 		...view.arguments,
 		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
@@ -6797,4 +6739,22 @@ async function buildOnlyChecks(
 	}
 
 	return [...checks].toSorted(byCodeUnit);
+}
+
+/**
+The arguments that make a cupboard command authenticate with GitHub OIDC.
+A command run with an access key authenticates with the key in
+`CUPBOARD_ACCESS_KEY` instead, so it takes none.
+*/
+function githubOidcArguments(
+	inputs: Pick<BuildCohortInputs, 'accessKey' | 'audience'>
+): readonly string[] {
+	if (inputs.accessKey !== '') {
+		return [];
+	}
+
+	return [
+		'--github-oidc',
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
+	];
 }

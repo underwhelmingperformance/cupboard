@@ -1,13 +1,12 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
-import { readUserSchema } from '@cupboard/shared/http';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { describe, expect, it } from 'vitest';
 
+import { NarInfoUnavailableError, NarInfoUnparsableError } from '../errors.ts';
 import {
-	NarInfoUnavailableError,
-	NarInfoUnparsableError,
-	ReadCredentialPairError
-} from '../errors.ts';
+	accessKeyAuthorization,
+	destinationAccessKey
+} from '../test-support.ts';
 
 import { fetchReferenceMetadata } from './reference.ts';
 
@@ -163,14 +162,13 @@ describe('fetchReferenceMetadata', () => {
 		});
 	});
 
-	it('sends the read username and password in the Basic authorization header', async () => {
+	it('presents the access key in the Basic authorization header', async () => {
 		const requests: RecordedRequest[] = [];
 
 		await fetchReferenceMetadata(
 			{
 				url: new URL('https://cache.example.workers.dev/t/acme'),
-				readUser: readUserSchema.parse('reader'),
-				readPassword: 'secret'
+				accessKey: destinationAccessKey
 			},
 			storePathHash,
 			{ fetch: respondingFetcher(requests, () => respond(narInfoText())) }
@@ -179,7 +177,7 @@ describe('fetchReferenceMetadata', () => {
 		expect(requests).toStrictEqual([
 			{
 				url: `https://cache.example.workers.dev/t/acme/${storePathHash}.narinfo`,
-				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+				authorization: accessKeyAuthorization(destinationAccessKey)
 			}
 		]);
 	});
@@ -256,24 +254,6 @@ describe('fetchReferenceMetadata', () => {
 			name: 'NarInfoUnparsableError',
 			target: `https://cache.example.workers.dev/t/acme/${storePathHash}.narinfo`
 		});
-	});
-
-	it('rejects incomplete read credentials', async () => {
-		let error: unknown;
-		try {
-			await fetchReferenceMetadata(
-				{
-					url: new URL('https://cache.example.workers.dev/t/acme'),
-					readUser: readUserSchema.parse('reader')
-				},
-				storePathHash,
-				{ fetch: respondingFetcher([], () => respond(narInfoText())) }
-			);
-		} catch (error_: unknown) {
-			error = error_;
-		}
-
-		expect(error).toBeInstanceOf(ReadCredentialPairError);
 	});
 });
 
