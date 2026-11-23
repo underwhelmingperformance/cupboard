@@ -163,6 +163,14 @@ describe('log redaction', () => {
 		[
 			['deploy', '--api_key=opaque-credential', '--yes'],
 			['deploy', '--api_key=[redacted]', '--yes']
+		],
+		[
+			['push', '--access-key', 'opaque-credential', '--no-retain'],
+			['push', '--access-key', '[redacted]', '--no-retain']
+		],
+		[
+			['plan', '--view-access-key=opaque-credential'],
+			['plan', '--view-access-key=[redacted]']
 		]
 	])('redacts option values in argument lists: %j', (spawnargs, expected) => {
 		expect(render({ spawnargs })).toStrictEqual({
@@ -241,6 +249,74 @@ describe('log redaction', () => {
 					'--github-token=[redacted]'
 				]
 			}
+		});
+	});
+
+	it('redacts an access key', () => {
+		const key = `cupboard_ak_00000000-0000-4000-8000-000000000001_${'a'.repeat(64)}`;
+
+		expect(render({ detail: `request with ${key} failed` })).toStrictEqual({
+			timestamp: 0,
+			level: 'error',
+			category: 'cupboard',
+			msg: 'request failed',
+			detail: 'request with [redacted] failed'
+		});
+	});
+
+	it.each([
+		{
+			name: 'an access key ID field',
+			properties: { access_key_id: 'key-1', accessKeyId: 'key-2' },
+			expected: { access_key_id: 'key-1', accessKeyId: 'key-2' }
+		},
+		{
+			name: 'an access key field',
+			properties: { access_key: 'opaque', accessKey: 'opaque' },
+			expected: { access_key: '[redacted]', accessKey: '[redacted]' }
+		},
+		{
+			name: 'an access key ID option',
+			properties: { spawnargs: ['--access-key-id', 'key-1'] },
+			expected: { spawnargs: ['--access-key-id', 'key-1'] }
+		},
+		{
+			name: 'an access key ID in text',
+			properties: { detail: 'deleted access_key_id=key-1' },
+			expected: { detail: 'deleted access_key_id=key-1' }
+		},
+		{
+			name: 'the access-key operations in text',
+			properties: {
+				detail:
+					'ask for access-key:create, access-key:list or access-key:delete'
+			},
+			expected: {
+				detail:
+					'ask for access-key:create, access-key:list or access-key:delete'
+			}
+		},
+		{
+			name: 'an access key secret assigned in text',
+			properties: {
+				detail: `access-key=cupboard_ak_00000000-0000-4000-8000-000000000001_${'a'.repeat(64)} access-key: cupboard_ak_00000000-0000-4000-8000-000000000001_${'b'.repeat(64)}`
+			},
+			expected: { detail: 'access-key=[redacted] access-key: [redacted]' }
+		},
+		{
+			name: 'an access key secret under an ID field',
+			properties: {
+				access_key_id: `cupboard_ak_00000000-0000-4000-8000-000000000001_${'a'.repeat(64)}`
+			},
+			expected: { access_key_id: '[redacted]' }
+		}
+	])('handles $name', ({ properties, expected }) => {
+		expect(render(properties)).toStrictEqual({
+			timestamp: 0,
+			level: 'error',
+			category: 'cupboard',
+			msg: 'request failed',
+			...expected
 		});
 	});
 

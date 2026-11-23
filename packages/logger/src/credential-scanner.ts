@@ -216,12 +216,17 @@ type KeywordPart = string | ((character: number) => boolean);
 
 /**
 A credential word such as `password` or `api-key`. Each keyword has at most
-one optional character, so a match reads at most twice its length.
+one optional character, so a match reads at most twice its length. A keyword
+that `requiresBoundary` matches only where no letter, digit, hyphen or low line
+follows it.
 */
 class Keyword {
 	readonly firstLetter: number;
 
-	constructor(private readonly parts: readonly [string, ...KeywordPart[]]) {
+	constructor(
+		private readonly parts: readonly [string, ...KeywordPart[]],
+		private readonly requiresBoundary = false
+	) {
 		this.firstLetter = parts[0].codePointAt(0) ?? noCharacter;
 	}
 
@@ -233,7 +238,9 @@ class Keyword {
 		const part = this.parts[partIndex];
 
 		if (part === undefined) {
-			return true;
+			return (
+				!this.requiresBoundary || !isOptionCharacter(characterAt(text, index))
+			);
 		}
 
 		if (typeof part === 'string') {
@@ -280,11 +287,7 @@ class Keywords {
 	}
 }
 
-/**
-The credential words for keys and options. The field rules and the argument
-list pass use the same words.
-*/
-const credentialKeywords = new Keywords([
+const keyValueKeywordList = [
 	new Keyword(['passcode']),
 	new Keyword(['passphrase']),
 	new Keyword(['password']),
@@ -296,6 +299,24 @@ const credentialKeywords = new Keywords([
 	new Keyword(['authorization']),
 	new Keyword(['cookie']),
 	new Keyword(['api', isNameSeparator, 'key'])
+];
+
+/**
+The credential words for `key=value` text. `access-key` is not one of them,
+because the access-key operations, such as `access-key:create`, look like an
+assignment. The text pass for `cupboard_ak_` redacts an access key wherever
+it appears.
+*/
+const keyValueKeywords = new Keywords(keyValueKeywordList);
+
+/**
+The credential words for options. The field rules and the argument list pass
+use the same words.
+*/
+const optionKeywords = new Keywords([
+	...keyValueKeywordList,
+	// An access key ID is not a secret, so `--access-key-id` stays visible.
+	new Keyword(['access', isNameSeparator, 'key'], true)
 ]);
 
 /**
@@ -465,13 +486,14 @@ function readRun(
 	text: ScannedText,
 	index: number,
 	isRunCharacter: (character: number) => boolean,
-	keywordStart: number
+	keywordStart: number,
+	keywords: Keywords
 ): Run {
 	let end = index;
 	let hasKeyword = false;
 
 	while (end < text.length && isRunCharacter(characterAt(text, end))) {
-		hasKeyword ||= end >= keywordStart && credentialKeywords.occurAt(text, end);
+		hasKeyword ||= end >= keywordStart && keywords.occurAt(text, end);
 		end += 1;
 	}
 
@@ -509,7 +531,7 @@ export function redactKeyValues(text: ScannedText): string {
 			continue;
 		}
 
-		const key = readRun(text, index, isKeyCharacter, index);
+		const key = readRun(text, index, isKeyCharacter, index, keyValueKeywords);
 		const assignment = key.hasKeyword ? assignmentEnd(text, key.end) : -1;
 
 		if (assignment === -1) {
@@ -558,7 +580,13 @@ export function redactOptionValues(text: ScannedText): string {
 			continue;
 		}
 
-		const option = readRun(text, index, isOptionCharacter, index + 1);
+		const option = readRun(
+			text,
+			index,
+			isOptionCharacter,
+			index + 1,
+			optionKeywords
+		);
 		const value = skipSpaces(text, option.end);
 
 		if (
