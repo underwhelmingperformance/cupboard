@@ -12,8 +12,12 @@ const truncated = '[truncated]';
 const credentialName =
 	/pass(?:code|phrase|word)|secret|token|credential|private.?key|signature|authorization|cookie/iu;
 
+// An access key ID is not a secret, so a name boundary must follow
+// `access-key` for it to count.
+const accessKeyName = /access[-_]?key(?![a-z0-9_-])/iu;
+
 const credentialOptionName = new RegExp(
-	`${credentialName.source}|api[-_]?key`,
+	`${credentialName.source}|api[-_]?key|${accessKeyName.source}`,
 	'iu'
 );
 
@@ -73,6 +77,7 @@ export const textPatterns = {
 	url: /https?:\/\/[^\r\n]+/giu,
 	authentication: /\b(Basic|Bearer)\s+[^\s,;"']+/giu,
 	githubToken: /\b(?:gh[opsur]_|github_pat_)(\w+)/gu,
+	accessKey: /\bcupboard_ak_[\w-]+/gu,
 	webTokenRun: /[\w.-]+/gu,
 	wholeText: /[\s\S]+/gu
 } as const;
@@ -104,6 +109,7 @@ const textPasses: readonly TextPass[] = [
 		text.replaceAll(textPatterns.githubToken, (token, body: string) =>
 			body.length < 20 ? token : redacted
 		),
+	(text) => text.replaceAll(textPatterns.accessKey, () => redacted),
 	(text, isCut) =>
 		text.replaceAll(textPatterns.webTokenRun, (run, offset: number) =>
 			redactJsonWebTokens(run, isCut && offset + run.length === text.length)
@@ -329,6 +335,7 @@ export function redactingSink(sink: Sink): Sink {
 		...traversalLimits,
 		fieldPatterns: [
 			credentialName,
+			accessKeyName,
 			/^(?:request|response)?body$|^headers$|^api[-_]?key$/i
 		],
 		action: () => redacted
