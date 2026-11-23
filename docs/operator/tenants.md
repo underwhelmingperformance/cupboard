@@ -1,8 +1,9 @@
 # Managing tenants
 
-As the operator, you create tenants, issue static read credentials that Nix uses
-for private caches, set storage quotas, and suspend or remove tenants. This page
-covers each of these.
+As the operator, you create tenants, set storage quotas, and suspend or remove
+tenants. This page covers each of these. Readers of a private cache use access
+keys, which the tenant's administrators create; see
+[Access keys](../admin/access.md#access-keys).
 
 Operator commands take the deployment URL, such as
 `https://cupboard.example.workers.dev`, rather than a tenant URL. They also need
@@ -56,32 +57,16 @@ GitHub Actions workflow publish, the owner adds a trust rule for it with
 The owner's issuer URL must match exactly on later attempts to create the same
 tenant, including any trailing slash. A different spelling returns a conflict.
 
-The command also creates a tenant read credential, which Nix uses to read the
-tenant's private caches. The user name is `cupboard`, and the command prints the
-generated password. The password isn't shown again. These options change that:
-
-- `--read-user` sets a different user name.
-- `--no-read-password` doesn't create a static credential. Private reads then
-  need a cache read credential or an access token with a content-read grant.
-
 You can also limit how much storage the tenant can use with `--quota-bytes`. By
 default there's no limit. See [Changing a quota](#changing-a-quota).
 
 Sometimes the deployment creates the tenant but can't publish its membership,
 which admission checks before it serves a request. The command then sends the
 same request twice more, waiting up to 10 seconds before each. If those fail
-too, the command prints an "Unconfirmed tenant read credential" card with the
-read user and password, and then reports that the tenant exists. It does the
-same when a later request fails in another way, such as a lost connection or
-Ctrl-C between the requests. It also prints the card when the first request
-fails and the deployment may have created the tenant, such as after a lost
-connection.
-
-Save that password: running `cupboard tenant create` again generates a different
-one, and the deployment refuses it for the existing tenant. Until the membership
-is published, requests to the tenant can get 404. Run `cupboard deploy` again to
-publish it. If you didn't save the password, `cupboard tenant rotate-credential`
-replaces it. That command doesn't publish the membership.
+too, or a later request fails in another way, the command reports that the
+tenant exists but its membership isn't published. Until the membership is
+published, requests to the tenant can get 404. Run `cupboard deploy` again to
+publish it.
 
 Once the tenant exists, the owner can sign in and add other administrators
 themselves. See [Who can use your tenant](../admin/access.md).
@@ -95,61 +80,6 @@ To see every tenant and its state, including removed tenants, run:
 ```sh
 cupboard tenant list https://cupboard.example.workers.dev
 ```
-
-## Read credentials
-
-Only operators can issue static read credentials. Tenant administrators can
-authorise CI jobs to exchange OIDC tokens for short-lived content-read access.
-See [Private caches in CI].
-
-[Read credentials](../use/private-caches.md#read-credentials) explains the two
-kinds, the tenant read credential and cache read credentials, and which one a
-cache accepts.
-
-[Private caches in CI]: ../ci/private-caches.md
-
-| Command                                                 | What it does                                                          |
-| ------------------------------------------------------- | --------------------------------------------------------------------- |
-| `tenant rotate-credential <url> <tenant>`               | Replaces the tenant read credential and prints the new password.      |
-| `tenant clear-credential <url> <tenant>`                | Removes the tenant read credential.                                   |
-| `tenant rotate-cache-credential <url> <tenant> [cache]` | Creates or replaces a cache's own credential and prints the password. |
-| `tenant clear-cache-credential <url> <tenant> [cache]`  | Removes a cache's own credential.                                     |
-
-For example, to give the `release` cache of the `acme` tenant its own
-credential:
-
-```sh
-cupboard tenant rotate-cache-credential https://cupboard.example.workers.dev \
-  acme release
-```
-
-To do the same for the tenant's default cache, leave out the cache name:
-
-```sh
-cupboard tenant rotate-cache-credential https://cupboard.example.workers.dev \
-  acme
-```
-
-The user name is `cupboard` unless you pass `--read-user`. Rotating a credential
-doesn't remember a custom user name, so pass `--read-user` again every time you
-rotate one.
-
-Each password is printed only once, because the deployment only keeps a salted
-SHA-256 hash of it. After you rotate a credential, readers that use that
-credential have to update their Nix configuration with the new password.
-
-Rotating a cache's own credential replaces the old one in a single write. The
-cache never accepts the tenant read credential in between, so a rotation doesn't
-open the cache to readers who have only the tenant read credential. You can set
-a cache's own credential before the cache exists. The cache uses it from the
-moment that it's created. Removing a cache also removes its own credential.
-
-Clearing a cache's own credential doesn't lock the cache. The cache goes back to
-accepting the tenant read credential, so anyone who has the tenant read
-credential can read the cache. Clearing static credentials does not remove
-access granted by content-read tokens. A private cache with neither kind of
-static credential still accepts an access token with the required content-read
-grant.
 
 ## Changing a quota
 

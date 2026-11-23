@@ -30,8 +30,8 @@ cupboard cache create https://cupboard.example.workers.dev/t/acme release \
 You must say whether the cache is public or private:
 
 - `--access public` lets anyone read it.
-- `--access private` means Nix needs a
-  [read credential](../use/private-caches.md#read-credentials) to read it.
+- `--access private` means Nix needs an
+  [access key](../use/private-caches.md#access-keys) to read it.
 
 These options are optional:
 
@@ -103,17 +103,9 @@ cupboard cache set-access https://cupboard.example.workers.dev/t/acme \
 
 Changes take effect immediately. The cache keeps its URL and its contents.
 
-For static reads of a private cache, the cache's own read credential takes
-precedence over the tenant read credential. Content-read tokens can also
-authorise private reads.
-
-Setting access to public removes the cache's own read credential. Making the
-cache private again does not restore that credential. Static reads then fall
-back to the tenant read credential, if one is configured. Ask the [operator to
-issue a new cache read credential][read-credentials] if the cache needs its own
-credential again.
-
-[read-credentials]: ../operator/tenants.md#read-credentials
+A private cache accepts an access key or a token with a content-read grant for
+it. Changing the access doesn't change any key's grants. See
+[Access keys](./access.md#access-keys).
 
 ## Closing and reopening a cache
 
@@ -129,7 +121,8 @@ at the original close time, and their paths receive the cache's configured grace
 period. A later grace deadline already granted to a path remains in effect.
 Repeating the close command does not restart grace. Garbage collection removes
 expired contents, then removes the cache once pending work has finished. Closing
-does not revoke read credentials or remove the cache from reuse views.
+doesn't stop the access keys that read the cache, and doesn't remove the cache
+from reuse views.
 
 To resume publication before the cache has been removed:
 
@@ -153,10 +146,9 @@ cupboard cache remove https://cupboard.example.workers.dev/t/acme release
 
 If the cache still contains store paths, the command stops and tells you. To
 remove the cache and everything in it, add `--force`. This also deletes its
-retention roots, anything waiting to be uploaded, and its read credential. A
-cache that has roots but no store paths is removed without `--force`. If there's
-no cache with that name, the command succeeds and reports that it removed
-nothing.
+retention roots and anything waiting to be uploaded. A cache that has roots but
+no store paths is removed without `--force`. If there's no cache with that name,
+the command succeeds and reports that it removed nothing.
 
 Success confirms that access has been revoked and the cache has been removed.
 Reads of its store paths fail, it no longer appears in `cupboard cache list`,

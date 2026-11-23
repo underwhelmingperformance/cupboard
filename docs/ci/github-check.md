@@ -119,7 +119,7 @@ For `publish: none` and the flake workflow's older `push: false`, the check
 models the selected cache read without publication or cache lifecycle grants. A
 pull-request run with the flake preset reads from the tenant's default cache. A
 public read needs no trust grant. A private read needs the exact cache
-content-read grant unless the workflow supplies a static read pair. When
+content-read grant unless the workflow supplies an `access_key` secret. When
 publication is enabled, the check models cache creation, closure and reopening
 alongside publication for the flake preset's pull-request runs, and checks the
 corresponding grants. See [Closing and reopening caches][cache-closure].
@@ -157,14 +157,14 @@ dependency chain when a close job depends on a publication job that skips
   https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#always
 [cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
-The check can see that a workflow declares an explicit static username and
-password pair, but GitHub does not reveal the secret values. It reports the pair
-as configured, without claiming that the values authenticate at runtime. An
-incomplete pair fails. Inherited or dynamic secret wiring remains unverified and
-can make the check exit 69. `--fix` can still repair independent publication
-grants, but it cannot inspect or repair the hidden secret values. The
-`--read-user` and `--read-password` options authenticate the administrator's
-metadata queries; they do not choose a view's access or verify workflow secrets.
+The check can see that a workflow passes the `access_key` or `view_access_key`
+secret, but GitHub does not reveal the secret values. It reports the key as
+configured, without claiming that the key authenticates at runtime. Inherited or
+dynamic secret wiring remains unverified and can make the check exit 69. `--fix`
+can still repair independent publication grants, but it cannot inspect or repair
+the hidden secret values. The `--access-key` option authenticates the
+administrator's metadata queries; it does not choose a view's access or verify
+workflow secrets.
 
 The check ignores `actions/setup` when it only installs cupboard or configures
 Nix substituters. If the step sets `provision-cache`, setup can create a cache
@@ -396,13 +396,12 @@ The repair can create the preset's `pull-requests-<repository-id>` reuse view.
 The repair selects the view's access from the discovered jobs. A publishing job
 uses its literal `cache-access-mode` input, or the tenant's default cache access
 when the input is omitted. A read-only job uses the default cache's access. Jobs
-that use the same view must select the same access. `--read-user` and
-`--read-password` authenticate metadata queries and do not select the view's
-access. A view includes only caches with the same access, so a public view
-cannot reuse the outputs of private pull-request caches. The repair stops with
-an error when an existing pull-request cache of the repository has the other
-access. Supply the tenant read credential with `--read-user` and
-`--read-password` when private metadata queries require it.
+that use the same view must select the same access. `--access-key` authenticates
+metadata queries and does not select the view's access. A view includes only
+caches with the same access, so a public view cannot reuse the outputs of
+private pull-request caches. The repair stops with an error when an existing
+pull-request cache of the repository has the other access. Supply an access key
+with `--access-key` when private metadata queries require it.
 
 When a job uses a custom reuse view that passes the reuse-view check, the repair
 leaves that view unchanged. The repair does not create or change a custom view,

@@ -253,7 +253,7 @@ details shows them as `unknown` until its next renewal. The rule is also
 Each tenant session also shows the number of access keys below it. The list
 includes a session that a replayed refresh token ended, with the time of the
 replay, until you revoke it, or until it has expired and no keys remain below
-it.
+it. See [Access keys](./access.md#access-keys).
 
 To end a session, give its ID:
 
@@ -262,8 +262,11 @@ cupboard session revoke https://cupboard.example.workers.dev/t/acme <id>
 ```
 
 Its refresh token stops working at once. Its current access token remains valid
-until it expires, within ten minutes. The commands need the `session:list` and
-`session:revoke` permissions, which a wildcard grant includes.
+until it expires, within ten minutes. Revoking also deletes every access key
+below the session, even when the session has already ended, and the command
+reports how many it deleted. See [Access keys](./access.md#access-keys). The
+commands need the `session:list` and `session:revoke` permissions, which a
+wildcard grant includes.
 
 ## Listing and revoking operator sessions
 

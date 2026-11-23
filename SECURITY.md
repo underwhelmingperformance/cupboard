@@ -18,8 +18,8 @@ repository's Security tab and choose "Report a vulnerability", or go straight to
 
 Include the release or commit you tested, the steps to reproduce, and what you
 think an attacker could do. It helps to say what access the attack needs, such
-as a tenant's read credential, an admin token, or the ability to run a workflow
-in a trusted repository.
+as an access key, an admin token, or the ability to run a workflow in a trusted
+repository.
 
 Only test against deployments you run yourself or have permission to test.
 

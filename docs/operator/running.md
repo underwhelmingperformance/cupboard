@@ -149,8 +149,10 @@ the upload off, with a warning.
 Before the logger writes a record, it redacts credentials. The credential words
 are `passcode`, `passphrase`, `password`, `secret`, `token`, `credential`,
 `signature`, `authorization`, `cookie`, `privatekey`, or `private` and `key`
-with one character between them, compared without regard to case. The logger
-applies these rules:
+with one character between them, compared without regard to case. `access-key`,
+`access_key` and `accesskey` also count as credential words where no letter,
+digit, hyphen or low line follows them, so a name such as `access_key_id` stays
+visible. The logger applies these rules:
 
 - It replaces the value of a field whose name contains a credential word, and of
   a field named `body`, `requestBody`, `responseBody`, `headers`, `api-key`,
@@ -167,20 +169,24 @@ applies these rules:
   an angle bracket. Text that does not parse as a URL becomes `[redacted URL]`.
 - It replaces the value after a key that contains a credential word, `api-key`,
   `api_key` or `apikey`, followed by a colon or an equals sign, as in
-  `token=value` or `"password": "value"`. It also replaces the value after a
-  credential option and whitespace, as in `--read-password value`. A quoted
-  value is replaced up to its closing quotation mark, or to the end of the text
-  when it has none. An unquoted value ends at whitespace, and a key's value also
-  ends at a comma, a semicolon or `}`.
+  `token=value` or `"password": "value"`. `access-key` doesn't count here,
+  because operation names such as `access-key:create` look like a key and its
+  value; the `cupboard_ak_` rule below still replaces an access key in such
+  text. It also replaces the value after a credential option and whitespace, as
+  in `--access-key value`. A quoted value is replaced up to its closing
+  quotation mark, or to the end of the text when it has none. An unquoted value
+  ends at whitespace, and a key's value also ends at a comma, a semicolon or
+  `}`.
 - It replaces the credentials after `Basic` and `Bearer`, GitHub tokens with the
   `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_` prefix and at least 20
-  more characters, and JSON Web Tokens.
+  more characters, access keys, which start with `cupboard_ak_`, and JSON Web
+  Tokens.
 - It reads at most 8192 characters of a string and keeps at most 4096. A JSON
   Web Token that starts in the kept text but continues past the 8192 characters
   is replaced as well. A string that is cut ends with `[truncated]`.
 
-A secret in another format can remain in the logs. The actions don't put read
-passwords or GitHub tokens on a command line.
+A secret in another format can remain in the logs. The actions don't put access
+keys or GitHub tokens on a command line.
 
 Public requests receive a fresh `x-request-id` before authentication and
 routing. Client HTTP and WebSocket logs record this response header and

@@ -39,8 +39,8 @@ relies on.
 
 - [Using a cache](./use/nix-clients.md): setting up Nix on NixOS, nix-darwin,
   Home Manager, and other Linux and macOS systems.
-- [Private caches](./use/private-caches.md): read credentials, and how to give
-  them to Nix safely.
+- [Private caches](./use/private-caches.md): access keys, and how to give them
+  to Nix safely.
 
 ## Administering a tenant
 
@@ -61,6 +61,8 @@ relies on.
 - [Publishing a flake](./ci/flake-publish.md): destinations, the target
   manifest, releases and common tasks.
 - [Private caches in CI](./ci/private-caches.md)
+- [Publishing without OIDC](./ci/access-keys.md): publishing from a CI system
+  with an access key.
 - [Building elsewhere](./ci/building-elsewhere.md): using remote builders and
   stores.
 - [Building your own publication job](./ci/custom-jobs.md)
@@ -75,7 +77,7 @@ relies on.
 - [Installing the CLI](./installing.md)
 - [Deploying](./operator/deploying.md)
 - [Operating tenants](./operator/tenants.md): creating tenants, setting their
-  quotas, issuing read credentials, and suspending and removing tenants.
+  quotas, and suspending and removing tenants.
 - [Operators](./operator/operators.md): adding operators and rotating control
   keys.
 - [Running a deployment](./operator/running.md): maintenance, monitoring, cost
