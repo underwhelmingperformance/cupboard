@@ -812,7 +812,8 @@ get.
 */
 type PartHandler = (
 	offset: number | undefined,
-	get: () => Promise<GetResult>
+	get: () => Promise<GetResult>,
+	options: R2GetOptions | undefined
 ) => Promise<GetResult>;
 
 function rangeOffset(options?: R2GetOptions): number | undefined {
@@ -832,7 +833,9 @@ function bucketWithParts(r2Key: string, handle: PartHandler): R2Bucket {
 				return (key: string, options?: R2GetOptions) => {
 					const get = (): Promise<GetResult> => target.get(key, options);
 
-					return key === r2Key ? handle(rangeOffset(options), get) : get();
+					return key === r2Key
+						? handle(rangeOffset(options), get, options)
+						: get();
 				};
 			}
 
@@ -1062,6 +1065,77 @@ describe('verifyStoredNar with ranged reads', () => {
 			outcome: 'ok',
 			ranges: 1,
 			pool: { free: 4, allocations: 1 }
+		});
+	});
+
+	it('resumes sequential verification after a prefetched R2 get times out', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-prefetch-timeout');
+		const object = await env.BLOBS.put(r2Key, compressed);
+
+		if (object === null) {
+			throw new Error('expected the stored object to have an ETag');
+		}
+
+		const { etag } = object;
+		const buffers = new NarReadBufferPool({
+			buffers: 2,
+			bufferSize: 4 * mebibyte
+		});
+		const length = buffers.bufferSize;
+		const stalled = gatedBody([]);
+		const reads: (R2GetOptions | undefined)[] = [];
+		let wasCancelledBeforeResume = false;
+		const bucket = bucketWithParts(r2Key, async (offset, get, options) => {
+			reads.push(options);
+
+			if (offset === length && reads.length === 2) {
+				await stalled.requested(0);
+				throw new SubrequestTimeoutError('r2.get');
+			}
+
+			if (offset === 2 * length) {
+				return servedPart(get, stalled.stream);
+			}
+
+			if (offset === length) {
+				wasCancelledBeforeResume = stalled.wasCancelled();
+				if (!wasCancelledBeforeResume) {
+					stalled.release(0);
+				}
+			}
+
+			return get();
+		});
+		const store = new ConnectionLimitedBucket(boundedBlobs(bucket), 6);
+
+		const verification = await withSubrequestSlice(
+			() => verifyStoredNar(store, r2Key, expected, { buffers }),
+			{ subrequests: 4, reserve: 0 }
+		);
+
+		expect({
+			verification,
+			reads,
+			wasCancelledBeforeResume,
+			pool: buffers.state
+		}).toStrictEqual({
+			verification: {
+				ok: true,
+				fileHash: await nixNarHash(compressed),
+				fileSize: compressed.byteLength
+			},
+			reads: [
+				undefined,
+				{ range: { offset: length, length }, onlyIf: { etagMatches: etag } },
+				{
+					range: { offset: 2 * length, length },
+					onlyIf: { etagMatches: etag }
+				},
+				{ range: { offset: length }, onlyIf: { etagMatches: etag } }
+			],
+			wasCancelledBeforeResume: true,
+			pool: { free: 2, allocations: 2 }
 		});
 	});
 
