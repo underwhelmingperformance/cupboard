@@ -5,6 +5,7 @@ import {
 } from '../do/subrequest-slice.ts';
 import {
 	StoredObjectInconsistentError,
+	SubrequestTimeoutError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
 import { type R2ObjectKey } from '../http/http.ts';
@@ -298,6 +299,11 @@ export class BodyChunks implements NarChunkSource {
 	}
 }
 
+interface RangeReadSignals {
+	readonly stop: AbortSignal;
+	readonly cancelPendingRead: AbortSignal;
+}
+
 /**
 One ranged get into a pooled buffer. The range is delivered only once all of
 its bytes are in the buffer: every BYOB read detaches the buffer that it
@@ -314,10 +320,10 @@ class RangeRead {
 		readonly length: number,
 		private readonly lease: NarReadBufferLease,
 		watch: ReadWatch,
-		signal: AbortSignal,
+		signals: RangeReadSignals,
 		private readonly onReleased: (range: RangeRead, isLost: boolean) => void
 	) {
-		this.filled = this.fill(object, watch, signal);
+		this.filled = this.fill(object, watch, signals);
 		void this.filled.catch(() => {
 			// `StoredNarChunks.readRange` or `stop` observes the outcome later.
 		});
@@ -326,7 +332,7 @@ class RangeRead {
 	private async fill(
 		object: StoredObject,
 		watch: ReadWatch,
-		signal: AbortSignal
+		{ stop: signal, cancelPendingRead }: RangeReadSignals
 	): Promise<ArrayBuffer> {
 		const part = await getStoredPart(
 			object,
@@ -340,14 +346,12 @@ class RangeRead {
 		}
 
 		const reader = part.body.getReader({ mode: 'byob' });
-		// A reader cancelled during a read can keep the buffer that the read was
-		// given. Only a stall or an outer abort cancels the read in progress. When
-		// the source closes for any other reason, `signal` stops the loop after
-		// that read, and the read returns the buffer.
-		const cancelOnStall = (): void => {
-			void cancelQuietly(reader.cancel(abortReason(watch.signal)));
+		// Cancelling a pending read can lose its buffer. Ordinary closure waits
+		// for the read to return it. A stall or discarded range cannot wait.
+		const cancelRead = (): void => {
+			void cancelQuietly(reader.cancel(abortReason(cancelPendingRead)));
 		};
-		watch.signal.addEventListener('abort', cancelOnStall, { once: true });
+		cancelPendingRead.addEventListener('abort', cancelRead, { once: true });
 
 		try {
 			let filled = 0;
@@ -382,7 +386,7 @@ class RangeRead {
 
 			return this.lease.buffer;
 		} finally {
-			watch.signal.removeEventListener('abort', cancelOnStall);
+			cancelPendingRead.removeEventListener('abort', cancelRead);
 			await cancelQuietly(reader.cancel());
 		}
 	}
@@ -462,7 +466,9 @@ class StoredNarChunks implements StoredNarChunkSource {
 	private missedOffset: number | undefined;
 	private skippedOffset: number | undefined;
 	private readonly closing = new AbortController();
+	private readonly stopPrefetch = new AbortController();
 	private readonly signal: AbortSignal;
+	private readonly prefetchSignals: RangeReadSignals;
 	private reading: Promise<unknown> = Promise.resolve();
 
 	constructor(
@@ -474,6 +480,13 @@ class StoredNarChunks implements StoredNarChunkSource {
 	) {
 		this.head = new SequentialBody(body, 0);
 		this.signal = AbortSignal.any([watch.signal, this.closing.signal]);
+		this.prefetchSignals = {
+			stop: AbortSignal.any([this.signal, this.stopPrefetch.signal]),
+			cancelPendingRead: AbortSignal.any([
+				watch.signal,
+				this.stopPrefetch.signal
+			])
+		};
 	}
 
 	private async next(): Promise<NarChunk | undefined> {
@@ -497,6 +510,10 @@ class StoredNarChunks implements StoredNarChunkSource {
 	}
 
 	private prefetch(): void {
+		if (this.prefetchSignals.stop.aborted) {
+			return;
+		}
+
 		while (this.held.size < maxRangeBuffersPerSource) {
 			const offset = this.nextRangeOffset();
 
@@ -534,7 +551,7 @@ class StoredNarChunks implements StoredNarChunkSource {
 				Math.min(this.buffers.bufferSize, this.object.size - offset),
 				lease,
 				this.watch,
-				this.signal,
+				this.prefetchSignals,
 				(released, isLost) => {
 					this.held.delete(released);
 					this.progress.lostRangeBuffers += isLost ? 1 : 0;
@@ -566,7 +583,29 @@ class StoredNarChunks implements StoredNarChunkSource {
 	}
 
 	private async readRange(range: RangeRead): Promise<NarChunk> {
-		const buffer = await range.filled;
+		let buffer: ArrayBuffer;
+
+		try {
+			buffer = await range.filled;
+		} catch (error) {
+			this.signal.throwIfAborted();
+
+			if (
+				!(error instanceof SubrequestTimeoutError) ||
+				error.subrequest !== 'r2.get'
+			) {
+				throw error;
+			}
+
+			// The queued ranges share one reserved head get. Use it to read to EOF.
+			this.stopPrefetch.abort(error);
+			for (const queued of this.ahead.splice(0)) {
+				void queued.stop();
+			}
+
+			return this.readHead();
+		}
+
 		const start = this.position - range.offset;
 		const size = Math.min(narChunkSize, range.length - start);
 		this.position += size;
