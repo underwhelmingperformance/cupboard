@@ -166,7 +166,7 @@ catalogs:
   default:
     '@aws-sdk/client-s3':
       specifier: ^3.1075.0
-      version: 3.1175.0
+      version: 3.1176.0
     '@cloudflare/workers-types':
       specifier: ^5.20260705.1
       version: 5.20261026.1
@@ -430,7 +430,7 @@ importers:
     dependencies:
       '@aws-sdk/client-s3':
         specifier: 'catalog:'
-        version: 3.1175.0
+        version: 3.1176.0
       '@cloudflare/workers-auth':
         specifier: ^0.15.0
         version: 0.15.1(msw@3.0.2(@types/node@25.9.9)(graphql@16.14.2)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.3(@types/node@25.9.9)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.1)))(vitest@4.1.12(@opentelemetry/api@1.10.0)(@types/node@25.9.9)(msw@3.0.2(@types/node@25.9.9)(graphql@16.14.2)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.3(@types/node@25.9.9)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.1)))(vite@8.3.3(@types/node@25.9.9)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.1)))
@@ -909,8 +909,8 @@ packages:
     resolution: {integrity: sha512-OgxgE64MkHNGtt7YJc2Q+d1maGnYcEkCw5r+UO7cM78iVzyMhXFVMgm5un1FZzk4XB8lv436zYduIWLH9ibdBg==}
     engines: {node: '>=20.0.0'}
 
-  '@aws-sdk/client-s3@3.1175.0':
-    resolution: {integrity: sha512-vBbIL3dsLsCLfoq7M8PXAybnPkFz7hbGiy6l+RCA81z6vXS88HfxPuxT+e3iuNjR4gXS7QxRSJa/4oSbsEc/Ag==}
+  '@aws-sdk/client-s3@3.1176.0':
+    resolution: {integrity: sha512-ZD0T/34Rx8cyCF7KjT9DpKbeeUjPvdDTgcOzdn/NOHQIQ3GdMc7NIdfea3GUBI+rFaxvlLsQ4auV1eNR8pvkAQ==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/core@3.981.1':
@@ -5911,7 +5911,7 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.8.1
 
-  '@aws-sdk/client-s3@3.1175.0':
+  '@aws-sdk/client-s3@3.1176.0':
     dependencies:
       '@aws-sdk/checksums': 3.1002.6
       '@aws-sdk/core': 3.981.1
