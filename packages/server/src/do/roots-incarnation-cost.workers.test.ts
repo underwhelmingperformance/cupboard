@@ -6,7 +6,8 @@ import { z } from 'zod';
 
 import {
 	deliverAlarms,
-	ignoreAlarmDeliveries
+	ignoreAlarmDeliveries,
+	runningAlarmHandlersOf
 } from '../alarm-fence.test-support.ts';
 import {
 	authorisedFetch,
@@ -90,7 +91,7 @@ const requests: readonly RootRequest[] = [
 		init: json('PUT', { targets: [targetPath] }),
 		cost: {
 			route: '/roots/{name}',
-			rowsRead: 47,
+			rowsRead: 45,
 			rowsWritten: 8,
 			d1Calls: 3,
 			d1RowsRead: 7,
@@ -104,7 +105,7 @@ const requests: readonly RootRequest[] = [
 		init: json('POST', { targets: [targetPath] }),
 		cost: {
 			route: '/roots/{name}/ensure',
-			rowsRead: 52,
+			rowsRead: 50,
 			rowsWritten: 8,
 			d1Calls: 3,
 			d1RowsRead: 7,
@@ -120,7 +121,7 @@ const requests: readonly RootRequest[] = [
 		}),
 		cost: {
 			route: '/roots/batch',
-			rowsRead: 50,
+			rowsRead: 48,
 			rowsWritten: 8,
 			d1Calls: 3,
 			d1RowsRead: 7,
@@ -134,7 +135,7 @@ const requests: readonly RootRequest[] = [
 		init: { method: 'DELETE' },
 		cost: {
 			route: '/roots/{name}',
-			rowsRead: 26,
+			rowsRead: 24,
 			rowsWritten: 5,
 			d1Calls: 1,
 			d1RowsRead: 1,
@@ -280,13 +281,20 @@ async function releaseState() {
 async function seededTenant(): Promise<string> {
 	await resetTestServer();
 	const token = await initialise();
-	await seedTenant(token);
-	// An alarm would drain the seeded releases before the request.
+	// An alarm handler would process the pushed path's attestation inheritance
+	// and drain the seeded releases and the removed cache's uploads, and how far
+	// it got before the measured request would change the cost. Deliveries stop
+	// before seeding, and a handler that is already running finishes first, so
+	// every measurement starts from the seeded rows.
 	const id = currentServer().id;
 	ignoreAlarmDeliveries(id);
 	onTestFinished(() => {
 		deliverAlarms(id);
 	});
+	await runInDurableObject(currentServer(), () =>
+		Promise.all(runningAlarmHandlersOf(id.toString()))
+	);
+	await seedTenant(token);
 
 	return token;
 }
@@ -377,7 +385,7 @@ describe('root request cost', () => {
 
 const repeatedRemovalCost: z.infer<typeof requestCostSchema> = {
 	route: '/roots/{name}',
-	rowsRead: 16,
+	rowsRead: 14,
 	rowsWritten: 0,
 	d1Calls: 1,
 	d1RowsRead: 1,
@@ -387,7 +395,7 @@ const repeatedRemovalCost: z.infer<typeof requestCostSchema> = {
 
 const unchangedEnsureCost: z.infer<typeof requestCostSchema> = {
 	route: '/roots/{name}/ensure',
-	rowsRead: 39,
+	rowsRead: 37,
 	rowsWritten: 1,
 	d1Calls: 3,
 	d1RowsRead: 7,
