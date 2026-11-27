@@ -52,6 +52,7 @@ import {
 } from '../test-support.ts';
 
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
+import { rowsReadBy } from './operation-cost.test-support.ts';
 import { type VerificationService } from './verification-service.ts';
 
 const methodLineSchema = z.object({
@@ -255,12 +256,11 @@ async function exhaustedCleanupCost(): Promise<{
 		const verification = (
 			instance as unknown as { verification: VerificationService }
 		).verification;
-		const { dbCost } = instance.context;
-		dbCost.recordOutstanding();
-		const before = dbCost.rowsRead;
-		const resolved = await verification.processExhaustedUploads(rootLogger());
-		dbCost.recordOutstanding();
-		return { resolved, rowsRead: dbCost.rowsRead - before };
+		let resolved = 0;
+		const rowsRead = await rowsReadBy(async () => {
+			resolved = await verification.processExhaustedUploads(rootLogger());
+		});
+		return { resolved, rowsRead };
 	});
 }
 
@@ -976,15 +976,8 @@ async function seedCacheIdentities(
 async function reconcileCost(): Promise<number> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		const service = new MaintenanceEligibilityService(instance.context);
-		const { dbCost } = instance.context;
-		dbCost.recordOutstanding();
-		const before = dbCost.rowsRead;
 
-		await service.reconcile();
-
-		dbCost.recordOutstanding();
-
-		return dbCost.rowsRead - before;
+		return rowsReadBy(() => service.reconcile());
 	});
 }
 
@@ -1027,22 +1020,35 @@ async function seedExpiredRoot(name: string): Promise<void> {
 	});
 }
 
+const requestLineSchema = z.object({ rowsRead: z.number() });
+
+// The rows that the negotiation request reads in its own request scope. That
+// scope includes the reconciliation that the request awaits, and leaves out
+// any alarm handler that runs at the same time.
 async function negotiateCost(
 	token: string,
 	storePathHash: string
-): Promise<number> {
-	return runInDurableObject(currentServer(), async (instance) => {
-		const { dbCost } = instance.context;
-		dbCost.recordOutstanding();
-		const before = dbCost.rowsRead;
+): Promise<number | undefined> {
+	const capture = startCapture();
 
-		const response = await negotiateViaInstance(instance, token, storePathHash);
-		expect(response.status).toBe(StatusCodes.OK);
+	try {
+		await runInDurableObject(currentServer(), async (instance) => {
+			const response = await negotiateViaInstance(
+				instance,
+				token,
+				storePathHash
+			);
+			expect(response.status).toBe(StatusCodes.OK);
+		});
+	} finally {
+		capture.stop();
+	}
 
-		dbCost.recordOutstanding();
+	const [cost] = capture.logs
+		.filter((entry) => entry.message === 'request finished')
+		.map((entry) => requestLineSchema.parse(entry.properties).rowsRead);
 
-		return dbCost.rowsRead - before;
-	});
+	return cost;
 }
 
 async function seedPendingUploads(
