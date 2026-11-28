@@ -22,18 +22,18 @@
 		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-plugin": "^1.9.0",
+		"@cloudflare/vitest-plugin": "1.9.0",
 		"@cloudflare/workers-types": "catalog:",
-		"@opentelemetry/context-async-hooks": "^3.0.0",
-		"@opentelemetry/sdk-trace": "^3.0.0",
+		"@opentelemetry/context-async-hooks": "3.0.0",
+		"@opentelemetry/sdk-trace": "3.0.0",
 		"@orpc/client": "catalog:",
 		"@orpc/contract": "catalog:",
 		"@orpc/openapi-client": "catalog:",
-		"age-encryption": "^0.3.1",
-		"drizzle-kit": "^0.31.10",
+		"age-encryption": "0.3.1",
+		"drizzle-kit": "0.31.10",
 		"typescript": "catalog:",
 		"vitest": "catalog:",
-		"wrangler": "^4.124.0"
+		"wrangler": "4.124.0"
 	},
 	"license": "AGPL-3.0-or-later",
 	"main": "src/worker.ts",
